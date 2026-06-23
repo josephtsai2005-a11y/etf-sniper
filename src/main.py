@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pytz
 from fetcher import fetch_all_etfs, aggregate_smart_money, get_last_trading_date
+from price_fetcher import enrich_with_prices, get_stock_price_single
 from sheets_writer import get_client, get_or_create_spreadsheet, write_all, read_history
 from analyzer import run_analysis
 
@@ -29,7 +30,11 @@ log = logging.getLogger(__name__)
 SPREADSHEET_ID   = os.environ.get("SPREADSHEET_ID", "")
 CREDENTIALS_PATH = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
 LINE_TOKEN       = os.environ.get("LINE_NOTIFY_TOKEN", "")
-TRADE_DATE       = os.environ.get("TRADE_DATE", get_last_trading_date())
+# 強制使用台灣今日日期（不受執行時間影響）
+import pytz as _pytz
+_tw_now = __import__("datetime").datetime.now(_pytz.timezone("Asia/Taipei"))
+_today_str = _tw_now.strftime("%Y%m%d")
+TRADE_DATE = os.environ.get("TRADE_DATE", _today_str)
 
 
 def send_line_notify(message: str):
@@ -70,7 +75,7 @@ def write_smart_money_to_sheets(ss, smart_df, trade_date: str):
     header_row = [f"⚡ 聰明錢名單 {trade_date}　更新：{now_tw().strftime('%H:%M')}"]
     ws_smart.append_row(header_row)
 
-    cols = ["排名", "股票代號", "股票名稱", "持有ETF數", "平均權重%", "訊號", "持有ETF清單"]
+    cols = ["排名", "股票代號", "股票名稱", "持有ETF數", "平均權重%", "訊號", "收盤價", "漲跌幅%", "MA20", "站上MA20", "持股市值(萬)", "持有ETF清單"]
     available = [c for c in cols if c in smart_df.columns]
     ws_smart.append_row(available)
 
@@ -135,6 +140,15 @@ def main():
     for _, row in smart_df.head(10).iterrows():
         log.info(f"  [{row.get('排名','?'):2}] {row.get('股票代號','')} {row.get('股票名稱',''):8} "
                  f"被 {row.get('持有ETF數',0):2d} 檔ETF持有  {row.get('訊號','')}")
+
+    # ── 階段二.五：串接股價（寫入前先抓） ──────────────────────
+    log.info("[+] 串接 TWSE 股價（收盤價、漲跌幅、持股市值）...")
+    try:
+        smart_df = enrich_with_prices(smart_df)
+        got = smart_df['收盤價'].notna().sum() if '收盤價' in smart_df.columns else 0
+        log.info(f"股價合併完成，有收盤價：{got} 檔")
+    except Exception as e:
+        log.warning(f"股價串接失敗（不影響主流程）: {e}")
 
     # ── 階段三：寫入 Google Sheets ──────────────────────────
     log.info("[3/3] 寫入 Google Sheets...")
