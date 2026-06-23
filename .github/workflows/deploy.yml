@@ -1,0 +1,59 @@
+name: Deploy to Cloud Run Jobs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: asia-east1
+  IMAGE: asia-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/etf-sniper/sniper-job
+  JOB_NAME: etf-sniper-daily
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker asia-east1-docker.pkg.dev
+
+      - name: Build and push image
+        run: |
+          docker build -t ${{ env.IMAGE }}:${{ github.sha }} .
+          docker push ${{ env.IMAGE }}:${{ github.sha }}
+          docker tag ${{ env.IMAGE }}:${{ github.sha }} ${{ env.IMAGE }}:latest
+          docker push ${{ env.IMAGE }}:latest
+
+      - name: Update Cloud Run Job
+        run: |
+          gcloud run jobs update ${{ env.JOB_NAME }} \
+            --image ${{ env.IMAGE }}:latest \
+            --region ${{ env.REGION }} \
+            --set-env-vars "SPREADSHEET_ID=${{ secrets.SPREADSHEET_ID }}" \
+            --set-secrets "GOOGLE_APPLICATION_CREDENTIALS=gcp-sa-json:latest" \
+            --set-env-vars "LINE_NOTIFY_TOKEN=${{ secrets.LINE_NOTIFY_TOKEN }}" \
+            || \
+          gcloud run jobs create ${{ env.JOB_NAME }} \
+            --image ${{ env.IMAGE }}:latest \
+            --region ${{ env.REGION }} \
+            --set-env-vars "SPREADSHEET_ID=${{ secrets.SPREADSHEET_ID }}" \
+            --set-secrets "GOOGLE_APPLICATION_CREDENTIALS=gcp-sa-json:latest" \
+            --set-env-vars "LINE_NOTIFY_TOKEN=${{ secrets.LINE_NOTIFY_TOKEN }}" \
+            --max-retries 1 \
+            --task-timeout 1800
+
+      - name: Verify deployment
+        run: |
+          echo "✅ 部署完成"
+          gcloud run jobs describe ${{ env.JOB_NAME }} --region ${{ env.REGION }} --format="value(status)"

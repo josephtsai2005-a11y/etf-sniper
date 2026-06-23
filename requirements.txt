@@ -1,0 +1,11 @@
+requests==2.31.0
+pandas==2.2.3
+numpy==1.26.4
+gspread==6.0.2
+google-auth==2.27.0
+google-auth-oauthlib==1.2.0
+beautifulsoup4==4.12.3
+lxml==5.2.2
+streamlit==1.35.0
+plotly==5.18.0
+pytz==2026.2
