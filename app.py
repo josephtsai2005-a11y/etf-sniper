@@ -1,7 +1,6 @@
 """
-app.py
-Streamlit 看板 — 讀取 Google Sheets 顯示狙擊名單與分析圖表
-執行：streamlit run app.py
+app.py — ETF 狙擊系統 Streamlit 看板
+資料來源：Google Sheets（由 Cloud Run Job 每日更新）
 """
 import streamlit as st
 import pandas as pd
@@ -12,9 +11,8 @@ from google.oauth2.service_account import Credentials
 import os
 from datetime import datetime
 
-# ── 頁面設定 ────────────────────────────────────────────────
 st.set_page_config(
-    page_title="投信主力狙擊系統",
+    page_title="ETF 狙擊系統",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -25,300 +23,332 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-SHEET_SNIPER   = "狙擊名單"
-SHEET_ANALYSIS = "籌碼分析庫"
-SHEET_HISTORY  = "歷史回測庫"
-SHEET_RAW      = "盤後原始數據庫"
+SHEET_SMART  = "聰明錢名單"
+SHEET_RAW    = "盤後原始數據庫"
 
 
-# ── Google Sheets 連線（支援 Streamlit Secrets） ──────────────
+# ── Google Sheets 連線 ───────────────────────────────────────
 @st.cache_resource
-def get_gspread_client():
+def get_client():
     try:
-        # Streamlit Cloud：從 st.secrets 讀取
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     except Exception:
-        # 本機：從檔案讀取
         cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "secrets/gcp-sa.json")
         creds = Credentials.from_service_account_file(cred_path, scopes=SCOPES)
     return gspread.authorize(creds)
 
 
-@st.cache_data(ttl=300)  # 5 分鐘快取
+@st.cache_data(ttl=300)
 def load_sheet(sheet_name: str) -> pd.DataFrame:
-    client = get_gspread_client()
-    spreadsheet_id = (
-        st.secrets.get("SPREADSHEET_ID", "")
-        or os.environ.get("SPREADSHEET_ID", "")
-    )
     try:
+        client = get_client()
+        spreadsheet_id = (
+            st.secrets.get("SPREADSHEET_ID", "")
+            or os.environ.get("SPREADSHEET_ID", "")
+        )
         ss = client.open_by_key(spreadsheet_id)
         ws = ss.worksheet(sheet_name)
-        data = ws.get_all_records()
-        return pd.DataFrame(data) if data else pd.DataFrame()
+        all_values = ws.get_all_values()
+
+        if not all_values or len(all_values) < 2:
+            return pd.DataFrame()
+
+        # 找欄位標題行（含「排名」或「股票代號」的那行）
+        header_idx = 0
+        for i, row in enumerate(all_values[:5]):
+            row_text = " ".join(str(c) for c in row)
+            if any(k in row_text for k in ["排名", "股票代號", "股票名稱", "代號"]):
+                header_idx = i
+                break
+
+        headers = all_values[header_idx]
+        data_rows = all_values[header_idx + 1:]
+        if not data_rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data_rows, columns=headers)
+        # 移除全空行
+        df = df[df.apply(lambda r: r.astype(str).str.strip().ne("").any(), axis=1)]
+        return df
+
     except Exception as e:
         st.error(f"無法載入 {sheet_name}: {e}")
         return pd.DataFrame()
 
 
-def score_color(score):
-    if score >= 7: return "🟢"
-    if score >= 5: return "🟡"
-    if score >= 3: return "🟠"
-    return "🔴"
+def get_update_time(sheet_name: str) -> str:
+    """從分頁第一行取得更新時間"""
+    try:
+        client = get_client()
+        spreadsheet_id = (
+            st.secrets.get("SPREADSHEET_ID", "")
+            or os.environ.get("SPREADSHEET_ID", "")
+        )
+        ss = client.open_by_key(spreadsheet_id)
+        ws = ss.worksheet(sheet_name)
+        first_row = ws.row_values(1)
+        return first_row[0] if first_row else ""
+    except:
+        return ""
 
 
-# ── Sidebar ──────────────────────────────────────────────────
+# ── Sidebar ─────────────────────────────────────────────────
 with st.sidebar:
     st.title("⚡ 狙擊系統")
     st.caption("投信主力追蹤 · 每日盤後更新")
     st.divider()
-    page = st.radio("頁面", ["今日狙擊名單", "個股深度分析", "ETF 覆蓋熱圖", "歷史績效"])
+
+    page = st.radio("頁面", [
+        "🎯 今日聰明錢名單",
+        "📊 ETF 覆蓋分析",
+        "📈 個股查詢",
+        "🗂️ 原始持股庫",
+    ])
+
     st.divider()
-    min_score = st.slider("最低狙擊分數", 0, 8, 5)
-    if st.button("🔄 重新整理資料", use_container_width=True):
+
+    if st.button("🔄 重新整理", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
-    st.caption(f"最後刷新：{datetime.now().strftime('%H:%M:%S')}")
+
+    update_time = get_update_time(SHEET_SMART)
+    if update_time:
+        st.caption(f"📅 {update_time}")
 
 
 # ══════════════════════════════════════════════════════════════
-# 頁面 1：今日狙擊名單
+# 頁面 1：今日聰明錢名單
 # ══════════════════════════════════════════════════════════════
-if page == "今日狙擊名單":
-    st.title("⚡ 今日狙擊名單")
+if page == "🎯 今日聰明錢名單":
+    st.title("🎯 今日聰明錢名單")
+    st.caption("被最多主動式ETF同時持有的股票 = 專業法人高度共識標的")
 
-    df = load_sheet(SHEET_SNIPER)
+    df = load_sheet(SHEET_SMART)
 
     if df.empty:
-        st.warning("尚無資料，請確認 Cloud Run Job 已執行或今日是否為交易日")
+        st.warning("尚無資料，請確認 Cloud Run Job 已執行")
         st.stop()
 
-    # 過濾第一行（可能是標題描述行）
-    if "sniper_score" in df.columns:
-        df["sniper_score"] = pd.to_numeric(df["sniper_score"], errors="coerce").fillna(0)
-        df = df[df["sniper_score"] >= min_score]
+    # 數字欄轉換
+    for col in ["持有ETF數", "平均權重%", "排名"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # 統計摘要
+    # 篩選器
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        min_etf = st.slider("最少被幾檔ETF持有", 1, 20, 3)
+
+    filtered = df[df["持有ETF數"] >= min_etf].copy() if "持有ETF數" in df.columns else df
+
+    # 摘要指標
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("符合標的", f"{len(df)} 檔")
-    c2.metric("滿分 (8/8)", f"{(df.get('sniper_score', pd.Series()) == 8).sum()} 檔")
-    c3.metric("高分 (≥7)", f"{(df.get('sniper_score', pd.Series()) >= 7).sum()} 檔")
-    c4.metric("連續建倉", f"{df.get('label', pd.Series('', index=df.index)).str.contains('🔥').sum()} 檔")
+    c1.metric("符合標的", f"{len(filtered)} 檔")
+    if "持有ETF數" in filtered.columns:
+        c2.metric("超高集中 (≥10檔)", f"{(filtered['持有ETF數'] >= 10).sum()} 檔")
+        c3.metric("高度共識 (≥5檔)", f"{(filtered['持有ETF數'] >= 5).sum()} 檔")
+        c4.metric("多方認同 (≥3檔)", f"{(filtered['持有ETF數'] >= 3).sum()} 檔")
 
     st.divider()
 
     # 主表格
-    display_cols = {
-        "排名": "排名",
-        "股票代號": "代號",
-        "股票名稱": "名稱",
-        "sniper_score": "分數",
-        "label": "標籤",
-        "etf_count": "ETF數",
-        "consec_buy_days": "連買天",
-        "trust_cum_5d": "5日累買(張)",
-        "above_ma20": "站月線",
-        "close": "收盤價",
-    }
-    available = {k: v for k, v in display_cols.items() if k in df.columns}
-    view = df[list(available.keys())].rename(columns=available)
-
-    # 加上顏色指示
-    if "分數" in view.columns:
-        view.insert(3, "強度", view["分數"].apply(score_color))
+    display_cols = ["排名", "股票代號", "股票名稱", "持有ETF數", "平均權重%", "訊號"]
+    available = [c for c in display_cols if c in filtered.columns]
 
     st.dataframe(
-        view,
+        filtered[available].reset_index(drop=True),
         use_container_width=True,
-        height=500,
+        height=520,
         hide_index=True,
+        column_config={
+            "持有ETF數": st.column_config.ProgressColumn(
+                "持有ETF數", min_value=0, max_value=34, format="%d 檔"
+            ),
+            "平均權重%": st.column_config.NumberColumn("平均權重%", format="%.2f%%"),
+        }
     )
 
-    # 分數分布長條圖
-    if "sniper_score" in df.columns and not df.empty:
-        st.subheader("籌碼分數分布")
-        score_dist = df["sniper_score"].value_counts().sort_index(ascending=False)
+    # 長條圖：Top 20
+    if "持有ETF數" in filtered.columns and "股票名稱" in filtered.columns:
+        st.subheader("Top 20 聰明錢集中度")
+        top20 = filtered.head(20).copy()
+        top20["標籤"] = top20["股票代號"].astype(str) + " " + top20["股票名稱"].astype(str)
+
         fig = px.bar(
-            x=score_dist.index,
-            y=score_dist.values,
-            labels={"x": "狙擊分數", "y": "股票數量"},
-            color=score_dist.index,
-            color_continuous_scale=["#E24B4A", "#EF9F27", "#1D9E75"],
+            top20,
+            x="持有ETF數",
+            y="標籤",
+            orientation="h",
+            color="持有ETF數",
+            color_continuous_scale=["#FFF3CD", "#FF8C00", "#1D9E75"],
+            labels={"持有ETF數": "持有該股的ETF數量", "標籤": ""},
         )
         fig.update_layout(
+            height=520,
+            yaxis={"categoryorder": "total ascending"},
             showlegend=False,
-            height=280,
-            margin=dict(t=10, b=10),
             plot_bgcolor="rgba(0,0,0,0)",
             paper_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=150, r=20, t=20, b=40),
         )
         st.plotly_chart(fig, use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════
-# 頁面 2：個股深度分析
+# 頁面 2：ETF 覆蓋分析
 # ══════════════════════════════════════════════════════════════
-elif page == "個股深度分析":
-    st.title("🔍 個股深度分析")
+elif page == "📊 ETF 覆蓋分析":
+    st.title("📊 ETF 覆蓋分析")
+    st.caption("哪些股票被最多主動式ETF同時納入持股")
 
-    analysis_df = load_sheet(SHEET_ANALYSIS)
-
-    if analysis_df.empty:
-        st.warning("分析庫尚無資料")
+    df = load_sheet(SHEET_SMART)
+    if df.empty:
+        st.warning("尚無資料")
         st.stop()
 
-    stocks = analysis_df["股票代號"].dropna().unique().tolist() if "股票代號" in analysis_df.columns else []
+    for col in ["持有ETF數", "平均權重%"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    if not stocks:
-        st.info("分析庫中尚無股票資料")
+    if "持有ETF數" not in df.columns:
+        st.warning("資料欄位不符")
         st.stop()
 
-    selected = st.selectbox("選擇股票", stocks)
-    stock_df = analysis_df[analysis_df["股票代號"] == selected]
+    # 分布圖
+    col1, col2 = st.columns(2)
 
-    if stock_df.empty:
-        st.info("尚無此股票資料")
-        st.stop()
+    with col1:
+        st.subheader("持有ETF數分布")
+        dist = df["持有ETF數"].value_counts().sort_index(ascending=False).head(15)
+        fig1 = px.bar(
+            x=dist.index, y=dist.values,
+            labels={"x": "持有ETF數", "y": "股票數量"},
+            color=dist.index,
+            color_continuous_scale=["#E6F1FB", "#1D9E75"],
+        )
+        fig1.update_layout(
+            showlegend=False, height=350,
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(fig1, use_container_width=True)
 
-    latest = stock_df.iloc[-1]
-    name = latest.get("股票名稱", selected)
+    with col2:
+        st.subheader("訊號分布")
+        if "訊號" in df.columns:
+            signal_counts = df["訊號"].value_counts()
+            fig2 = px.pie(
+                values=signal_counts.values,
+                names=signal_counts.index,
+                color_discrete_sequence=["#1D9E75", "#FF8C00", "#185FA5", "#888780"],
+                hole=0.5,
+            )
+            fig2.update_layout(height=350, paper_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig2, use_container_width=True)
 
-    st.subheader(f"{selected} {name}")
-
-    # 8 點雷達圖
-    score_cols = ["s1_trust_cum","s2_consec_buy","s3_above_ma20","s4_amount",
-                  "s5_vol_ratio","s6_amplitude","s7_fund_growth","s8_weight"]
-    score_labels = ["投信累買","連買趨勢","站月線","成交量","量能比","震幅","資金增幅","權重偵測"]
-
-    scores = [float(latest.get(c, 0)) for c in score_cols]
-
-    fig_radar = go.Figure(go.Scatterpolar(
-        r=scores + [scores[0]],
-        theta=score_labels + [score_labels[0]],
-        fill="toself",
-        fillcolor="rgba(29,158,117,0.2)",
-        line=dict(color="#1D9E75", width=2),
-    ))
-    fig_radar.update_layout(
-        polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
-        height=350,
-        margin=dict(t=20, b=20),
-        paper_bgcolor="rgba(0,0,0,0)",
-    )
-    st.plotly_chart(fig_radar, use_container_width=True)
-
-    # 各指標詳細
-    c1, c2 = st.columns(2)
-    with c1:
-        st.metric("狙擊總分", f"{int(latest.get('sniper_score', 0))} / 8")
-        st.metric("連續買超天數", f"{int(latest.get('consec_buy_days', 0))} 天")
-        st.metric("5日累計買超", f"{int(latest.get('trust_cum_5d', 0)):,} 張")
-    with c2:
-        st.metric("站上月線", "✅ 是" if latest.get("above_ma20") else "❌ 否")
-        st.metric("量能比", f"{float(latest.get('volume_ratio', 0)):.2f} 倍")
-        st.metric("被幾檔ETF持有", f"{int(latest.get('etf_count', 0))} 檔")
-
-    # 被哪些 ETF 持有
-    if "ETF代碼" in stock_df.columns:
-        etfs = stock_df["ETF代碼"].unique().tolist()
-        st.caption(f"持有此股的 ETF：{' · '.join(etfs)}")
+    # 持有ETF清單展開
+    if "持有ETF清單" in df.columns:
+        st.subheader("個股被哪些ETF持有")
+        top10 = df.head(10).copy()
+        for _, row in top10.iterrows():
+            code = row.get("股票代號", "")
+            name = row.get("股票名稱", "")
+            n = int(row.get("持有ETF數", 0))
+            etfs = row.get("持有ETF清單", "")
+            with st.expander(f"{code} {name}　— 被 {n} 檔ETF持有"):
+                st.write(etfs)
 
 
 # ══════════════════════════════════════════════════════════════
-# 頁面 3：ETF 覆蓋熱圖
+# 頁面 3：個股查詢
 # ══════════════════════════════════════════════════════════════
-elif page == "ETF 覆蓋熱圖":
-    st.title("🗺️ ETF 持股覆蓋熱圖")
-    st.caption("同時被多檔 ETF 持有的股票 → 主力集中度最高")
+elif page == "📈 個股查詢":
+    st.title("📈 個股查詢")
+
+    df = load_sheet(SHEET_SMART)
+    raw_df = load_sheet(SHEET_RAW)
+
+    if df.empty:
+        st.warning("尚無資料")
+        st.stop()
+
+    # 搜尋
+    search = st.text_input("輸入股票代號或名稱", placeholder="例如：2330 或 台積電")
+
+    if search:
+        mask = (
+            df.get("股票代號", pd.Series()).astype(str).str.contains(search) |
+            df.get("股票名稱", pd.Series()).astype(str).str.contains(search)
+        )
+        result = df[mask]
+    else:
+        result = df.head(20)
+
+    if result.empty:
+        st.info("找不到符合的股票")
+        st.stop()
+
+    # 顯示結果
+    for col in ["持有ETF數", "平均權重%"]:
+        if col in result.columns:
+            result[col] = pd.to_numeric(result[col], errors="coerce")
+
+    display_cols = ["排名", "股票代號", "股票名稱", "持有ETF數", "平均權重%", "訊號", "持有ETF清單"]
+    available = [c for c in display_cols if c in result.columns]
+    st.dataframe(result[available].reset_index(drop=True), use_container_width=True, hide_index=True)
+
+    # 個股在各ETF的權重
+    if not raw_df.empty and search and "股票代號" in raw_df.columns:
+        stock_data = raw_df[raw_df["股票代號"].astype(str).str.contains(search)]
+        if not stock_data.empty and "權重%" in stock_data.columns and "ETF代碼" in stock_data.columns:
+            st.subheader(f"各ETF中的持股權重")
+            stock_data["權重%"] = pd.to_numeric(stock_data["權重%"], errors="coerce")
+            fig = px.bar(
+                stock_data.sort_values("權重%", ascending=False),
+                x="ETF代碼", y="權重%",
+                color="權重%",
+                color_continuous_scale=["#E6F1FB", "#1D9E75"],
+            )
+            fig.update_layout(
+                height=350,
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════
+# 頁面 4：原始持股庫
+# ══════════════════════════════════════════════════════════════
+elif page == "🗂️ 原始持股庫":
+    st.title("🗂️ 原始持股庫")
+    st.caption("34 檔主動式ETF完整持股明細")
 
     raw_df = load_sheet(SHEET_RAW)
 
     if raw_df.empty:
-        st.warning("原始資料庫尚無資料")
+        st.warning("尚無原始資料")
         st.stop()
 
-    if "股票代號" not in raw_df.columns or "ETF代碼" not in raw_df.columns:
-        st.warning("資料欄位不符，請確認原始庫格式")
-        st.stop()
+    # 篩選器
+    col1, col2 = st.columns(2)
+    with col1:
+        if "ETF代碼" in raw_df.columns:
+            etf_list = ["全部"] + sorted(raw_df["ETF代碼"].dropna().unique().tolist())
+            selected_etf = st.selectbox("選擇ETF", etf_list)
+    with col2:
+        search_stock = st.text_input("搜尋股票", placeholder="代號或名稱")
 
-    # 找出被最多 ETF 持有的股票
-    coverage = (
-        raw_df.groupby("股票代號")["ETF代碼"]
-        .nunique()
-        .reset_index()
-        .rename(columns={"ETF代碼": "ETF涵蓋數"})
-        .sort_values("ETF涵蓋數", ascending=False)
-        .head(30)
-    )
-
-    if "股票名稱" in raw_df.columns:
-        name_map = raw_df.drop_duplicates("股票代號")[["股票代號", "股票名稱"]]
-        coverage = coverage.merge(name_map, on="股票代號", how="left")
-
-    fig = px.bar(
-        coverage,
-        x="股票代號",
-        y="ETF涵蓋數",
-        color="ETF涵蓋數",
-        color_continuous_scale=["#E6F1FB", "#1D9E75"],
-        hover_data=["股票名稱"] if "股票名稱" in coverage.columns else None,
-        labels={"ETF涵蓋數": "持有該股的ETF數量"},
-    )
-    fig.update_layout(
-        height=400,
-        xaxis_tickangle=-45,
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    st.dataframe(coverage, use_container_width=True, hide_index=True)
-
-
-# ══════════════════════════════════════════════════════════════
-# 頁面 4：歷史績效
-# ══════════════════════════════════════════════════════════════
-elif page == "歷史績效":
-    st.title("📈 歷史績效追蹤")
-
-    hist_df = load_sheet(SHEET_HISTORY)
-
-    if hist_df.empty:
-        st.warning("歷史庫尚無資料（需累積幾日資料才能顯示趨勢）")
-        st.stop()
-
-    if "抓取日期" in hist_df.columns:
-        dates = sorted(hist_df["抓取日期"].unique(), reverse=True)
-        st.caption(f"資料涵蓋日期：{dates[-1]} ～ {dates[0]}，共 {len(dates)} 個交易日")
-
-    # 每日高分標的數量趨勢
-    if "sniper_score" in hist_df.columns and "抓取日期" in hist_df.columns:
-        hist_df["sniper_score"] = pd.to_numeric(hist_df["sniper_score"], errors="coerce").fillna(0)
-        daily_count = (
-            hist_df[hist_df["sniper_score"] >= 5]
-            .groupby("抓取日期")
-            .size()
-            .reset_index(name="高分標的數")
+    filtered = raw_df.copy()
+    if "ETF代碼" in filtered.columns and selected_etf != "全部":
+        filtered = filtered[filtered["ETF代碼"] == selected_etf]
+    if search_stock and "股票代號" in filtered.columns:
+        mask = (
+            filtered["股票代號"].astype(str).str.contains(search_stock) |
+            filtered.get("股票名稱", pd.Series()).astype(str).str.contains(search_stock)
         )
-        fig = px.line(
-            daily_count,
-            x="抓取日期",
-            y="高分標的數",
-            markers=True,
-            title="每日 5分以上標的數量趨勢",
-        )
-        fig.update_traces(line_color="#1D9E75")
-        fig.update_layout(
-            height=300,
-            plot_bgcolor="rgba(0,0,0,0)",
-            paper_bgcolor="rgba(0,0,0,0)",
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        filtered = filtered[mask]
 
-    # 歷史明細表
-    display_cols = ["抓取日期","股票代號","股票名稱","sniper_score","label","close"]
-    available = [c for c in display_cols if c in hist_df.columns]
-    st.dataframe(hist_df[available].sort_values("抓取日期", ascending=False),
-                 use_container_width=True, hide_index=True)
+    st.caption(f"顯示 {len(filtered)} 筆")
+    st.dataframe(filtered.reset_index(drop=True), use_container_width=True, height=600, hide_index=True)
