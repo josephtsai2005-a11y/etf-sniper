@@ -166,7 +166,7 @@ if page == "⚡ 今日訊號":
     # 主表格
     display_cols = ["排名","股票代號","股票名稱","主要狀態",
                     "加碼ETF數","減碼ETF數","新增ETF數","清倉ETF數",
-                    "總變動張數","總資金動向","收盤價"]
+                    "總變動張數","平均權重變動%","總資金動向","收盤價"]
     available = [c for c in display_cols if c in filtered.columns]
 
     st.dataframe(
@@ -175,11 +175,12 @@ if page == "⚡ 今日訊號":
         height=500,
         hide_index=True,
         column_config={
-            "總變動張數": st.column_config.NumberColumn("總變動張數", format="%.1f 張"),
-            "總資金動向": st.column_config.NumberColumn("資金動向(萬)", format="%.1f 萬"),
-            "收盤價":     st.column_config.NumberColumn("收盤價", format="%.1f"),
-            "加碼ETF數":  st.column_config.NumberColumn("加碼ETF", format="%d"),
-            "減碼ETF數":  st.column_config.NumberColumn("減碼ETF", format="%d"),
+            "總變動張數":    st.column_config.NumberColumn("總變動張數", format="%.1f 張"),
+            "平均權重變動%": st.column_config.NumberColumn("權重變動%", format="%.2f%%"),
+            "總資金動向":   st.column_config.NumberColumn("資金動向(萬)", format="%.1f 萬"),
+            "收盤價":       st.column_config.NumberColumn("收盤價", format="%.1f"),
+            "加碼ETF數":    st.column_config.NumberColumn("加碼ETF", format="%d"),
+            "減碼ETF數":    st.column_config.NumberColumn("減碼ETF", format="%d"),
         }
     )
 

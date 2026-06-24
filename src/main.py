@@ -124,7 +124,7 @@ def _write_diff_to_sheets(ss, stock_diff, diff_detail, trade_date):
     if not stock_diff.empty:
         cols = ["排名","股票代號","股票名稱","主要狀態",
                 "加碼ETF數","減碼ETF數","新增ETF數","清倉ETF數",
-                "總變動張數","總資金動向","收盤價"]
+                "總變動張數","平均權重變動%","總資金動向","收盤價"]
         available = [c for c in cols if c in stock_diff.columns]
         ws_diff.append_row(available)
         rows = stock_diff[available].fillna("").values.tolist()

@@ -198,16 +198,27 @@ def aggregate_stock_diff(diff_df: pd.DataFrame) -> pd.DataFrame:
 
     code_col = "股票代號"
 
-    agg = diff_df.groupby(code_col).agg(
-        股票名稱=("股票名稱", "first"),
-        加碼ETF數=("狀態", lambda x: (x == "🔺 加碼").sum()),
-        減碼ETF數=("狀態", lambda x: (x == "🔻 減碼").sum()),
-        新增ETF數=("狀態", lambda x: (x == "🆕 新增").sum()),
-        清倉ETF數=("狀態", lambda x: (x == "🗑️ 清倉").sum()),
-        總變動張數=("變動張數", "sum"),
-        總資金動向=("資金動向(萬)", "sum") if "資金動向(萬)" in diff_df.columns else ("變動張數", "sum"),
-        收盤價=("收盤價", "first") if "收盤價" in diff_df.columns else ("股票代號", "count"),
-    ).reset_index()
+    # 計算各欄位是否存在
+    has_amount  = "資金動向(萬)" in diff_df.columns
+    has_price   = "收盤價" in diff_df.columns
+    has_weight  = "權重變動%" in diff_df.columns
+
+    agg_dict = {
+        "股票名稱":  ("股票名稱", "first"),
+        "加碼ETF數": ("狀態", lambda x: (x == "🔺 加碼").sum()),
+        "減碼ETF數": ("狀態", lambda x: (x == "🔻 減碼").sum()),
+        "新增ETF數": ("狀態", lambda x: (x == "🆕 新增").sum()),
+        "清倉ETF數": ("狀態", lambda x: (x == "🗑️ 清倉").sum()),
+        "總變動張數": ("變動張數", "sum"),
+    }
+    if has_amount:
+        agg_dict["總資金動向"] = ("資金動向(萬)", "sum")
+    if has_price:
+        agg_dict["收盤價"] = ("收盤價", "first")
+    if has_weight:
+        agg_dict["平均權重變動%"] = ("權重變動%", "mean")
+
+    agg = diff_df.groupby(code_col).agg(**agg_dict).reset_index()
 
     # 主要狀態標籤
     def main_status(row):
@@ -227,8 +238,9 @@ def aggregate_stock_diff(diff_df: pd.DataFrame) -> pd.DataFrame:
     # 排序：加碼 → 新增 → 混合 → 減碼 → 清倉
     order = {"🔺 加碼": 0, "🆕 新增": 1, "🔀 混合": 2, "🔻 減碼": 3, "🗑️ 清倉": 4}
     agg["排序"] = agg["主要狀態"].map(order).fillna(5)
+    sort_col = "平均權重變動%" if "平均權重變動%" in agg.columns else "總資金動向" if "總資金動向" in agg.columns else "總變動張數"
     agg = agg.sort_values(
-        ["排序", "總資金動向"],
+        ["排序", sort_col],
         ascending=[True, False]
     ).drop("排序", axis=1).reset_index(drop=True)
     agg.insert(0, "排名", range(1, len(agg) + 1))
