@@ -326,6 +326,7 @@ def main():
     try:
         client = get_client(CREDENTIALS_PATH)
         ss = get_or_create_spreadsheet(client, SPREADSHEET_ID)
+        import time as _t; _t.sleep(10)
         write_smart_money_to_sheets(ss, smart_df, TRADE_DATE)
         log.info("Google Sheets 寫入完成！")
     except Exception as e:
@@ -355,6 +356,7 @@ def main():
                 stock_diff = aggregate_stock_diff(diff_detail)
 
                 # 寫入 Sheets
+                import time as _t; _t.sleep(30)
                 _write_diff_to_sheets(ss2, stock_diff, diff_detail, TRADE_DATE)
                 log.info(f"差異比對完成：{len(stock_diff)} 檔有變動")
             else:
@@ -374,6 +376,7 @@ def main():
             log.info(f"自動偵測熱詞：{hot_words[:10]}")
 
             # 寫入新聞歷史庫
+            import time as _t; _t.sleep(30)
             _write_news_to_sheets(ss2, news_df, TRADE_DATE)
 
             # 讀取歷史新聞做趨勢分析
@@ -436,8 +439,9 @@ def main():
                 for _df in [trends_signal, cross_df2]:
                     if not _df.empty and "排名" in _df.columns:
                         _df.drop(columns=["排名"], inplace=True)
-                _write_trends_to_sheets(ss2, trends_signal, cross_df2, TRADE_DATE)
-                log.info(f"Google Trends 完成：{len(trends_signal)} 個主題")
+                import time as _t; _t.sleep(30)
+            _write_trends_to_sheets(ss2, trends_signal, cross_df2, TRADE_DATE)
+            log.info(f"Google Trends 完成：{len(trends_signal)} 個主題")
         else:
             log.warning("缺少 SERPAPI_KEY，跳過 Google Trends")
     except Exception as e:

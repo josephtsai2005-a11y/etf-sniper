@@ -4,6 +4,8 @@ institutional_fetcher.py
 來源：TWSE 公開資料
 外資 + 投信 + 自營商 每日買賣超
 """
+from unittest import result
+
 import requests
 import pandas as pd
 import time
@@ -141,29 +143,63 @@ def fetch_batch_institutional(
     delay: float = 0.4,
 ) -> pd.DataFrame:
     """
-    批次抓取多檔股票三大法人資料
+    一次抓取全市場三大法人資料，再篩選需要的股票
     """
     if not trade_date:
         trade_date = get_trade_date()
 
-    records = []
-    total = len(stock_codes)
+    url = "https://www.twse.com.tw/fund/T86"
+    params = {"response": "json", "date": trade_date, "selectType": "ALL"}
 
-    for i, code in enumerate(stock_codes, 1):
-        result = fetch_institutional_by_stock(str(code), trade_date)
-        if result:
-            records.append(result)
-        if i % 10 == 0:
-            log.info(f"  法人資料進度 {i}/{total}")
-        time.sleep(delay)
+    try:
+        resp = SESSION.get(url, params=params, timeout=20)
+        data = resp.json()
 
-    if not records:
-        log.warning("批次法人資料：無結果")
+        if data.get("stat") != "OK" or not data.get("data"):
+            log.warning(f"三大法人全市場無資料 ({trade_date})")
+            return pd.DataFrame()
+
+        fields = data.get("fields", [])
+        rows   = data.get("data", [])
+
+        # 欄位有重複，直接用位置處理
+        # 格式：[*, 代號, 名稱, 外資買進, 外資賣出, 外資買賣超, 投信買進, 投信賣出, 投信買賣超, 自營買進, 自營賣出, 自營買賣超]
+        records = []
+        codes_set = set(str(c).strip() for c in stock_codes)
+
+        for row in rows:
+            if len(row) < 12:
+                continue
+            code = str(row[0]).strip().replace("*","").strip()
+            if code not in codes_set:
+                continue
+            name = str(row[1]).strip()
+
+            def to_num(v):
+                try: return float(str(v).replace(",","").replace("+","").strip())
+                except: return 0.0
+
+            records.append({
+                "股票代號":   code,
+                "股票名稱":   name,
+                "外資買賣超": to_num(row[4]),
+                "投信買賣超": to_num(row[10]),
+                "自營買賣超": to_num(row[11]),
+                "三大合計":   to_num(row[18]),
+                "抓取日期":   trade_date,
+            })
+
+        if not records:
+            log.warning(f"三大法人：篩選後無符合股票（共 {len(rows)} 筆原始資料）")
+            return pd.DataFrame()
+
+        result = pd.DataFrame(records)
+        log.info(f"三大法人全市場：總計 {len(rows)} 筆，篩選出 {len(result)} 檔")
+        return result.reset_index(drop=True)
+
+    except Exception as e:
+        log.error(f"三大法人全市場失敗: {e}")
         return pd.DataFrame()
-
-    df = pd.DataFrame(records)
-    log.info(f"批次法人資料完成：{len(df)}/{total} 筆")
-    return df
 
 
 def compute_institutional_signal(inst_df: pd.DataFrame) -> pd.DataFrame:
@@ -213,6 +249,8 @@ def compute_institutional_signal(inst_df: pd.DataFrame) -> pd.DataFrame:
     df["排序"] = df["法人訊號"].map(order).fillna(8)
     df = df.sort_values(["排序","三大合計"], ascending=[True,False])
     df = df.drop("排序", axis=1).reset_index(drop=True)
+    if "排名" in df.columns:
+        df = df.drop(columns=["排名"])
     df.insert(0, "排名", range(1, len(df)+1))
 
     buy3 = (df["買超法人數"] == 3).sum()
@@ -268,6 +306,8 @@ def cross_with_etf(inst_df: pd.DataFrame, smart_df: pd.DataFrame) -> pd.DataFram
     result = merged[merged["買超法人數"] >= 0].copy()
     result = result.sort_values(["綜合評分","三大合計"], ascending=[False,False])
     result = result.reset_index(drop=True)
+    if "排名" in result.columns:
+        result = result.drop(columns=["排名"])
     result.insert(0, "排名", range(1, len(result)+1))
 
     strong = (result["買超法人數"] >= 2) & (pd.to_numeric(result.get("持有ETF數",0), errors="coerce") >= 5)
