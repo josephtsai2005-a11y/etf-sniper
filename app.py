@@ -31,6 +31,8 @@ SHEET_TREND  = "題材趨勢"
 SHEET_CROSS  = "新聞×籌碼交叉"
 SHEET_INST   = "三大法人"
 SHEET_MULTI  = "多方驗證名單"
+SHEET_RETAIL = "散戶情緒"
+SHEET_POS    = "題材位置"
 
 
 @st.cache_resource
@@ -115,10 +117,11 @@ with st.sidebar:
     page = st.radio("頁面", [
         "🏆 多方驗證名單",
         "⚡ 今日訊號",
-        "🎯 今日聰明錢名單",
         "🏦 三大法人",
         "📰 題材趨勢",
         "🔗 新聞×籌碼交叉",
+        "📱 散戶情緒",
+        "🎯 今日聰明錢名單",
         "📊 ETF 覆蓋分析",
         "📈 個股查詢",
         "🗂️ 原始持股庫",
@@ -578,6 +581,92 @@ elif page == "🔗 新聞×籌碼交叉":
             "最高成長率%": st.column_config.NumberColumn("題材成長率%", format="%.1f%%"),
         }
     )
+
+# ══════════════════════════════════════════════════════════════
+# 頁面：散戶情緒（Google Trends）
+# ══════════════════════════════════════════════════════════════
+elif page == "📱 散戶情緒":
+    st.title("📱 散戶情緒指標")
+    st.caption("Google Trends 搜尋量 — 散戶關注度越低，越是法人布局期")
+
+    retail_df = load_sheet(SHEET_RETAIL)
+    pos_df    = load_sheet(SHEET_POS)
+
+    if retail_df.empty:
+        st.warning("尚無散戶情緒資料")
+        st.stop()
+
+    num_cols(retail_df, ["當前搜尋量","近3日均","近7日均","搜尋成長%","峰值","相對峰值%"])
+
+    # 摘要
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("💤 最佳布局", f"{retail_df['散戶關注度'].str.contains('淡漠',na=False).sum()} 個")
+    c2.metric("🌱 法人期",   f"{retail_df['散戶關注度'].str.contains('萌芽',na=False).sum()} 個")
+    c3.metric("⚡ 注意",     f"{retail_df['散戶關注度'].str.contains('追進',na=False).sum()} 個")
+    c4.metric("🔥 危險",     f"{retail_df['散戶關注度'].str.contains('爆買',na=False).sum()} 個")
+
+    st.divider()
+
+    # 主表格
+    display_cols = ["排名","主題","散戶關注度","進場訊號","當前搜尋量","搜尋成長%","相對峰值%"]
+    avail = [c for c in display_cols if c in retail_df.columns]
+
+    # 顏色標記
+    def highlight_signal(val):
+        if "最佳" in str(val) or "法人期" in str(val):
+            return "background-color: #E8F5E9"
+        elif "注意" in str(val) or "謹慎" in str(val):
+            return "background-color: #FFF3E0"
+        elif "危險" in str(val) or "爆買" in str(val):
+            return "background-color: #FFEBEE"
+        return ""
+
+    st.dataframe(
+        retail_df[avail].reset_index(drop=True),
+        use_container_width=True, height=420, hide_index=True,
+        column_config={
+            "當前搜尋量":  st.column_config.ProgressColumn("搜尋量", min_value=0, max_value=100, format="%d"),
+            "相對峰值%":   st.column_config.NumberColumn("相對峰值%", format="%.0f%%"),
+            "搜尋成長%":   st.column_config.NumberColumn("搜尋成長%", format="%.1f%%"),
+        }
+    )
+
+    # 散點圖：搜尋量 vs 進場訊號
+    st.subheader("散戶關注度 vs 搜尋趨勢")
+    if "搜尋成長%" in retail_df.columns and "當前搜尋量" in retail_df.columns:
+        stage_colors = {
+            "💤 散戶淡漠": "#1D9E75",
+            "🌱 散戶萌芽": "#4CAF50",
+            "⚡ 散戶追進": "#FF8C00",
+            "🔥 散戶爆買": "#E24B4A",
+            "📉 散戶退場": "#888780",
+        }
+        fig = px.scatter(
+            retail_df, x="當前搜尋量", y="搜尋成長%",
+            color="散戶關注度", text="主題",
+            color_discrete_map=stage_colors,
+            size_max=20,
+            labels={"當前搜尋量":"Google搜尋量（0-100）","搜尋成長%":"7日搜尋成長%"},
+        )
+        fig.update_traces(textposition="top center", textfont_size=11)
+        fig.add_vline(x=30, line_dash="dot", line_color="orange",
+                      annotation_text="散戶開始注意", opacity=0.7)
+        fig.add_vline(x=60, line_dash="dot", line_color="red",
+                      annotation_text="散戶爆買警戒", opacity=0.7)
+        fig.update_layout(height=400, plot_bgcolor="rgba(0,0,0,0)",
+                          paper_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # 題材位置交叉表
+    if not pos_df.empty:
+        st.subheader("📍 題材位置分析（新聞 × 搜尋）")
+        st.caption("新聞熱但搜尋冷 = 法人期 = 最佳進場時機")
+        pos_display = ["排名","主題","題材位置","新聞篇數","當前搜尋量"]
+        pos_avail = [c for c in pos_display if c in pos_df.columns]
+        if pos_avail:
+            st.dataframe(pos_df[pos_avail].reset_index(drop=True),
+                        use_container_width=True, height=350, hide_index=True)
+
 
 # ══════════════════════════════════════════════════════════════
 # 頁面 1：今日聰明錢名單

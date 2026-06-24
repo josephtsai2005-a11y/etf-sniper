@@ -131,7 +131,7 @@ def _write_trends_to_sheets(ss, trends_df, cross_df, trade_date):
             rows = df.fillna("").values.tolist()
             ws.append_rows(rows, value_input_option="USER_ENTERED")
         log.info(f"{sheet_name} 寫入完成")
-        time.sleep(15)
+        time.sleep(5)
 
 
 def _write_institutional_to_sheets(ss, inst_df, cross_df, trade_date):
@@ -426,8 +426,6 @@ def main():
                     pivot2 = compute_keyword_timeseries(news_hist2)
                     news_trend2 = compute_trend_report(pivot2)
                     cross_df2 = cross_news_and_trends(news_trend2, trends_signal)
-                    if not cross_df2.empty and "排名" in cross_df2.columns:
-                        cross_df2 = cross_df2.drop(columns=["排名"])
                 # 強制移除重複排名欄
                 cross_df2 = cross_df2.loc[:,~cross_df2.columns.duplicated()]
                 if "排名" in cross_df2.columns:
