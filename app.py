@@ -29,6 +29,8 @@ SHEET_DIFF   = "今日訊號"
 SHEET_DETAIL = "持股異動明細"
 SHEET_TREND  = "題材趨勢"
 SHEET_CROSS  = "新聞×籌碼交叉"
+SHEET_INST   = "三大法人"
+SHEET_MULTI  = "多方驗證名單"
 
 
 @st.cache_resource
@@ -111,10 +113,12 @@ with st.sidebar:
     st.divider()
 
     page = st.radio("頁面", [
+        "🏆 多方驗證名單",
         "⚡ 今日訊號",
+        "🎯 今日聰明錢名單",
+        "🏦 三大法人",
         "📰 題材趨勢",
         "🔗 新聞×籌碼交叉",
-        "🎯 今日聰明錢名單",
         "📊 ETF 覆蓋分析",
         "📈 個股查詢",
         "🗂️ 原始持股庫",
@@ -132,9 +136,155 @@ with st.sidebar:
 
 
 # ══════════════════════════════════════════════════════════════
+# 頁面：多方驗證名單（最重要的頁面）
+# ══════════════════════════════════════════════════════════════
+if page == "🏆 多方驗證名單":
+    st.title("🏆 多方驗證名單")
+    st.caption("ETF持股 × 三大法人 × 新聞題材 × 技術面 — 多重確認的高機率標的")
+
+    multi_df = load_sheet(SHEET_MULTI)
+
+    if multi_df.empty:
+        st.warning("尚無多方驗證資料（需等今日 16:30 後三大法人資料入庫）")
+        st.info("💡 系統每日 15:30 自動執行，16:30 後法人資料加入，產出完整驗證名單")
+
+        # 先顯示聰明錢名單作為替代
+        st.subheader("目前可參考：今日聰明錢名單")
+        smart_df = load_sheet(SHEET_SMART)
+        if not smart_df.empty:
+            num_cols(smart_df, ["持有ETF數","平均權重%"])
+            cols = ["排名","股票代號","股票名稱","持有ETF數","平均權重%","訊號"]
+            avail = [c for c in cols if c in smart_df.columns]
+            st.dataframe(smart_df[avail].head(15), use_container_width=True, hide_index=True)
+        st.stop()
+
+    num_cols(multi_df, ["持有ETF數","買超法人數","綜合評分","三大合計","收盤價","漲跌幅%"])
+
+    # 摘要
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("總標的", f"{len(multi_df)} 檔")
+    c2.metric("🔥 三大齊買", f"{(multi_df.get('買超法人數',pd.Series())==3).sum()} 檔")
+    c3.metric("⭐ 綜合評分≥7", f"{(pd.to_numeric(multi_df.get('綜合評分',pd.Series()),errors='coerce')>=7).sum()} 檔")
+    c4.metric("✅ 多重確認", f"{multi_df.get('多方驗證',pd.Series()).str.count('✅').ge(3).sum()} 檔")
+
+    st.divider()
+
+    # 篩選
+    col1, col2 = st.columns(2)
+    with col1:
+        min_score = st.slider("最低綜合評分", 0.0, 10.0, 5.0, 0.5)
+    with col2:
+        min_inst = st.slider("最少買超法人數", 0, 3, 1)
+
+    filtered = multi_df.copy()
+    if "綜合評分" in filtered.columns:
+        filtered = filtered[pd.to_numeric(filtered["綜合評分"],errors="coerce").fillna(0) >= min_score]
+    if "買超法人數" in filtered.columns:
+        filtered = filtered[pd.to_numeric(filtered["買超法人數"],errors="coerce").fillna(0) >= min_inst]
+
+    display_cols = ["排名","股票代號","股票名稱","持有ETF數","買超法人數",
+                    "法人訊號","綜合評分","多方驗證","三大合計","收盤價","漲跌幅%"]
+    avail = [c for c in display_cols if c in filtered.columns]
+
+    st.dataframe(
+        filtered[avail].reset_index(drop=True),
+        use_container_width=True, height=520, hide_index=True,
+        column_config={
+            "持有ETF數":  st.column_config.ProgressColumn("ETF持有", min_value=0, max_value=34, format="%d"),
+            "買超法人數": st.column_config.ProgressColumn("買超法人", min_value=0, max_value=3, format="%d"),
+            "綜合評分":   st.column_config.NumberColumn("綜合評分", format="%.1f ⭐"),
+            "三大合計":   st.column_config.NumberColumn("法人合計(張)", format="%.0f"),
+            "收盤價":     st.column_config.NumberColumn("收盤價", format="%.1f"),
+            "漲跌幅%":    st.column_config.NumberColumn("漲跌幅%", format="%.2f%%"),
+        }
+    )
+
+    # 綜合評分散點圖
+    if "綜合評分" in filtered.columns and "持有ETF數" in filtered.columns:
+        plot_df = filtered[filtered["綜合評分"].notna() & filtered["持有ETF數"].notna()].copy()
+        if not plot_df.empty:
+            st.subheader("綜合評分分布")
+            fig = px.scatter(
+                plot_df,
+                x="持有ETF數", y="綜合評分",
+                color="法人訊號" if "法人訊號" in plot_df.columns else None,
+                text="股票名稱" if "股票名稱" in plot_df.columns else None,
+                size_max=20,
+                labels={"持有ETF數":"ETF持有數","綜合評分":"綜合評分"},
+            )
+            fig.update_traces(textposition="top center", textfont_size=10)
+            fig.add_hline(y=7, line_dash="dot", line_color="#1D9E75", opacity=0.7,
+                          annotation_text="評分7分門檻")
+            fig.update_layout(height=400, plot_bgcolor="rgba(0,0,0,0)",
+                              paper_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig, use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════
+# 頁面：三大法人
+# ══════════════════════════════════════════════════════════════
+elif page == "🏦 三大法人":
+    st.title("🏦 三大法人買賣超")
+    st.caption("外資 + 投信 + 自營商 每日買賣超彙整")
+
+    inst_df = load_sheet(SHEET_INST)
+
+    if inst_df.empty:
+        st.warning("尚無三大法人資料（每日 16:30 後更新）")
+        st.stop()
+
+    num_cols(inst_df, ["外資買賣超","投信買賣超","自營買賣超","三大合計","買超法人數"])
+
+    # 摘要
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("三大齊買", f"{(inst_df.get('買超法人數',pd.Series())==3).sum()} 檔")
+    c2.metric("外資買超", f"{(inst_df.get('外資買賣超',pd.Series())>0).sum()} 檔")
+    c3.metric("投信買超", f"{(inst_df.get('投信買賣超',pd.Series())>0).sum()} 檔")
+    c4.metric("自營買超", f"{(inst_df.get('自營買賣超',pd.Series())>0).sum()} 檔")
+
+    st.divider()
+
+    signal_filter = st.multiselect("篩選法人訊號",
+        ["🔥 三大齊買","⚡ 外資+投信","⚡ 外資主導","⚡ 雙向買超","🌱 投信單買","🌱 外資單買"],
+        default=["🔥 三大齊買","⚡ 外資+投信","⚡ 外資主導"])
+
+    filtered = inst_df.copy()
+    if signal_filter and "法人訊號" in filtered.columns:
+        filtered = filtered[filtered["法人訊號"].isin(signal_filter)]
+
+    display_cols = ["排名","股票代號","外資買賣超","投信買賣超","自營買賣超","三大合計","買超法人數","法人訊號"]
+    avail = [c for c in display_cols if c in filtered.columns]
+    st.dataframe(filtered[avail].reset_index(drop=True),
+                 use_container_width=True, height=500, hide_index=True,
+                 column_config={
+                     "外資買賣超": st.column_config.NumberColumn("外資(張)", format="%.0f"),
+                     "投信買賣超": st.column_config.NumberColumn("投信(張)", format="%.0f"),
+                     "自營買賣超": st.column_config.NumberColumn("自營(張)", format="%.0f"),
+                     "三大合計":   st.column_config.NumberColumn("合計(張)", format="%.0f"),
+                 })
+
+    # 資金流向長條圖
+    if "三大合計" in filtered.columns and not filtered.empty:
+        st.subheader("三大法人資金流向")
+        top = pd.concat([
+            filtered.nlargest(10,"三大合計"),
+            filtered.nsmallest(5,"三大合計")
+        ]).drop_duplicates()
+        top["標籤"] = top["股票代號"].astype(str)
+        fig = px.bar(top.sort_values("三大合計"), x="三大合計", y="標籤",
+            orientation="h", color="三大合計",
+            color_continuous_scale=["#E24B4A","#CCCCCC","#1D9E75"],
+            labels={"三大合計":"三大法人合計(張)","標籤":""})
+        fig.add_vline(x=0, line_dash="dot", line_color="gray")
+        fig.update_layout(height=400, showlegend=False,
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════
 # 頁面 0：今日訊號
 # ══════════════════════════════════════════════════════════════
-if page == "⚡ 今日訊號":
+elif page == "⚡ 今日訊號":
     st.title("⚡ 今日訊號")
     st.caption("今日 vs 昨日持股變化 — 加碼/減碼/新增/清倉")
 
