@@ -129,7 +129,7 @@ def fetch_etfinfo_holdings(etf_code: str) -> pd.DataFrame:
                 "持股數": shares,
                 "ETF代碼": etf_code,
                 "資料來源": "etfinfo",
-                "抓取時間": datetime.now().strftime("%Y-%m-%d"),
+                "抓取時間": datetime.now(__import__("pytz").timezone("Asia/Taipei")).strftime("%Y%m%d"),
             })
 
         if not stock_rows:

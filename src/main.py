@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pytz
 from fetcher import fetch_all_etfs, aggregate_smart_money, get_last_trading_date
 from price_fetcher import enrich_with_prices, get_stock_price_single
+from diff_analyzer import load_history_from_sheets, compute_daily_diff, compute_fund_flow, aggregate_stock_diff
 from sheets_writer import get_client, get_or_create_spreadsheet, write_all, read_history
 from analyzer import run_analysis
 
@@ -103,6 +104,61 @@ def write_smart_money_to_sheets(ss, smart_df, trade_date: str):
     return ws_smart
 
 
+def _write_diff_to_sheets(ss, stock_diff, diff_detail, trade_date):
+    """寫入差異比對結果到 Google Sheets"""
+    SHEET_DIFF    = "今日訊號"
+    SHEET_DETAIL  = "持股異動明細"
+
+    existing = [ws.title for ws in ss.worksheets()]
+    for name in [SHEET_DIFF, SHEET_DETAIL]:
+        if name not in existing:
+            ss.add_worksheet(title=name, rows=3000, cols=20)
+            log.info(f"建立分頁：{name}")
+
+    # 寫入今日訊號（聚合）
+    ws_diff = ss.worksheet(SHEET_DIFF)
+    ws_diff.clear()
+    header = [f"⚡ 今日訊號 {trade_date}　更新：{now_tw().strftime('%H:%M')}"]
+    ws_diff.append_row(header)
+
+    if not stock_diff.empty:
+        cols = ["排名","股票代號","股票名稱","主要狀態",
+                "加碼ETF數","減碼ETF數","新增ETF數","清倉ETF數",
+                "總變動張數","總資金動向","收盤價"]
+        available = [c for c in cols if c in stock_diff.columns]
+        ws_diff.append_row(available)
+        rows = stock_diff[available].fillna("").values.tolist()
+        ws_diff.append_rows(rows, value_input_option="USER_ENTERED")
+
+        # 格式化加碼行（綠色）
+        try:
+            for i, (_, row) in enumerate(stock_diff.iterrows(), start=3):
+                status = row.get("主要狀態", "")
+                if "加碼" in status or "新增" in status:
+                    color = {"red": 0.88, "green": 1.0, "blue": 0.88}
+                elif "減碼" in status or "清倉" in status:
+                    color = {"red": 1.0, "green": 0.88, "blue": 0.88}
+                else:
+                    continue
+                ws_diff.format(f"A{i}:K{i}", {"backgroundColor": color})
+        except Exception as e:
+            log.warning(f"格式化失敗: {e}")
+
+    log.info(f"今日訊號寫入完成 → {SHEET_DIFF}")
+
+    # 寫入異動明細
+    ws_detail = ss.worksheet(SHEET_DETAIL)
+    ws_detail.clear()
+    if not diff_detail.empty:
+        detail_cols = ["股票代號","股票名稱","ETF代碼","狀態",
+                       "持股數_今","持股數_昨","變動張數","資金動向(萬)","今日","昨日"]
+        avail = [c for c in detail_cols if c in diff_detail.columns]
+        ws_detail.append_row(avail)
+        rows = diff_detail[avail].fillna("").values.tolist()
+        ws_detail.append_rows(rows, value_input_option="USER_ENTERED")
+    log.info(f"異動明細寫入完成 → {SHEET_DETAIL}")
+
+
 def main():
     log.info(f"===== ETF 狙擊系統啟動 | {TRADE_DATE} =====")
 
@@ -160,6 +216,36 @@ def main():
     except Exception as e:
         log.error(f"Sheets 寫入失敗: {e}")
         sys.exit(1)
+
+    # ── 階段四：每日差異比對 ────────────────────────────────────
+    log.info("[4/4] 執行每日差異比對...")
+    try:
+        client2 = get_client(CREDENTIALS_PATH)
+        ss2 = get_or_create_spreadsheet(client2, SPREADSHEET_ID)
+        history_df = load_history_from_sheets(ss2, days=2)
+
+        if history_df.empty:
+            log.warning("歷史資料不足，跳過差異比對（需要兩天資料）")
+        else:
+            # 今日原始資料
+            diff_detail = compute_daily_diff(raw_df, history_df, TRADE_DATE)
+
+            if not diff_detail.empty:
+                # 加入股價計算資金動向
+                if "收盤價" in smart_df.columns:
+                    price_ref = smart_df[["股票代號","收盤價"]].drop_duplicates()
+                    diff_detail = compute_fund_flow(diff_detail, price_ref)
+
+                # 跨ETF聚合
+                stock_diff = aggregate_stock_diff(diff_detail)
+
+                # 寫入 Sheets
+                _write_diff_to_sheets(ss2, stock_diff, diff_detail, TRADE_DATE)
+                log.info(f"差異比對完成：{len(stock_diff)} 檔有變動")
+            else:
+                log.warning("差異比對無結果")
+    except Exception as e:
+        log.warning(f"差異比對失敗（不影響主流程）: {e}")
 
     # ── LINE 通知 Top 5 ──────────────────────────────────────
     top5 = smart_df.head(5)

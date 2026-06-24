@@ -23,8 +23,10 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-SHEET_SMART = "聰明錢名單"
-SHEET_RAW   = "盤後原始數據庫"
+SHEET_SMART  = "聰明錢名單"
+SHEET_RAW    = "盤後原始數據庫"
+SHEET_DIFF   = "今日訊號"
+SHEET_DETAIL = "持股異動明細"
 
 
 @st.cache_resource
@@ -107,6 +109,7 @@ with st.sidebar:
     st.divider()
 
     page = st.radio("頁面", [
+        "⚡ 今日訊號",
         "🎯 今日聰明錢名單",
         "📊 ETF 覆蓋分析",
         "📈 個股查詢",
@@ -125,9 +128,95 @@ with st.sidebar:
 
 
 # ══════════════════════════════════════════════════════════════
+# 頁面 0：今日訊號
+# ══════════════════════════════════════════════════════════════
+if page == "⚡ 今日訊號":
+    st.title("⚡ 今日訊號")
+    st.caption("今日 vs 昨日持股變化 — 加碼/減碼/新增/清倉")
+
+    diff_df = load_sheet(SHEET_DIFF)
+
+    if diff_df.empty:
+        st.warning("尚無差異比對資料，需要兩天資料才能產出（明天15:30後自動更新）")
+        st.info("💡 今日是系統第一天執行，明天盤後即可看到今日vs昨日的完整比對")
+        st.stop()
+
+    num_cols(diff_df, ["加碼ETF數","減碼ETF數","新增ETF數","清倉ETF數","總變動張數","總資金動向","收盤價"])
+
+    # 摘要
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("🔺 加碼", f"{diff_df.get('主要狀態', pd.Series()).str.contains('加碼').sum()} 檔")
+    c2.metric("🆕 新增", f"{diff_df.get('主要狀態', pd.Series()).str.contains('新增').sum()} 檔")
+    c3.metric("🔻 減碼", f"{diff_df.get('主要狀態', pd.Series()).str.contains('減碼').sum()} 檔")
+    c4.metric("🗑️ 清倉", f"{diff_df.get('主要狀態', pd.Series()).str.contains('清倉').sum()} 檔")
+
+    st.divider()
+
+    # 篩選器
+    status_filter = st.multiselect(
+        "篩選狀態",
+        ["🔺 加碼", "🆕 新增", "🔻 減碼", "🗑️ 清倉", "🔀 混合"],
+        default=["🔺 加碼", "🆕 新增"],
+    )
+
+    filtered = diff_df.copy()
+    if status_filter and "主要狀態" in filtered.columns:
+        filtered = filtered[filtered["主要狀態"].isin(status_filter)]
+
+    # 主表格
+    display_cols = ["排名","股票代號","股票名稱","主要狀態",
+                    "加碼ETF數","減碼ETF數","新增ETF數","清倉ETF數",
+                    "總變動張數","總資金動向","收盤價"]
+    available = [c for c in display_cols if c in filtered.columns]
+
+    st.dataframe(
+        filtered[available].reset_index(drop=True),
+        use_container_width=True,
+        height=500,
+        hide_index=True,
+        column_config={
+            "總變動張數": st.column_config.NumberColumn("總變動張數", format="%.1f 張"),
+            "總資金動向": st.column_config.NumberColumn("資金動向(萬)", format="%.1f 萬"),
+            "收盤價":     st.column_config.NumberColumn("收盤價", format="%.1f"),
+            "加碼ETF數":  st.column_config.NumberColumn("加碼ETF", format="%d"),
+            "減碼ETF數":  st.column_config.NumberColumn("減碼ETF", format="%d"),
+        }
+    )
+
+    # 資金動向長條圖
+    if "總資金動向" in filtered.columns and "股票名稱" in filtered.columns:
+        st.subheader("資金動向排行")
+        flow = filtered[filtered["總資金動向"].notna()].copy()
+        flow["標籤"] = flow["股票代號"].astype(str) + " " + flow["股票名稱"].astype(str)
+        flow["顏色"] = flow["總資金動向"].apply(lambda x: "#1D9E75" if x > 0 else "#E24B4A")
+
+        top_flow = pd.concat([
+            flow.nlargest(10, "總資金動向"),
+            flow.nsmallest(10, "總資金動向")
+        ]).drop_duplicates()
+
+        fig = px.bar(
+            top_flow.sort_values("總資金動向"),
+            x="總資金動向", y="標籤",
+            orientation="h",
+            color="總資金動向",
+            color_continuous_scale=["#E24B4A", "#CCCCCC", "#1D9E75"],
+            labels={"總資金動向": "資金動向(萬元)", "標籤": ""},
+        )
+        fig.add_vline(x=0, line_dash="dot", line_color="gray")
+        fig.update_layout(
+            height=500,
+            showlegend=False,
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=150, r=20, t=20, b=40),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+# ══════════════════════════════════════════════════════════════
 # 頁面 1：今日聰明錢名單
 # ══════════════════════════════════════════════════════════════
-if page == "🎯 今日聰明錢名單":
+elif page == "🎯 今日聰明錢名單":
     st.title("🎯 今日聰明錢名單")
     st.caption("被最多主動式ETF同時持有的股票 = 專業法人高度共識標的")
 
