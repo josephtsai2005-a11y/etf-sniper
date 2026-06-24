@@ -27,6 +27,8 @@ SHEET_SMART  = "聰明錢名單"
 SHEET_RAW    = "盤後原始數據庫"
 SHEET_DIFF   = "今日訊號"
 SHEET_DETAIL = "持股異動明細"
+SHEET_TREND  = "題材趨勢"
+SHEET_CROSS  = "新聞×籌碼交叉"
 
 
 @st.cache_resource
@@ -110,6 +112,8 @@ with st.sidebar:
 
     page = st.radio("頁面", [
         "⚡ 今日訊號",
+        "📰 題材趨勢",
+        "🔗 新聞×籌碼交叉",
         "🎯 今日聰明錢名單",
         "📊 ETF 覆蓋分析",
         "📈 個股查詢",
@@ -213,6 +217,118 @@ if page == "⚡ 今日訊號":
             margin=dict(l=150, r=20, t=20, b=40),
         )
         st.plotly_chart(fig, use_container_width=True)
+
+# ══════════════════════════════════════════════════════════════
+# 頁面：題材趨勢
+# ══════════════════════════════════════════════════════════════
+elif page == "📰 題材趨勢":
+    st.title("📰 題材趨勢")
+    st.caption("關鍵字生命週期追蹤 — 萌芽 / 成長 / 爆發 / 衰退")
+
+    trend_df = load_sheet(SHEET_TREND)
+
+    if trend_df.empty:
+        st.warning("尚無題材趨勢資料（需累積 3 天以上新聞資料）")
+        st.info("💡 系統每日自動收集財經新聞，累積資料後此頁面將自動更新")
+        st.stop()
+
+    num_cols(trend_df, ["今日篇數", "近3日均", "近7日均", "成長率%", "峰值篇數", "累計篇數"])
+
+    # 摘要
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("🔥 爆發中", f"{trend_df.get('階段', pd.Series()).str.contains('爆發').sum()} 個")
+    c2.metric("⚡ 成長中", f"{trend_df.get('階段', pd.Series()).str.contains('成長').sum()} 個")
+    c3.metric("🌱 萌芽中", f"{trend_df.get('階段', pd.Series()).str.contains('萌芽').sum()} 個")
+    c4.metric("📉 衰退中", f"{trend_df.get('階段', pd.Series()).str.contains('衰退').sum()} 個")
+
+    st.divider()
+
+    # 篩選
+    stage_filter = st.multiselect(
+        "篩選階段",
+        ["🔥 爆發", "⚡ 成長", "🌱 萌芽", "📉 衰退", "💤 沉寂"],
+        default=["🔥 爆發", "⚡ 成長", "🌱 萌芽"],
+    )
+
+    filtered = trend_df.copy()
+    if stage_filter and "階段" in filtered.columns:
+        filtered = filtered[filtered["階段"].isin(stage_filter)]
+
+    display_cols = ["排名", "關鍵字", "階段", "趨勢", "今日篇數", "近3日均", "近7日均", "成長率%", "峰值篇數"]
+    available = [c for c in display_cols if c in filtered.columns]
+
+    st.dataframe(
+        filtered[available].reset_index(drop=True),
+        use_container_width=True,
+        height=450,
+        hide_index=True,
+        column_config={
+            "成長率%": st.column_config.NumberColumn("成長率%", format="%.1f%%"),
+            "近3日均": st.column_config.NumberColumn("近3日均", format="%.1f"),
+            "近7日均": st.column_config.NumberColumn("近7日均", format="%.1f"),
+        }
+    )
+
+    # 成長率長條圖
+    if "成長率%" in filtered.columns and "關鍵字" in filtered.columns:
+        hot = filtered[filtered["成長率%"] > 0].head(15).copy()
+        if not hot.empty:
+            st.subheader("熱度成長率排行")
+            fig = px.bar(
+                hot.sort_values("成長率%"),
+                x="成長率%", y="關鍵字",
+                orientation="h",
+                color="成長率%",
+                color_continuous_scale=["#FFF3CD", "#FF8C00", "#E24B4A"],
+                labels={"成長率%": "7日成長率%", "關鍵字": ""},
+            )
+            fig.update_layout(
+                height=400,
+                showlegend=False,
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════
+# 頁面：新聞×籌碼交叉
+# ══════════════════════════════════════════════════════════════
+elif page == "🔗 新聞×籌碼交叉":
+    st.title("🔗 新聞 × 籌碼 交叉驗證")
+    st.caption("新聞題材發酵 + 法人同步建倉 = 高機率標的")
+
+    cross_df = load_sheet(SHEET_CROSS)
+
+    if cross_df.empty:
+        st.warning("尚無交叉驗證資料（需累積新聞資料後自動產出）")
+        st.stop()
+
+    num_cols(cross_df, ["持有ETF數", "熱詞數", "最高成長率%"])
+
+    st.info("💡 同時滿足「新聞題材發酵」+ 「多檔ETF持有」的個股，是最值得關注的標的")
+
+    # 摘要
+    c1, c2 = st.columns(2)
+    c1.metric("題材+籌碼雙重確認", f"{len(cross_df)} 檔")
+    c2.metric("高ETF共識(≥5檔)", f"{(pd.to_numeric(cross_df.get('持有ETF數',pd.Series()), errors='coerce') >= 5).sum()} 檔")
+
+    st.divider()
+
+    display_cols = ["排名", "股票代號", "股票名稱", "持有ETF數", "訊號",
+                    "相關熱詞", "熱詞數", "最高成長率%", "題材階段", "綜合強度"]
+    available = [c for c in display_cols if c in cross_df.columns]
+
+    st.dataframe(
+        cross_df[available].reset_index(drop=True),
+        use_container_width=True,
+        height=500,
+        hide_index=True,
+        column_config={
+            "持有ETF數":   st.column_config.ProgressColumn("ETF持有數", min_value=0, max_value=34, format="%d"),
+            "最高成長率%": st.column_config.NumberColumn("題材成長率%", format="%.1f%%"),
+        }
+    )
 
 # ══════════════════════════════════════════════════════════════
 # 頁面 1：今日聰明錢名單

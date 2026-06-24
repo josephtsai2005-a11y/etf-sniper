@@ -15,6 +15,9 @@ import pytz
 from fetcher import fetch_all_etfs, aggregate_smart_money, get_last_trading_date
 from price_fetcher import enrich_with_prices, get_stock_price_single
 from diff_analyzer import load_history_from_sheets, compute_daily_diff, compute_fund_flow, aggregate_stock_diff
+from news_fetcher import fetch_all_news, tag_articles, auto_extract_hot_words
+import pandas as pd
+from trend_analyzer import compute_keyword_timeseries, compute_trend_report, match_keywords_to_stocks
 from sheets_writer import get_client, get_or_create_spreadsheet, write_all, read_history
 from analyzer import run_analysis
 
@@ -102,6 +105,68 @@ def write_smart_money_to_sheets(ss, smart_df, trade_date: str):
 
     log.info(f"聰明錢名單寫入完成：{len(smart_df)} 檔 → {SHEET_SMART}")
     return ws_smart
+
+
+def _write_news_to_sheets(ss, news_df, trade_date):
+    """寫入新聞歷史庫（每日追加）"""
+    SHEET_NEWS = "新聞歷史庫"
+    existing = [ws.title for ws in ss.worksheets()]
+    if SHEET_NEWS not in existing:
+        ss.add_worksheet(title=SHEET_NEWS, rows=50000, cols=15)
+        log.info(f"建立分頁：{SHEET_NEWS}")
+
+    ws = ss.worksheet(SHEET_NEWS)
+    all_vals = ws.get_all_values()
+
+    # 只保留有命中關鍵字的新聞（節省空間）
+    tagged = news_df[news_df["關鍵字數"] > 0].copy() if "關鍵字數" in news_df.columns else news_df
+
+    cols = ["抓取日期", "來源", "標題", "命中關鍵字", "發布時間", "連結"]
+    avail = [c for c in cols if c in tagged.columns]
+
+    if not all_vals or all_vals == [[]]:
+        ws.append_row(avail)
+
+    rows = tagged[avail].fillna("").values.tolist()
+    if rows:
+        ws.append_rows(rows, value_input_option="USER_ENTERED")
+    log.info(f"新聞寫入：{len(rows)} 篇 → {SHEET_NEWS}")
+
+
+def _load_news_history(ss, days: int = 14) -> pd.DataFrame:
+    """讀取最近 N 天的新聞歷史"""
+    try:
+        ws = ss.worksheet("新聞歷史庫")
+        all_vals = ws.get_all_values()
+        if not all_vals or len(all_vals) < 2:
+            return pd.DataFrame()
+        df = pd.DataFrame(all_vals[1:], columns=all_vals[0])
+        df = df[df.apply(lambda r: r.astype(str).str.strip().ne("").any(), axis=1)]
+
+        if "抓取日期" in df.columns:
+            dates = sorted(df["抓取日期"].unique())[-days:]
+            df = df[df["抓取日期"].isin(dates)]
+        return df
+    except Exception as e:
+        log.warning(f"讀取新聞歷史失敗: {e}")
+        return pd.DataFrame()
+
+
+def _write_trend_to_sheets(ss, trend_df, cross_df, trade_date):
+    """寫入題材趨勢報告"""
+    for sheet_name, df in [("題材趨勢", trend_df), ("新聞×籌碼交叉", cross_df)]:
+        existing = [ws.title for ws in ss.worksheets()]
+        if sheet_name not in existing:
+            ss.add_worksheet(title=sheet_name, rows=1000, cols=20)
+
+        ws = ss.worksheet(sheet_name)
+        ws.clear()
+        ws.append_row([f"題材分析 {trade_date}　更新：{now_tw().strftime('%H:%M')}"])
+        if not df.empty:
+            ws.append_row(df.columns.tolist())
+            rows = df.fillna("").values.tolist()
+            ws.append_rows(rows, value_input_option="USER_ENTERED")
+        log.info(f"{sheet_name} 寫入完成")
 
 
 def _write_diff_to_sheets(ss, stock_diff, diff_detail, trade_date):
@@ -246,6 +311,35 @@ def main():
                 log.warning("差異比對無結果")
     except Exception as e:
         log.warning(f"差異比對失敗（不影響主流程）: {e}")
+
+    # ── 階段五：新聞熱度收集與題材分析 ──────────────────────────
+    log.info("[5/5] 收集財經新聞 + 題材生命週期分析...")
+    try:
+        # 抓取最新新聞
+        news_df = fetch_all_news(hours_back=26)
+        if not news_df.empty:
+            news_df = tag_articles(news_df)
+            hot_words = auto_extract_hot_words(news_df)
+            log.info(f"新聞抓取：{len(news_df)} 篇，命中關鍵字文章：{(news_df['關鍵字數']>0).sum()} 篇")
+            log.info(f"自動偵測熱詞：{hot_words[:10]}")
+
+            # 寫入新聞歷史庫
+            _write_news_to_sheets(ss2, news_df, TRADE_DATE)
+
+            # 讀取歷史新聞做趨勢分析
+            news_history = _load_news_history(ss2)
+            if not news_history.empty:
+                pivot = compute_keyword_timeseries(news_history)
+                trend_df = compute_trend_report(pivot)
+                cross_df = match_keywords_to_stocks(trend_df, smart_df)
+
+                # 寫入趨勢報告
+                _write_trend_to_sheets(ss2, trend_df, cross_df, TRADE_DATE)
+                log.info(f"題材分析：{len(trend_df)} 個關鍵字，{len(cross_df)} 檔個股有題材支撐")
+    except Exception as e:
+        log.warning(f"新聞模組失敗（不影響主流程）: {e}")
+        import traceback
+        log.debug(traceback.format_exc())
 
     # ── LINE 通知 Top 5 ──────────────────────────────────────
     top5 = smart_df.head(5)
