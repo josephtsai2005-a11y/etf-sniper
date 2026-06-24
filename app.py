@@ -225,72 +225,171 @@ elif page == "📰 題材趨勢":
     st.title("📰 題材趨勢")
     st.caption("關鍵字生命週期追蹤 — 萌芽 / 成長 / 爆發 / 衰退")
 
-    trend_df = load_sheet(SHEET_TREND)
+    trend_df  = load_sheet(SHEET_TREND)
+    news_hist = load_sheet("新聞歷史庫")
 
     if trend_df.empty:
-        st.warning("尚無題材趨勢資料（需累積 3 天以上新聞資料）")
-        st.info("💡 系統每日自動收集財經新聞，累積資料後此頁面將自動更新")
+        st.warning("尚無題材趨勢資料，等待今日 15:30 自動執行後產出")
         st.stop()
 
-    num_cols(trend_df, ["今日篇數", "近3日均", "近7日均", "成長率%", "峰值篇數", "累計篇數"])
+    num_cols(trend_df, ["今日篇數","近3日均","近7日均","成長率%","峰值篇數","累計篇數"])
 
-    # 摘要
+    # ── 從新聞歷史庫建立時序資料 ──────────────────────────────
+    timeseries_data = {}
+    if not news_hist.empty and "抓取日期" in news_hist.columns and "命中關鍵字" in news_hist.columns:
+        rows = []
+        for _, r in news_hist.iterrows():
+            date = str(r["抓取日期"]).strip()
+            kws  = [k.strip() for k in str(r["命中關鍵字"]).split(",") if k.strip()]
+            for kw in kws:
+                rows.append({"日期": date, "關鍵字": kw})
+
+        if rows:
+            df_kw = pd.DataFrame(rows)
+            df_kw["日期"] = pd.to_datetime(df_kw["日期"], format="%Y%m%d", errors="coerce")
+            df_kw = df_kw.dropna(subset=["日期"])
+
+            pivot = df_kw.groupby(["日期","關鍵字"]).size().unstack(fill_value=0)
+            all_dates = pd.date_range(pivot.index.min(), pivot.index.max(), freq="D")
+            pivot = pivot.reindex(all_dates, fill_value=0)
+
+            for kw in pivot.columns:
+                timeseries_data[kw] = pivot[kw]
+
+    has_timeseries = len(timeseries_data) > 0
+
+    # ── 摘要 ──────────────────────────────────────────────────
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("🔥 爆發中", f"{trend_df.get('階段', pd.Series()).str.contains('爆發').sum()} 個")
-    c2.metric("⚡ 成長中", f"{trend_df.get('階段', pd.Series()).str.contains('成長').sum()} 個")
-    c3.metric("🌱 萌芽中", f"{trend_df.get('階段', pd.Series()).str.contains('萌芽').sum()} 個")
-    c4.metric("📉 衰退中", f"{trend_df.get('階段', pd.Series()).str.contains('衰退').sum()} 個")
+    c1.metric("🔥 爆發中", f"{trend_df['階段'].str.contains('爆發',na=False).sum()} 個")
+    c2.metric("⚡ 成長中", f"{trend_df['階段'].str.contains('成長',na=False).sum()} 個")
+    c3.metric("🌱 萌芽中", f"{trend_df['階段'].str.contains('萌芽',na=False).sum()} 個")
+    c4.metric("📉 衰退中", f"{trend_df['階段'].str.contains('衰退',na=False).sum()} 個")
+
+    if has_timeseries:
+        days = len(list(timeseries_data.values())[0])
+        st.caption(f"📅 資料累積：{days} 天（7天後趨勢更準確）")
+    else:
+        st.info("💡 今日為第 1 天，明天 15:30 後折線圖將開始顯示趨勢")
 
     st.divider()
 
-    # 篩選
-    stage_filter = st.multiselect(
-        "篩選階段",
-        ["🔥 爆發", "⚡ 成長", "🌱 萌芽", "📉 衰退", "💤 沉寂"],
-        default=["🔥 爆發", "⚡ 成長", "🌱 萌芽"],
-    )
+    # ── 圖一：氣泡圖 ──────────────────────────────────────────
+    st.subheader("① 熱度氣泡圖 — 全局一覽")
+    st.caption("X軸=今日篇數  Y軸=成長率%  氣泡大小=峰值篇數")
 
+    bubble_df = trend_df[pd.to_numeric(trend_df["今日篇數"], errors="coerce").fillna(0) > 0].copy()
+    if bubble_df.empty:
+        bubble_df = trend_df.copy()
+
+    stage_colors = {"🔥 爆發":"#E24B4A","⚡ 成長":"#FF8C00","🌱 萌芽":"#1D9E75","📉 衰退":"#888780","💤 沉寂":"#CCCCCC"}
+    num_cols(bubble_df, ["今日篇數","成長率%","峰值篇數"])
+    bubble_df["峰值篇數"] = bubble_df["峰值篇數"].fillna(1).clip(lower=1)
+
+    fig_bubble = px.scatter(
+        bubble_df, x="今日篇數", y="成長率%",
+        size="峰值篇數", color="階段", text="關鍵字",
+        color_discrete_map={k:v for k,v in stage_colors.items()},
+        size_max=60,
+        labels={"今日篇數":"今日篇數","成長率%":"7日成長率%"},
+    )
+    fig_bubble.update_traces(textposition="top center", textfont_size=11)
+    fig_bubble.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+    fig_bubble.update_layout(height=440, plot_bgcolor="rgba(0,0,0,0)",
+                              paper_bgcolor="rgba(0,0,0,0)", hovermode="closest")
+    st.plotly_chart(fig_bubble, use_container_width=True)
+
+    st.divider()
+
+    # ── 圖二：時序折線圖 ──────────────────────────────────────
+    st.subheader("② 關鍵字時序折線圖")
+
+    if has_timeseries:
+        all_keywords = list(timeseries_data.keys())
+        priority_kws = ["CoWoS","AI伺服器","NVIDIA","Fed","液冷散熱","HBM","台幣匯率"]
+        default_kws  = [k for k in priority_kws if k in all_keywords][:4]
+        if not default_kws:
+            default_kws = all_keywords[:4]
+
+        selected_kws = st.multiselect(
+            "選擇追蹤的關鍵字（最多5個）",
+            all_keywords, default=default_kws, max_selections=5,
+        )
+
+        if selected_kws:
+            ts_frames = []
+            for kw in selected_kws:
+                if kw in timeseries_data:
+                    for date, val in timeseries_data[kw].items():
+                        ts_frames.append({"日期": date, "關鍵字": kw, "篇數": int(val)})
+            if ts_frames:
+                ts_df = pd.DataFrame(ts_frames)
+                fig_line = px.line(ts_df, x="日期", y="篇數", color="關鍵字",
+                    markers=True,
+                    color_discrete_sequence=["#E24B4A","#FF8C00","#1D9E75","#185FA5","#534AB7"],
+                    labels={"篇數":"新聞篇數","日期":""})
+                fig_line.update_layout(height=360, plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)", hovermode="x unified",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02))
+                st.plotly_chart(fig_line, use_container_width=True)
+    else:
+        st.info("📈 折線圖將於明天 15:30 後開始顯示（需要 2 天以上資料）")
+
+    st.divider()
+
+    # ── 圖三：Exploding Topics 風格表格 ───────────────────────
+    st.subheader("③ 題材生命週期表")
+
+    stage_filter = st.multiselect("篩選階段",
+        ["🔥 爆發","⚡ 成長","🌱 萌芽","📉 衰退"],
+        default=["🔥 爆發","⚡ 成長","🌱 萌芽"])
     filtered = trend_df.copy()
-    if stage_filter and "階段" in filtered.columns:
-        filtered = filtered[filtered["階段"].isin(stage_filter)]
+    if stage_filter:
+        filtered = filtered[filtered["階段"].apply(
+            lambda s: any(f in str(s) for f in stage_filter))]
 
-    display_cols = ["排名", "關鍵字", "階段", "趨勢", "今日篇數", "近3日均", "近7日均", "成長率%", "峰值篇數"]
-    available = [c for c in display_cols if c in filtered.columns]
+    def make_sparkline(kw):
+        if kw not in timeseries_data:
+            return '<span style="color:#ccc;font-size:11px">（累積中）</span>'
+        vals = timeseries_data[kw].values[-7:]
+        if len(vals) == 0 or max(vals) == 0:
+            return '<span style="color:#ccc;font-size:11px">（無資料）</span>'
+        max_v = max(vals)
+        bars = []
+        for v in vals:
+            h = max(2, int(v/max_v*28))
+            c = "#E24B4A" if v>=max_v*0.8 else "#FF8C00" if v>=max_v*0.4 else "#C8E6C9"
+            bars.append(f'<span style="display:inline-block;width:7px;height:{h}px;background:{c};margin:0 1px;border-radius:2px;vertical-align:bottom"></span>')
+        return "".join(bars)
 
-    st.dataframe(
-        filtered[available].reset_index(drop=True),
-        use_container_width=True,
-        height=450,
-        hide_index=True,
-        column_config={
-            "成長率%": st.column_config.NumberColumn("成長率%", format="%.1f%%"),
-            "近3日均": st.column_config.NumberColumn("近3日均", format="%.1f"),
-            "近7日均": st.column_config.NumberColumn("近7日均", format="%.1f"),
-        }
-    )
+    scm = {"爆發":"#E24B4A","成長":"#FF8C00","萌芽":"#1D9E75","衰退":"#888780"}
 
-    # 成長率長條圖
-    if "成長率%" in filtered.columns and "關鍵字" in filtered.columns:
-        hot = filtered[filtered["成長率%"] > 0].head(15).copy()
-        if not hot.empty:
-            st.subheader("熱度成長率排行")
-            fig = px.bar(
-                hot.sort_values("成長率%"),
-                x="成長率%", y="關鍵字",
-                orientation="h",
-                color="成長率%",
-                color_continuous_scale=["#FFF3CD", "#FF8C00", "#E24B4A"],
-                labels={"成長率%": "7日成長率%", "關鍵字": ""},
-            )
-            fig.update_layout(
-                height=400,
-                showlegend=False,
-                plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)",
-            )
-            st.plotly_chart(fig, use_container_width=True)
+    st.markdown("""<div style="display:flex;padding:4px 14px;font-size:11px;color:#999;font-weight:600">
+        <div style="width:120px">關鍵字</div>
+        <div style="width:100px">7日趨勢</div>
+        <div style="width:110px">階段</div>
+        <div style="width:80px">成長率</div>
+        <div>今日篇數</div>
+    </div>""", unsafe_allow_html=True)
 
+    for _, row in filtered.head(20).iterrows():
+        kw    = str(row.get("關鍵字",""))
+        stage = str(row.get("階段",""))
+        gr    = float(row.get("成長率%") or 0)
+        today = int(float(row.get("今日篇數") or 0))
+        spark = make_sparkline(kw)
+        sc    = next((v for k,v in scm.items() if k in stage),"#888")
+        gc    = "#E24B4A" if gr>0 else "#888780"
+        gs    = "↑" if gr>0 else "↓"
+        bg    = "#FFF8F8" if "爆發" in stage else "#FFFBF5" if "成長" in stage else "#F8FFF8" if "萌芽" in stage else "#FAFAFA"
 
+        st.markdown(f"""<div style="display:flex;align-items:center;padding:8px 14px;margin:3px 0;
+            border-radius:8px;border:0.5px solid #eee;background:{bg};">
+            <div style="width:120px;font-weight:600;font-size:14px">{kw}</div>
+            <div style="width:100px;display:flex;align-items:flex-end;height:32px">{spark}</div>
+            <div style="width:110px;font-size:12px;color:{sc};font-weight:600">{stage}</div>
+            <div style="width:80px;font-size:13px;color:{gc};font-weight:500">{gs}{abs(gr):.0f}%</div>
+            <div style="font-size:12px;color:#666">📰 {today} 篇</div>
+        </div>""", unsafe_allow_html=True)
 # ══════════════════════════════════════════════════════════════
 # 頁面：新聞×籌碼交叉
 # ══════════════════════════════════════════════════════════════
