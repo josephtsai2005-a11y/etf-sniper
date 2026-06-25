@@ -38,18 +38,10 @@ SPREADSHEET_ID   = os.environ.get("SPREADSHEET_ID", "")
 SERPAPI_KEY      = os.environ.get("SERPAPI_KEY", "")
 CREDENTIALS_PATH = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
 LINE_TOKEN       = os.environ.get("LINE_NOTIFY_TOKEN", "")
-# 交易日判斷：15:30 前用前一個交易日，15:30 後用今日
+# 強制使用台灣今日日期（不受執行時間影響）
 import pytz as _pytz
-from datetime import timedelta
 _tw_now = __import__("datetime").datetime.now(_pytz.timezone("Asia/Taipei"))
-if _tw_now.hour < 15 or (_tw_now.hour == 15 and _tw_now.minute < 30):
-    _trade_day = _tw_now - timedelta(days=1)
-    # 若前一天是週日(6)或週一(0)要再往前
-    while _trade_day.weekday() >= 5:
-        _trade_day -= timedelta(days=1)
-else:
-    _trade_day = _tw_now
-_today_str = _trade_day.strftime("%Y%m%d")
+_today_str = _tw_now.strftime("%Y%m%d")
 TRADE_DATE = os.environ.get("TRADE_DATE", _today_str)
 
 
@@ -150,13 +142,12 @@ def _write_trends_to_sheets(ss, trends_df, cross_df, trade_date):
         ws.clear()
         ws.append_row([f"{sheet_name} {trade_date}　更新：{now_tw().strftime('%H:%M')}"])
         if not df.empty:
-            time.sleep(5)
+            time.sleep(2)
             ws.append_row(df.columns.tolist())
-            time.sleep(3)
             rows = df.fillna("").values.tolist()
             ws.append_rows(rows, value_input_option="USER_ENTERED")
         log.info(f"{sheet_name} 寫入完成")
-        time.sleep(10)
+        time.sleep(5)
 
 
 def _write_institutional_to_sheets(ss, inst_df, cross_df, trade_date):
@@ -353,26 +344,6 @@ def main():
         ss = get_or_create_spreadsheet(client, SPREADSHEET_ID)
         write_smart_money_to_sheets(ss, smart_df, TRADE_DATE)
         log.info("Google Sheets 寫入完成！")
-
-        # ── 追加盤後原始數據庫 ──
-        try:
-            ws_raw = ss.worksheet("盤後原始數據庫")
-            all_vals = ws_raw.get_all_values()
-            raw_cols = ["股票代號","股票名稱","權重%","持股數","ETF代碼","資料來源","抓取時間"]
-            avail = [c for c in raw_cols if c in raw_df.columns]
-            if not all_vals or all_vals == [[]]:
-                ws_raw.append_row(avail)
-            today_dates = [r[avail.index("抓取時間")] if "抓取時間" in avail else "" for r in all_vals[1:]]
-            if TRADE_DATE not in today_dates:
-                import time
-                time.sleep(3)
-                rows = raw_df[avail].fillna("").values.tolist()
-                ws_raw.append_rows(rows, value_input_option="USER_ENTERED")
-                log.info(f"盤後原始數據庫追加完成：{len(rows)} 筆 ({TRADE_DATE})")
-            else:
-                log.info(f"盤後原始數據庫已有 {TRADE_DATE} 資料，跳過")
-        except Exception as e:
-            log.warning(f"盤後原始數據庫寫入失敗（不影響主流程）: {e}")
     except Exception as e:
         log.error(f"Sheets 寫入失敗: {e}")
         sys.exit(1)
@@ -436,19 +407,6 @@ def main():
         import traceback
         log.debug(traceback.format_exc())
 
-    # ── 階段六.五：基本面資料 ───────────────────────────────────
-    log.info("[6.5] 抓取基本面資料（月營收、本益比）...")
-    fundamental_df = pd.DataFrame()
-    try:
-        stock_codes = smart_df["股票代號"].dropna().astype(str).unique().tolist()[:30]
-        fundamental_df = fetch_batch_fundamental(stock_codes, delay=0.5)
-        if not fundamental_df.empty:
-            log.info(f"基本面完成：{len(fundamental_df)} 檔，高速成長：{fundamental_df.get('營收訊號','').eq('🚀 高速成長').sum() if '營收訊號' in fundamental_df.columns else 0} 檔")
-            # 寫入 Sheets
-            _write_fundamental_to_sheets(ss2, fundamental_df, TRADE_DATE)
-    except Exception as e:
-        log.warning(f"基本面失敗（不影響主流程）: {e}")
-
     # ── 階段六：三大法人買賣超 ─────────────────────────────────
     log.info("[6] 抓取三大法人買賣超...")
     try:
@@ -466,6 +424,19 @@ def main():
             log.warning("法人資料為空（盤後 16:30 後才有）")
     except Exception as e:
         log.warning(f"法人模組失敗（不影響主流程）: {e}")
+
+    # ── 階段六.五：基本面資料 ───────────────────────────────────
+    log.info("[6.5] 抓取基本面資料（月營收、本益比）...")
+    fundamental_df = pd.DataFrame()
+    try:
+        stock_codes = smart_df["股票代號"].dropna().astype(str).unique().tolist()[:30]
+        fundamental_df = fetch_batch_fundamental(stock_codes, delay=0.5)
+        if not fundamental_df.empty:
+            log.info(f"基本面完成：{len(fundamental_df)} 檔，高速成長：{fundamental_df.get('營收訊號','').eq('🚀 高速成長').sum() if '營收訊號' in fundamental_df.columns else 0} 檔")
+            # 寫入 Sheets
+            _write_fundamental_to_sheets(ss2, fundamental_df, TRADE_DATE)
+    except Exception as e:
+        log.warning(f"基本面失敗（不影響主流程）: {e}")
 
     # ── 階段七：Google Trends 散戶情緒 ──────────────────────────
     log.info("[7] 抓取 Google Trends 散戶情緒...")
