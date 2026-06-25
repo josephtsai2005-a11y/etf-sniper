@@ -33,6 +33,7 @@ SHEET_INST   = "三大法人"
 SHEET_MULTI  = "多方驗證名單"
 SHEET_RETAIL = "散戶情緒"
 SHEET_POS    = "題材位置"
+SHEET_FUND   = "基本面資料"
 
 
 @st.cache_resource
@@ -62,7 +63,7 @@ def load_sheet(sheet_name: str) -> pd.DataFrame:
         header_idx = 0
         for i, row in enumerate(all_values[:5]):
             row_text = " ".join(str(c) for c in row)
-            if any(k in row_text for k in ["排名", "股票代號", "股票名稱", "代號", "主題", "散戶關注度", "法人訊號", "關鍵字", "階段"]):
+            if any(k in row_text for k in ["排名", "股票代號", "股票名稱", "代號"]):
                 header_idx = i
                 break
 
@@ -117,11 +118,11 @@ with st.sidebar:
     page = st.radio("頁面", [
         "🏆 多方驗證名單",
         "⚡ 今日訊號",
-        "🎯 今日聰明錢名單",
         "🏦 三大法人",
-        "📱 散戶情緒",
         "📰 題材趨勢",
         "🔗 新聞×籌碼交叉",
+        "📱 散戶情緒",
+        "🎯 今日聰明錢名單",
         "📊 ETF 覆蓋分析",
         "📈 個股查詢",
         "🗂️ 原始持股庫",
@@ -186,7 +187,7 @@ if page == "🏆 多方驗證名單":
         filtered = filtered[pd.to_numeric(filtered["買超法人數"],errors="coerce").fillna(0) >= min_inst]
 
     display_cols = ["排名","股票代號","股票名稱","持有ETF數","買超法人數",
-                    "法人訊號","綜合評分","多方驗證","三大合計","收盤價","漲跌幅%"]
+                    "法人訊號","綜合評分","多方驗證","年增率%","營收訊號","三大合計","收盤價","漲跌幅%"]
     avail = [c for c in display_cols if c in filtered.columns]
 
     st.dataframe(
@@ -199,6 +200,7 @@ if page == "🏆 多方驗證名單":
             "三大合計":   st.column_config.NumberColumn("法人合計(張)", format="%.0f"),
             "收盤價":     st.column_config.NumberColumn("收盤價", format="%.1f"),
             "漲跌幅%":    st.column_config.NumberColumn("漲跌幅%", format="%.2f%%"),
+            "年增率%":    st.column_config.NumberColumn("月營收年增率", format="%.1f%%"),
         }
     )
 
@@ -594,12 +596,6 @@ elif page == "📱 散戶情緒":
 
     if retail_df.empty:
         st.warning("尚無散戶情緒資料")
-        st.stop()
-
-    if "散戶關注度" not in retail_df.columns:
-        st.warning(f"資料欄位讀取異常")
-        st.write("目前欄位：", retail_df.columns.tolist())
-        st.dataframe(retail_df.head(3))
         st.stop()
 
     num_cols(retail_df, ["當前搜尋量","近3日均","近7日均","搜尋成長%","峰值","相對峰值%"])

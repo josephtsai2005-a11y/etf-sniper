@@ -4,6 +4,7 @@ main.py v2
 Cloud Run Jobs 執行入口
 """
 import os
+import pandas as pd
 import sys
 import logging
 from datetime import datetime
@@ -17,8 +18,8 @@ from price_fetcher import enrich_with_prices, get_stock_price_single
 from diff_analyzer import load_history_from_sheets, compute_daily_diff, compute_fund_flow, aggregate_stock_diff
 from news_fetcher import fetch_all_news, tag_articles, auto_extract_hot_words
 from institutional_fetcher import fetch_batch_institutional, compute_institutional_signal, cross_with_etf
+from fundamental_fetcher import fetch_batch_fundamental
 from trends_fetcher import fetch_all_trends, compute_trends_signal, cross_news_and_trends
-import pandas as pd
 from trend_analyzer import compute_keyword_timeseries, compute_trend_report, match_keywords_to_stocks
 from sheets_writer import get_client, get_or_create_spreadsheet, write_all, read_history
 from analyzer import run_analysis
@@ -110,14 +111,29 @@ def write_smart_money_to_sheets(ss, smart_df, trade_date: str):
     return ws_smart
 
 
+def _write_fundamental_to_sheets(ss, fund_df, trade_date):
+    """寫入基本面資料到 Sheets"""
+    import time
+    SHEET_FUND = "基本面資料"
+    existing = [ws.title for ws in ss.worksheets()]
+    if SHEET_FUND not in existing:
+        ss.add_worksheet(title=SHEET_FUND, rows=500, cols=15)
+    ws = ss.worksheet(SHEET_FUND)
+    ws.clear()
+    ws.append_row([f"基本面資料 {trade_date}　更新：{now_tw().strftime('%H:%M')}"])
+    if not fund_df.empty:
+        cols = ["股票代號","最新月份","月營收(億)","年增率%","月增率%","營收訊號","本益比","本益比訊號","基本面分數"]
+        avail = [c for c in cols if c in fund_df.columns]
+        time.sleep(3)
+        ws.append_row(avail)
+        rows = fund_df[avail].fillna("").values.tolist()
+        ws.append_rows(rows, value_input_option="USER_ENTERED")
+    log.info(f"基本面資料 寫入完成")
+
+
 def _write_trends_to_sheets(ss, trends_df, cross_df, trade_date):
     """寫入 Google Trends 資料到 Sheets"""
     import time
-    trends_df = trends_df.copy()
-    cross_df  = cross_df.copy() if not cross_df.empty else cross_df
-    for df in [trends_df, cross_df]:
-        if not df.empty and "排名" in df.columns:
-            df.drop(columns=["排名"], inplace=True)
     for sheet_name, df in [("散戶情緒", trends_df), ("題材位置", cross_df)]:
         existing = [ws.title for ws in ss.worksheets()]
         if sheet_name not in existing:
@@ -131,7 +147,7 @@ def _write_trends_to_sheets(ss, trends_df, cross_df, trade_date):
             rows = df.fillna("").values.tolist()
             ws.append_rows(rows, value_input_option="USER_ENTERED")
         log.info(f"{sheet_name} 寫入完成")
-        time.sleep(15)
+        time.sleep(5)
 
 
 def _write_institutional_to_sheets(ss, inst_df, cross_df, trade_date):
@@ -326,7 +342,6 @@ def main():
     try:
         client = get_client(CREDENTIALS_PATH)
         ss = get_or_create_spreadsheet(client, SPREADSHEET_ID)
-        import time as _t; _t.sleep(10)
         write_smart_money_to_sheets(ss, smart_df, TRADE_DATE)
         log.info("Google Sheets 寫入完成！")
     except Exception as e:
@@ -356,7 +371,6 @@ def main():
                 stock_diff = aggregate_stock_diff(diff_detail)
 
                 # 寫入 Sheets
-                import time as _t; _t.sleep(30)
                 _write_diff_to_sheets(ss2, stock_diff, diff_detail, TRADE_DATE)
                 log.info(f"差異比對完成：{len(stock_diff)} 檔有變動")
             else:
@@ -376,7 +390,6 @@ def main():
             log.info(f"自動偵測熱詞：{hot_words[:10]}")
 
             # 寫入新聞歷史庫
-            import time as _t; _t.sleep(30)
             _write_news_to_sheets(ss2, news_df, TRADE_DATE)
 
             # 讀取歷史新聞做趨勢分析
@@ -402,7 +415,7 @@ def main():
 
         if not inst_df.empty:
             inst_df = compute_institutional_signal(inst_df)
-            cross_df = cross_with_etf(inst_df, smart_df)
+            cross_df = cross_with_etf(inst_df, smart_df, fundamental_df)
 
             # 寫入 Sheets
             _write_institutional_to_sheets(ss2, inst_df, cross_df, TRADE_DATE)
@@ -411,6 +424,19 @@ def main():
             log.warning("法人資料為空（盤後 16:30 後才有）")
     except Exception as e:
         log.warning(f"法人模組失敗（不影響主流程）: {e}")
+
+    # ── 階段六.五：基本面資料 ───────────────────────────────────
+    log.info("[6.5] 抓取基本面資料（月營收、本益比）...")
+    fundamental_df = pd.DataFrame()
+    try:
+        stock_codes = smart_df["股票代號"].dropna().astype(str).unique().tolist()[:30]
+        fundamental_df = fetch_batch_fundamental(stock_codes, delay=0.5)
+        if not fundamental_df.empty:
+            log.info(f"基本面完成：{len(fundamental_df)} 檔，高速成長：{fundamental_df.get('營收訊號','').eq('🚀 高速成長').sum() if '營收訊號' in fundamental_df.columns else 0} 檔")
+            # 寫入 Sheets
+            _write_fundamental_to_sheets(ss2, fundamental_df, TRADE_DATE)
+    except Exception as e:
+        log.warning(f"基本面失敗（不影響主流程）: {e}")
 
     # ── 階段七：Google Trends 散戶情緒 ──────────────────────────
     log.info("[7] 抓取 Google Trends 散戶情緒...")
@@ -425,23 +451,14 @@ def main():
                 news_hist2 = _load_news_history(ss2)
                 cross_df2 = pd.DataFrame()
                 if not news_hist2.empty:
-                    from trend_analyzer import compute_keyword_timeseries, compute_trend_report
                     pivot2 = compute_keyword_timeseries(news_hist2)
                     news_trend2 = compute_trend_report(pivot2)
                     cross_df2 = cross_news_and_trends(news_trend2, trends_signal)
-                    if not cross_df2.empty and "排名" in cross_df2.columns:
-                        cross_df2 = cross_df2.drop(columns=["排名"])
-                # 強制移除重複排名欄
-                cross_df2 = cross_df2.loc[:,~cross_df2.columns.duplicated()]
-                if "排名" in cross_df2.columns:
-                    cross_df2 = cross_df2.drop(columns=["排名"])
+                    cross_df2 = cross_df2.loc[:,~cross_df2.columns.duplicated()]
+                    if "排名" in cross_df2.columns: cross_df2 = cross_df2.drop(columns=["排名"])
 
-                for _df in [trends_signal, cross_df2]:
-                    if not _df.empty and "排名" in _df.columns:
-                        _df.drop(columns=["排名"], inplace=True)
-                import time as _t; _t.sleep(30)
-            _write_trends_to_sheets(ss2, trends_signal, cross_df2, TRADE_DATE)
-            log.info(f"Google Trends 完成：{len(trends_signal)} 個主題")
+                _write_trends_to_sheets(ss2, trends_signal, cross_df2, TRADE_DATE)
+                log.info(f"Google Trends 完成：{len(trends_signal)} 個主題")
         else:
             log.warning("缺少 SERPAPI_KEY，跳過 Google Trends")
     except Exception as e:

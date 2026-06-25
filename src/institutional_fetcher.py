@@ -4,8 +4,6 @@ institutional_fetcher.py
 來源：TWSE 公開資料
 外資 + 投信 + 自營商 每日買賣超
 """
-from unittest import result
-
 import requests
 import pandas as pd
 import time
@@ -143,63 +141,29 @@ def fetch_batch_institutional(
     delay: float = 0.4,
 ) -> pd.DataFrame:
     """
-    一次抓取全市場三大法人資料，再篩選需要的股票
+    批次抓取多檔股票三大法人資料
     """
     if not trade_date:
         trade_date = get_trade_date()
 
-    url = "https://www.twse.com.tw/fund/T86"
-    params = {"response": "json", "date": trade_date, "selectType": "ALL"}
+    records = []
+    total = len(stock_codes)
 
-    try:
-        resp = SESSION.get(url, params=params, timeout=20)
-        data = resp.json()
+    for i, code in enumerate(stock_codes, 1):
+        result = fetch_institutional_by_stock(str(code), trade_date)
+        if result:
+            records.append(result)
+        if i % 10 == 0:
+            log.info(f"  法人資料進度 {i}/{total}")
+        time.sleep(delay)
 
-        if data.get("stat") != "OK" or not data.get("data"):
-            log.warning(f"三大法人全市場無資料 ({trade_date})")
-            return pd.DataFrame()
-
-        fields = data.get("fields", [])
-        rows   = data.get("data", [])
-
-        # 欄位有重複，直接用位置處理
-        # 格式：[*, 代號, 名稱, 外資買進, 外資賣出, 外資買賣超, 投信買進, 投信賣出, 投信買賣超, 自營買進, 自營賣出, 自營買賣超]
-        records = []
-        codes_set = set(str(c).strip() for c in stock_codes)
-
-        for row in rows:
-            if len(row) < 12:
-                continue
-            code = str(row[0]).strip().replace("*","").strip()
-            if code not in codes_set:
-                continue
-            name = str(row[1]).strip()
-
-            def to_num(v):
-                try: return float(str(v).replace(",","").replace("+","").strip())
-                except: return 0.0
-
-            records.append({
-                "股票代號":   code,
-                "股票名稱":   name,
-                "外資買賣超": to_num(row[4]),
-                "投信買賣超": to_num(row[10]),
-                "自營買賣超": to_num(row[11]),
-                "三大合計":   to_num(row[18]),
-                "抓取日期":   trade_date,
-            })
-
-        if not records:
-            log.warning(f"三大法人：篩選後無符合股票（共 {len(rows)} 筆原始資料）")
-            return pd.DataFrame()
-
-        result = pd.DataFrame(records)
-        log.info(f"三大法人全市場：總計 {len(rows)} 筆，篩選出 {len(result)} 檔")
-        return result.reset_index(drop=True)
-
-    except Exception as e:
-        log.error(f"三大法人全市場失敗: {e}")
+    if not records:
+        log.warning("批次法人資料：無結果")
         return pd.DataFrame()
+
+    df = pd.DataFrame(records)
+    log.info(f"批次法人資料完成：{len(df)}/{total} 筆")
+    return df
 
 
 def compute_institutional_signal(inst_df: pd.DataFrame) -> pd.DataFrame:
@@ -249,8 +213,6 @@ def compute_institutional_signal(inst_df: pd.DataFrame) -> pd.DataFrame:
     df["排序"] = df["法人訊號"].map(order).fillna(8)
     df = df.sort_values(["排序","三大合計"], ascending=[True,False])
     df = df.drop("排序", axis=1).reset_index(drop=True)
-    if "排名" in df.columns:
-        df = df.drop(columns=["排名"])
     df.insert(0, "排名", range(1, len(df)+1))
 
     buy3 = (df["買超法人數"] == 3).sum()
@@ -259,10 +221,14 @@ def compute_institutional_signal(inst_df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def cross_with_etf(inst_df: pd.DataFrame, smart_df: pd.DataFrame) -> pd.DataFrame:
+def cross_with_etf(
+    inst_df: pd.DataFrame,
+    smart_df: pd.DataFrame,
+    fundamental_df: pd.DataFrame = None,
+) -> pd.DataFrame:
     """
-    三大法人 × 主動ETF持股 交叉驗證
-    找出「ETF加碼 + 法人同步買超」的股票
+    三大法人 × 主動ETF持股 × 基本面 交叉驗證
+    綜合評分 0-10 分
     """
     if inst_df.empty or smart_df.empty:
         return pd.DataFrame()
@@ -275,43 +241,72 @@ def cross_with_etf(inst_df: pd.DataFrame, smart_df: pd.DataFrame) -> pd.DataFram
 
     merged = smart_df.merge(
         inst_df[["股票代號","外資買賣超","投信買賣超","自營買賣超","三大合計","買超法人數","法人訊號"]],
-        on="股票代號",
-        how="left",
+        on="股票代號", how="left",
     )
 
-    merged["買超法人數"] = merged["買超法人數"].fillna(0).astype(int)
-    merged["三大合計"]   = pd.to_numeric(merged["三大合計"], errors="coerce").fillna(0)
+    # 合併基本面
+    if fundamental_df is not None and not fundamental_df.empty:
+        fundamental_df = fundamental_df.copy()
+        fundamental_df["股票代號"] = fundamental_df["股票代號"].astype(str).str.strip()
+        fund_cols = ["股票代號","年增率%","營收訊號","本益比","本益比訊號","基本面分數"]
+        avail_fund = [c for c in fund_cols if c in fundamental_df.columns]
+        merged = merged.merge(fundamental_df[avail_fund], on="股票代號", how="left")
 
-    # 綜合評分
+    merged["買超法人數"] = pd.to_numeric(merged.get("買超法人數"), errors="coerce").fillna(0).astype(int)
+    merged["三大合計"]   = pd.to_numeric(merged.get("三大合計"),   errors="coerce").fillna(0)
+    merged["基本面分數"] = pd.to_numeric(merged.get("基本面分數"), errors="coerce").fillna(0)
+
+    # ── 綜合評分（0-10分）──────────────────────────────────────
     def total_score(row):
-        etf_score  = min(int(row.get("持有ETF數", 0)) / 34 * 5, 5)
-        inst_score = min(int(row.get("買超法人數", 0)) / 3 * 3, 3)
-        news_score = min(int(row.get("熱詞數", 0)) / 3, 2) if "熱詞數" in row.index else 0
-        return round(etf_score + inst_score + news_score, 1)
+        # ETF 持股共識（0-3分）
+        etf_n = int(row.get("持有ETF數", 0))
+        etf_score = 3 if etf_n >= 10 else 2 if etf_n >= 5 else 1 if etf_n >= 3 else 0
+
+        # 三大法人（0-3分）
+        inst_n = int(row.get("買超法人數", 0))
+        inst_score = 3 if inst_n == 3 else 2 if inst_n == 2 else 1 if inst_n == 1 else 0
+
+        # 基本面月營收（0-2分）
+        fund_score = min(float(row.get("基本面分數", 0)), 2)
+
+        # 技術面（0-1分）
+        ma_score = 1 if str(row.get("站上MA20","")).lower() in ["true","1","是"] else 0
+
+        # 散戶情緒（0-1分，搜尋量低=好）
+        # 暫時不加，等 Trends 資料穩定後加入
+
+        return round(etf_score + inst_score + fund_score + ma_score, 1)
 
     merged["綜合評分"] = merged.apply(total_score, axis=1)
 
-    # 多方驗證標籤
+    # ── 多方驗證標籤 ────────────────────────────────────────────
     def multi_verify(row):
         tags = []
-        if int(row.get("持有ETF數",0)) >= 10: tags.append("ETF✅")
-        if int(row.get("買超法人數",0)) >= 2:  tags.append("法人✅")
-        if int(row.get("熱詞數",0)) >= 1:      tags.append("題材✅")
-        if row.get("站上MA20") in [True,"True","TRUE"]: tags.append("月線✅")
+        if int(row.get("持有ETF數",0)) >= 5:
+            tags.append("ETF✅")
+        if int(row.get("買超法人數",0)) >= 2:
+            tags.append("法人✅")
+        rev_signal = str(row.get("營收訊號",""))
+        if "成長" in rev_signal or "高速" in rev_signal:
+            tags.append("營收✅")
+        if str(row.get("站上MA20","")).lower() in ["true","1","是"]:
+            tags.append("月線✅")
         return " ".join(tags) if tags else "—"
 
     merged["多方驗證"] = merged.apply(multi_verify, axis=1)
 
-    # 篩選有法人資料且有ETF持有的
-    result = merged[merged["買超法人數"] >= 0].copy()
+    result = merged.copy()
     result = result.sort_values(["綜合評分","三大合計"], ascending=[False,False])
     result = result.reset_index(drop=True)
     if "排名" in result.columns:
         result = result.drop(columns=["排名"])
     result.insert(0, "排名", range(1, len(result)+1))
 
-    strong = (result["買超法人數"] >= 2) & (pd.to_numeric(result.get("持有ETF數",0), errors="coerce") >= 5)
-    log.info(f"多方驗證：{strong.sum()} 檔同時獲ETF+法人雙重確認")
+    strong = (
+        (pd.to_numeric(result.get("持有ETF數",0), errors="coerce") >= 5) &
+        (result["買超法人數"] >= 2)
+    )
+    log.info(f"多方驗證：{strong.sum()} 檔 ETF+法人雙重確認，最高評分：{result['綜合評分'].max():.1f}")
     return result
 
 
