@@ -312,7 +312,19 @@ def main():
 
     # ── 階段一：採集 34 檔 ETF ──────────────────────────────
     log.info("[1/3] 抓取 34 檔主動式 ETF 持股...")
-    raw_df = fetch_all_etfs(TRADE_DATE)
+
+    if RUN_MODE in ("inst", "news"):
+        # inst/news 模式：直接從 Sheets 讀取今日資料，不重新抓取
+        log.info(f"RUN_MODE={RUN_MODE}，從 Sheets 讀取今日資料...")
+        _client0 = get_client(CREDENTIALS_PATH)
+        _ss0 = get_or_create_spreadsheet(_client0, SPREADSHEET_ID)
+        raw_df = load_history_from_sheets(_ss0, days=1)
+        raw_df = raw_df[raw_df["抓取時間"] == TRADE_DATE].copy() if not raw_df.empty else pd.DataFrame()
+        if raw_df.empty:
+            log.warning(f"Sheets 無 {TRADE_DATE} 資料，改為重新抓取")
+            raw_df = fetch_all_etfs(TRADE_DATE)
+    else:
+        raw_df = fetch_all_etfs(TRADE_DATE)
 
     if raw_df.empty:
         msg = f"[{TRADE_DATE}] 無資料（可能非交易日）"
@@ -347,13 +359,16 @@ def main():
     except Exception as e:
         log.warning(f"股價串接失敗（不影響主流程）: {e}")
 
-    # ── 階段三：寫入 Google Sheets ──────────────────────────
+    # ── 階段三：寫入 Google Sheets（僅 core 模式）────────────
     log.info("[3/3] 寫入 Google Sheets...")
     try:
         client = get_client(CREDENTIALS_PATH)
         ss = get_or_create_spreadsheet(client, SPREADSHEET_ID)
-        write_smart_money_to_sheets(ss, smart_df, TRADE_DATE)
-        log.info("Google Sheets 寫入完成！")
+        if RUN_MODE == "core":
+            write_smart_money_to_sheets(ss, smart_df, TRADE_DATE)
+            log.info("Google Sheets 寫入完成！")
+        else:
+            log.info(f"RUN_MODE={RUN_MODE}，跳過聰明錢/盤後寫入")
 
         # ── 追加盤後原始數據庫 ──
         try:
@@ -378,41 +393,44 @@ def main():
         log.error(f"Sheets 寫入失敗: {e}")
         sys.exit(1)
 
-    # ── 階段四：每日差異比對 ────────────────────────────────────
+    # ── 階段四：每日差異比對（僅 core 模式）───────────────────────
     log.info("[4/4] 執行每日差異比對...")
-    try:
-        client2 = get_client(CREDENTIALS_PATH)
-        ss2 = get_or_create_spreadsheet(client2, SPREADSHEET_ID)
-        history_df = load_history_from_sheets(ss2, days=2)
-
-        if history_df.empty:
-            log.warning("歷史資料不足，跳過差異比對（需要兩天資料）")
+    if RUN_MODE != "core":
+        log.info(f"RUN_MODE={RUN_MODE}，跳過差異比對")
         else:
-            # 今日原始資料
-            diff_detail = compute_daily_diff(raw_df, history_df, TRADE_DATE)
+        try:
+            client2 = get_client(CREDENTIALS_PATH)
+            ss2 = get_or_create_spreadsheet(client2, SPREADSHEET_ID)
+            history_df = load_history_from_sheets(ss2, days=2)
 
-            if not diff_detail.empty:
-                # 加入股價計算資金動向
-                if "收盤價" in smart_df.columns:
-                    price_ref = smart_df[["股票代號","收盤價"]].drop_duplicates()
-                    diff_detail = compute_fund_flow(diff_detail, price_ref)
-
-                # 跨ETF聚合
-                stock_diff = aggregate_stock_diff(diff_detail)
-
-                # 寫入 Sheets
-                _write_diff_to_sheets(ss2, stock_diff, diff_detail, TRADE_DATE)
-                log.info(f"差異比對完成：{len(stock_diff)} 檔有變動")
+            if history_df.empty:
+            log.warning("歷史資料不足，跳過差異比對（需要兩天資料）")
             else:
-                log.warning("差異比對無結果")
-    except Exception as e:
-        log.warning(f"差異比對失敗（不影響主流程）: {e}")
+                # 今日原始資料
+                diff_detail = compute_daily_diff(raw_df, history_df, TRADE_DATE)
 
-    # ── core 模式到此結束 ───────────────────────────────────────
-    if RUN_MODE == "core":
-        log.info("RUN_MODE=core，核心階段完成")
-        log.info("===== 全部完成 =====")
-        return
+                if not diff_detail.empty:
+                    # 加入股價計算資金動向
+                    if "收盤價" in smart_df.columns:
+                        price_ref = smart_df[["股票代號","收盤價"]].drop_duplicates()
+                        diff_detail = compute_fund_flow(diff_detail, price_ref)
+
+                    # 跨ETF聚合
+                    stock_diff = aggregate_stock_diff(diff_detail)
+
+                    # 寫入 Sheets
+                    _write_diff_to_sheets(ss2, stock_diff, diff_detail, TRADE_DATE)
+                    log.info(f"差異比對完成：{len(stock_diff)} 檔有變動")
+                else:
+                    log.warning("差異比對無結果")
+        except Exception as e:
+            log.warning(f"差異比對失敗（不影響主流程）: {e}")
+
+        # ── core 模式到此結束 ───────────────────────────────────────
+        if RUN_MODE == "core":
+            log.info("RUN_MODE=core，核心階段完成")
+            log.info("===== 全部完成 =====")
+            return
 
     # ── 階段五：新聞熱度收集與題材分析 ──────────────────────────
     log.info("[5/5] 收集財經新聞 + 題材生命週期分析...")
@@ -458,6 +476,7 @@ def main():
         if not fundamental_df.empty:
             log.info(f"基本面完成：{len(fundamental_df)} 檔，高速成長：{fundamental_df.get('營收訊號','').eq('🚀 高速成長').sum() if '營收訊號' in fundamental_df.columns else 0} 檔")
             # 寫入 Sheets
+            import time as _t; _t.sleep(15)
             _write_fundamental_to_sheets(ss2, fundamental_df, TRADE_DATE)
     except Exception as e:
         log.warning(f"基本面失敗（不影響主流程）: {e}")
@@ -473,6 +492,7 @@ def main():
             cross_df = cross_with_etf(inst_df, smart_df, fundamental_df)
 
             # 寫入 Sheets
+            import time as _t; _t.sleep(15)
             _write_institutional_to_sheets(ss2, inst_df, cross_df, TRADE_DATE)
             log.info(f"法人資料完成：{len(inst_df)} 檔，三大齊買：{(inst_df['買超法人數']==3).sum()} 檔")
         else:
