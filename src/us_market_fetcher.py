@@ -14,7 +14,7 @@ import pytz
 log = logging.getLogger(__name__)
 TW_TZ = pytz.timezone("Asia/Taipei")
 
-ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "A92VPBM3BPP8MXQN")
+ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "")
 
 # 完整市場追蹤清單
 MARKET_TARGETS = {

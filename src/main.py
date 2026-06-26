@@ -1,4 +1,4 @@
-"""
+﻿"""
 main.py v2
 整合新版 fetcher（etfinfo.tw）+ analyzer + sheets_writer
 Cloud Run Jobs 執行入口
@@ -40,7 +40,7 @@ SPREADSHEET_ID   = os.environ.get("SPREADSHEET_ID", "")
 SERPAPI_KEY      = os.environ.get("SERPAPI_KEY", "")
 CREDENTIALS_PATH = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
 LINE_TOKEN        = os.environ.get("LINE_NOTIFY_TOKEN", "")
-ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "A92VPBM3BPP8MXQN")
+ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 # 交易日判斷：15:30 前用前一個交易日，15:30 後用今日
 import pytz as _pytz
