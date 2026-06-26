@@ -110,6 +110,25 @@ def format_change(val):
 
 
 # ── Sidebar ──────────────────────────────────────────────────
+# 隱藏分隔線的 radio button
+st.markdown("""
+<style>
+div[data-testid="stRadio"] label:has(p:contains("──")) {
+    pointer-events: none;
+    opacity: 0.6;
+    font-weight: bold;
+    font-size: 0.85em;
+    color: gray;
+}
+div[data-testid="stRadio"] label:has(p:contains("──")) div[data-testid="stMarkdownContainer"] {
+    display: none;
+}
+div[data-testid="stRadio"] div:has(label p:contains("──")) input {
+    display: none !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 with st.sidebar:
     st.title("⚡ 狙擊系統")
     st.caption("投信主力追蹤 · 每日盤後更新")
