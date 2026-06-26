@@ -130,6 +130,7 @@ with st.sidebar:
         "🎯 題材位置",
         "📱 散戶情緒",
         "── 其他 ──",
+        "🤖 每日AI總結",
         "📊 ETF 覆蓋分析",
         "🔍 個股查詢",
         "🗂️ 原始持股庫",
@@ -795,6 +796,32 @@ elif page == "🎯 今日聰明錢名單":
 # ══════════════════════════════════════════════════════════════
 # 頁面 2：ETF 覆蓋分析
 # ══════════════════════════════════════════════════════════════
+elif page == "🤖 每日AI總結":
+    st.title("🤖 每日 AI 投資報告")
+    st.caption("由 Claude AI 整合 ETF籌碼、法人、基本面、題材、美股，產生專業投資分析")
+    df = load_sheet("每日AI總結")
+    if df.empty:
+        st.warning("尚無 AI 報告（每日 23:00 後更新）")
+    else:
+        # 顯示最新一筆
+        latest = df.iloc[-1]
+        date = latest.get("日期", "")
+        time_str = latest.get("更新時間", "")
+        # 合併兩欄報告
+        part1 = latest.get("AI分析報告（上）", latest.get("AI分析報告", ""))
+        part2 = latest.get("AI分析報告（下）", "")
+        report = part1 + part2
+        st.caption(f"📅 {date} 更新：{time_str}")
+        st.markdown(report)
+        st.divider()
+        # 顯示歷史報告
+        if len(df) > 1:
+            with st.expander("📚 歷史報告"):
+                for _, row in df.iloc[:-1].iloc[::-1].iterrows():
+                    st.caption(f"📅 {row.get('日期','')} {row.get('更新時間','')}")
+                    st.markdown(row.get("AI分析報告",""))
+                    st.divider()
+
 elif page == "📊 ETF 覆蓋分析":
     st.title("📊 ETF 覆蓋分析")
     st.caption("哪些股票被最多主動式ETF同時納入持股")

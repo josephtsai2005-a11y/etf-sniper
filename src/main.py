@@ -20,6 +20,8 @@ from news_fetcher import fetch_all_news, tag_articles, auto_extract_hot_words
 from institutional_fetcher import fetch_batch_institutional, compute_institutional_signal, cross_with_etf
 from fundamental_fetcher import fetch_batch_fundamental
 from trends_fetcher import fetch_all_trends, compute_trends_signal, cross_news_and_trends
+from ai_analyzer import generate_investment_report, write_ai_report_to_sheets, generate_stock_keywords
+from us_market_fetcher import fetch_all_us_market, format_us_market_for_ai, get_market_sentiment_summary
 from trend_analyzer import compute_keyword_timeseries, compute_trend_report, match_keywords_to_stocks
 from sheets_writer import get_client, get_or_create_spreadsheet, write_all, read_history
 from analyzer import run_analysis
@@ -37,7 +39,9 @@ log = logging.getLogger(__name__)
 SPREADSHEET_ID   = os.environ.get("SPREADSHEET_ID", "")
 SERPAPI_KEY      = os.environ.get("SERPAPI_KEY", "")
 CREDENTIALS_PATH = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-LINE_TOKEN       = os.environ.get("LINE_NOTIFY_TOKEN", "")
+LINE_TOKEN        = os.environ.get("LINE_NOTIFY_TOKEN", "")
+ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "A92VPBM3BPP8MXQN")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 # 交易日判斷：15:30 前用前一個交易日，15:30 後用今日
 import pytz as _pytz
 from datetime import timedelta
@@ -455,6 +459,38 @@ def main():
     # ── news 模式到此結束，inst 模式跑法人/基本面 ────────────
     if RUN_MODE == "news":
         log.info("RUN_MODE=news，新聞階段完成")
+        log.info("===== 全部完成 =====")
+        return
+
+    # ── AI 模式：整合所有資料 + 美股 → 產生投資報告 ─────────────
+    if RUN_MODE == "ai":
+        log.info("[AI] 開始產生每日投資報告...")
+        try:
+            import time as _t
+            import os as _os
+            _os.environ["ALPHA_VANTAGE_KEY"] = ALPHA_VANTAGE_KEY
+            _os.environ["ANTHROPIC_API_KEY"] = ANTHROPIC_API_KEY
+
+            log.info("[AI] 抓取美股資料（約4分鐘）...")
+            us_data = fetch_all_us_market()
+            us_text = format_us_market_for_ai(us_data)
+            us_summary = get_market_sentiment_summary(us_data)
+            log.info(f"[AI] 美股摘要：{us_summary}")
+
+            log.info("[AI] 產生投資報告...")
+            report = generate_investment_report(ss2, TRADE_DATE, us_text)
+
+            if report:
+                _t.sleep(5)
+                write_ai_report_to_sheets(ss2, report, TRADE_DATE)
+                send_line_notify(f"\n📊 {TRADE_DATE} AI投資報告\n\n{report[:300]}...\n\n完整報告請看 Sheets")
+                log.info("[AI] 報告完成！")
+            else:
+                log.warning("[AI] 報告產生失敗")
+        except Exception as e:
+            log.warning(f"AI 模式失敗: {e}")
+            import traceback
+            log.debug(traceback.format_exc())
         log.info("===== 全部完成 =====")
         return
 

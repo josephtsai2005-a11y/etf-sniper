@@ -1,5 +1,0 @@
-﻿f = open('main.py', encoding='utf-8')
-c = f.read()
-f.close()
-idx = c.find('def _write_trends_to_sheets')
-print(c[idx:idx+600])
