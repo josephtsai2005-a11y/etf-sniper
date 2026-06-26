@@ -43,7 +43,7 @@ def get_last_trading_date() -> str:
     return today.strftime("%Y%m%d")
 
 
-def fetch_etfinfo_holdings(etf_code: str) -> pd.DataFrame:
+def fetch_etfinfo_holdings(etf_code: str, trade_date: str = None) -> pd.DataFrame:
     """
     爬取 etfinfo.tw 成分股頁面（BeautifulSoup 解析）
     資料：代號、名稱、權重、股數
@@ -190,7 +190,7 @@ def fetch_all_etfs(trade_date: Optional[str] = None) -> pd.DataFrame:
     frames, fail = [], []
     for i, code in enumerate(ETF_LIST, 1):
         log.info(f"[{i:02d}/{len(ETF_LIST)}] {code}")
-        df = fetch_etfinfo_holdings(code)
+        df = fetch_etfinfo_holdings(code, trade_date=trade_date)
         if not df.empty:
             frames.append(df)
         else:
