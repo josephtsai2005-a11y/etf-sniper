@@ -369,6 +369,11 @@ def main():
             log.info("Google Sheets 寫入完成！")
         else:
             log.info(f"RUN_MODE={RUN_MODE}，跳過聰明錢/盤後寫入")
+        # inst/news 模式也需要 ss2
+        if RUN_MODE != "core":
+            import time as _t2; _t2.sleep(5)
+            client2 = get_client(CREDENTIALS_PATH)
+            ss2 = get_or_create_spreadsheet(client2, SPREADSHEET_ID)
 
         # ── 追加盤後原始數據庫 ──
         try:
@@ -394,43 +399,29 @@ def main():
         sys.exit(1)
 
     # ── 階段四：每日差異比對（僅 core 模式）───────────────────────
-    log.info("[4/4] 執行每日差異比對...")
     if RUN_MODE != "core":
         log.info(f"RUN_MODE={RUN_MODE}，跳過差異比對")
-        else:
+    else:
+        log.info("[4/4] 執行每日差異比對...")
         try:
             client2 = get_client(CREDENTIALS_PATH)
             ss2 = get_or_create_spreadsheet(client2, SPREADSHEET_ID)
             history_df = load_history_from_sheets(ss2, days=2)
-
             if history_df.empty:
-            log.warning("歷史資料不足，跳過差異比對（需要兩天資料）")
+                log.warning("歷史資料不足，跳過差異比對（需要兩天資料）")
             else:
-                # 今日原始資料
                 diff_detail = compute_daily_diff(raw_df, history_df, TRADE_DATE)
-
                 if not diff_detail.empty:
-                    # 加入股價計算資金動向
                     if "收盤價" in smart_df.columns:
                         price_ref = smart_df[["股票代號","收盤價"]].drop_duplicates()
                         diff_detail = compute_fund_flow(diff_detail, price_ref)
-
-                    # 跨ETF聚合
                     stock_diff = aggregate_stock_diff(diff_detail)
-
-                    # 寫入 Sheets
                     _write_diff_to_sheets(ss2, stock_diff, diff_detail, TRADE_DATE)
                     log.info(f"差異比對完成：{len(stock_diff)} 檔有變動")
                 else:
                     log.warning("差異比對無結果")
         except Exception as e:
             log.warning(f"差異比對失敗（不影響主流程）: {e}")
-
-        # ── core 模式到此結束 ───────────────────────────────────────
-        if RUN_MODE == "core":
-            log.info("RUN_MODE=core，核心階段完成")
-            log.info("===== 全部完成 =====")
-            return
 
     # ── 階段五：新聞熱度收集與題材分析 ──────────────────────────
     log.info("[5/5] 收集財經新聞 + 題材生命週期分析...")

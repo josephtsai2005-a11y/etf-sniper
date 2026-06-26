@@ -147,51 +147,57 @@ def match_keywords_to_stocks(
 ) -> pd.DataFrame:
     """
     將新聞熱詞對應到個股
-    stock_keyword_map: {股票代號: [相關關鍵字列表]}
+    1. 直接用股票名稱比對新聞關鍵字（自動）
+    2. 補充 DEFAULT_MAP 的產業關鍵字（手動）
     """
     if trend_df.empty or smart_df.empty:
         return pd.DataFrame()
-
-    # 預設個股關鍵字對應表
     DEFAULT_MAP = {
-        "2330": ["台積電法說", "先進製程", "CoWoS", "NVIDIA", "GB200", "HBM"],
-        "2454": ["AI伺服器", "NVIDIA", "GB200", "先進製程"],
-        "2383": ["CoWoS", "先進封裝", "先進製程"],
-        "2308": ["電源管理", "AI伺服器", "電動車"],
-        "6223": ["CoWoS", "先進封裝", "矽光子"],
-        "3037": ["CoWoS", "先進封裝", "PCB"],
-        "2327": ["被動元件", "電動車", "AI伺服器"],
-        "2345": ["網通", "400G", "AI伺服器"],
-        "3017": ["散熱", "AI伺服器", "液冷"],
-        "6274": ["散熱", "AI伺服器", "液冷"],
-        "2059": ["鉸鏈", "筆電", "AI PC"],
-        "2368": ["MLCC", "被動元件", "電動車"],
-        "5274": ["散熱", "AI伺服器"],
-        "2360": ["IC設計", "電源管理"],
-        "3711": ["封測", "先進封裝", "CoWoS"],
+        "2330": ["台積電", "先進製程", "CoWoS", "NVIDIA", "GB200", "HBM"],
+        "2454": ["聯發科", "AI伺服器", "NVIDIA", "GB200"],
+        "2383": ["台光電", "CoWoS", "先進封裝"],
+        "2308": ["台達電", "電源管理", "AI伺服器", "電動車"],
+        "6223": ["旺矽", "CoWoS", "先進封裝", "矽光子"],
+        "3037": ["欣興", "CoWoS", "PCB"],
+        "2327": ["國巨", "被動元件", "電動車"],
+        "2345": ["智邦", "網通", "400G", "AI伺服器"],
+        "3017": ["奇鋐", "散熱", "AI伺服器", "液冷"],
+        "6274": ["台燿", "散熱", "AI伺服器"],
+        "2059": ["川湖", "鉸鏈", "筆電"],
+        "2368": ["金像電", "MLCC", "被動元件"],
+        "5274": ["信驊", "散熱", "AI伺服器"],
+        "2360": ["致茂", "IC設計", "電源管理"],
+        "3711": ["日月光", "封測", "先進封裝"],
+        "4958": ["臻鼎", "PCB", "AI伺服器"],
+        "6669": ["緯穎", "AI伺服器", "散熱"],
+        "2344": ["華邦電", "HBM", "記憶體"],
+        "8046": ["南電", "PCB", "先進封裝"],
+        "6187": ["萬潤", "散熱", "液冷"],
     }
-
     kw_map = stock_keyword_map or DEFAULT_MAP
-
-    # 爆發/成長中的關鍵字
+    # 所有關鍵字（包含萌芽階段）
     hot_keywords = set(
-        trend_df[trend_df["階段"].isin(["🔥 爆發", "⚡ 成長"])]["關鍵字"].tolist()
+        trend_df[trend_df["階段"].isin(["🔥 爆發", "⚡ 成長", "🌱 萌芽"])]["關鍵字"].tolist()
     )
+    # 同時加入：用股票名稱直接比對關鍵字
+    all_kw = set(trend_df["關鍵字"].tolist())
 
     records = []
     for _, stock_row in smart_df.iterrows():
         code = str(stock_row.get("股票代號", ""))
-        name = stock_row.get("股票名稱", "")
-
-        related_kws = kw_map.get(code, [])
+        name = str(stock_row.get("股票名稱", ""))
+        # 1. DEFAULT_MAP 關鍵字
+        related_kws = list(kw_map.get(code, []))
+        # 2. 股票名稱直接比對（自動）
+        for kw in all_kw:
+            if name and len(name) >= 2 and name in kw:
+                if kw not in related_kws:
+                    related_kws.append(kw)
         matched_hot = [kw for kw in related_kws if kw in hot_keywords]
-
         if matched_hot:
-            # 找對應的成長率
             matched_trends = trend_df[trend_df["關鍵字"].isin(matched_hot)]
             max_growth = matched_trends["成長率%"].max() if not matched_trends.empty else 0
             stages = matched_trends["階段"].tolist()
-
             records.append({
                 "股票代號":    code,
                 "股票名稱":    name,
@@ -201,10 +207,9 @@ def match_keywords_to_stocks(
                 "熱詞數":     len(matched_hot),
                 "最高成長率%": round(max_growth, 1),
                 "題材階段":   " / ".join(set(stages)),
-                "綜合強度":   f"籌碼{'✅' if int(stock_row.get('持有ETF數',0)) >= 5 else '⚪'} "
-                              f"題材{'✅' if matched_hot else '⚪'}",
+                "綜合強度":   f"籌碼({'✅' if int(stock_row.get('持有ETF數',0)) >= 5 else '⚪'}) "
+                              f"題材({'✅' if matched_hot else '⚪'})",
             })
-
     if not records:
         return pd.DataFrame()
 
