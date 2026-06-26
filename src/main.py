@@ -51,6 +51,7 @@ else:
     _trade_day = _tw_now
 _today_str = _trade_day.strftime("%Y%m%d")
 TRADE_DATE = os.environ.get("TRADE_DATE", _today_str)
+RUN_MODE = os.environ.get("RUN_MODE", "core")  # core | inst | news
 
 
 def send_line_notify(message: str):
@@ -407,6 +408,12 @@ def main():
     except Exception as e:
         log.warning(f"差異比對失敗（不影響主流程）: {e}")
 
+    # ── core 模式到此結束 ───────────────────────────────────────
+    if RUN_MODE == "core":
+        log.info("RUN_MODE=core，核心階段完成")
+        log.info("===== 全部完成 =====")
+        return
+
     # ── 階段五：新聞熱度收集與題材分析 ──────────────────────────
     log.info("[5/5] 收集財經新聞 + 題材生命週期分析...")
     try:
@@ -435,6 +442,12 @@ def main():
         log.warning(f"新聞模組失敗（不影響主流程）: {e}")
         import traceback
         log.debug(traceback.format_exc())
+
+    # ── news 模式到此結束，inst 模式跑法人/基本面 ────────────
+    if RUN_MODE == "news":
+        log.info("RUN_MODE=news，新聞階段完成")
+        log.info("===== 全部完成 =====")
+        return
 
     # ── 階段六.五：基本面資料 ───────────────────────────────────
     log.info("[6.5] 抓取基本面資料（月營收、本益比）...")
