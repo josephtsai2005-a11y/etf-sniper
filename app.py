@@ -115,25 +115,29 @@ with st.sidebar:
     st.caption("投信主力追蹤 · 每日盤後更新")
     st.divider()
 
-    st.caption("🕒 15:30 核心資料")
-    page = st.radio("頁面", [
+    all_pages = [
+        "── 15:30 核心資料 ──",
         "🏆 多方驗證名單",
         "⚡ 今日訊號",
         "🎯 今日聰明錢名單",
         "📊 持股異動明細",
-        "— 16:45 法人資料 —",
+        "── 16:45 法人資料 ──",
         "🏦 三大法人",
         "📈 基本面資料",
-        "— 21:00 新聞分析 —",
+        "── 21:00 新聞分析 ──",
         "🔗 新聞×籌碼交叉",
         "📰 題材趨勢",
         "🎯 題材位置",
         "📱 散戶情緒",
-        "— 其他 —",
+        "── 其他 ──",
         "📊 ETF 覆蓋分析",
         "🔍 個股查詢",
         "🗂️ 原始持股庫",
-    ])
+    ]
+    _separators = [p for p in all_pages if p.startswith("──")]
+    page = st.radio("頁面", all_pages, label_visibility="collapsed")
+    if page in _separators:
+        st.stop()
 
     st.divider()
 
