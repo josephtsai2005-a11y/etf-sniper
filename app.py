@@ -923,7 +923,7 @@ elif page == "ETF 覆蓋分析":
 # ══════════════════════════════════════════════════════════════
 # 頁面 3：個股查詢
 # ══════════════════════════════════════════════════════════════
-elif page == "📈 個股查詢":
+elif page == "個股查詢":
     st.title("📈 個股查詢")
 
     df = load_sheet(SHEET_SMART)
@@ -1010,13 +1010,23 @@ elif page == "題材位置":
     if df.empty:
         st.warning("尚無題材位置資料（每日 21:00 後更新）")
     else:
-        df = df.astype(str)
-        df.columns = [f"{c}_{i}" if df.columns.tolist().count(c) > 1 else c 
-                      for i, c in enumerate(df.columns)]
         try:
+            df = df.astype(str)
+            # 修復重複欄位名稱
+            seen = {}
+            new_cols = []
+            for c in df.columns:
+                if c in seen:
+                    seen[c] += 1
+                    new_cols.append(f"{c}_{seen[c]}")
+                else:
+                    seen[c] = 0
+                    new_cols.append(c)
+            df.columns = new_cols
             st.dataframe(df, use_container_width=True)
         except Exception as e:
-            st.write(df.to_dict())
+            st.warning(f"顯示錯誤: {e}")
+            st.write(df)
 elif page == "原始持股庫":
     st.title("🗂️ 原始持股庫")
     st.caption("34 檔主動式ETF完整持股明細")
