@@ -134,30 +134,66 @@ with st.sidebar:
     st.caption("投信主力追蹤 · 每日盤後更新")
     st.divider()
 
-    all_pages = [
-        "── 15:30 核心資料 ──",
-        "🏆 多方驗證名單",
-        "⚡ 今日訊號",
-        "🎯 今日聰明錢名單",
-        "📊 持股異動明細",
-        "── 16:45 法人資料 ──",
-        "🏦 三大法人",
-        "📈 基本面資料",
-        "── 21:00 新聞分析 ──",
-        "🔗 新聞×籌碼交叉",
-        "📰 題材趨勢",
-        "🎯 題材位置",
-        "📱 散戶情緒",
-        "── 其他 ──",
-        "🤖 每日AI總結",
-        "📊 ETF 覆蓋分析",
-        "🔍 個股查詢",
-        "🗂️ 原始持股庫",
-    ]
-    _separators = [p for p in all_pages if p.startswith("──")]
-    page = st.radio("頁面", all_pages, label_visibility="collapsed")
-    if page in _separators:
-        st.stop()
+    st.markdown("#### 15:30 核心資料")
+    page = st.radio("core", [
+        "多方驗證名單",
+        "今日訊號",
+        "聰明錢名單",
+        "持股異動明細",
+    ], label_visibility="collapsed", key="core")
+
+    st.markdown("---")
+    st.markdown("#### 16:45 法人資料")
+    page2 = st.radio("inst", [
+        "三大法人",
+        "基本面資料",
+    ], label_visibility="collapsed", key="inst")
+
+    st.markdown("---")
+    st.markdown("#### 21:00 新聞分析")
+    page3 = st.radio("news", [
+        "新聞×籌碼交叉",
+        "題材趨勢",
+        "題材位置",
+        "散戶情緒",
+    ], label_visibility="collapsed", key="news")
+
+    st.markdown("---")
+    st.markdown("#### 其他")
+    page4 = st.radio("other", [
+        "每日AI總結",
+        "ETF 覆蓋分析",
+        "個股查詢",
+        "原始持股庫",
+    ], label_visibility="collapsed", key="other")
+
+    # 用 session_state 追蹤最後點選的分組
+    import streamlit as _st
+    if "last_group" not in st.session_state:
+        st.session_state.last_group = "core"
+
+    # 偵測哪個分組被改變
+    if "prev_core" not in st.session_state:
+        st.session_state.prev_core = page
+        st.session_state.prev_inst = page2
+        st.session_state.prev_news = page3
+        st.session_state.prev_other = page4
+
+    if page != st.session_state.prev_core:
+        st.session_state.last_group = "core"
+        st.session_state.prev_core = page
+    elif page2 != st.session_state.prev_inst:
+        st.session_state.last_group = "inst"
+        st.session_state.prev_inst = page2
+    elif page3 != st.session_state.prev_news:
+        st.session_state.last_group = "news"
+        st.session_state.prev_news = page3
+    elif page4 != st.session_state.prev_other:
+        st.session_state.last_group = "other"
+        st.session_state.prev_other = page4
+
+    group_map = {"core": page, "inst": page2, "news": page3, "other": page4}
+    page = group_map[st.session_state.last_group]
 
     st.divider()
 
@@ -178,7 +214,7 @@ if page.startswith("—"):
     st.info("請選擇上方的功能頁面")
     st.stop()
 
-if page == "🏆 多方驗證名單":
+if page == "多方驗證名單":
     st.title("🏆 多方驗證名單")
     st.caption("ETF持股 × 三大法人 × 新聞題材 × 技術面 — 多重確認的高機率標的")
 
@@ -264,7 +300,7 @@ if page == "🏆 多方驗證名單":
 # ══════════════════════════════════════════════════════════════
 # 頁面：三大法人
 # ══════════════════════════════════════════════════════════════
-elif page == "🏦 三大法人":
+elif page == "三大法人":
     st.title("🏦 三大法人買賣超")
     st.caption("外資 + 投信 + 自營商 每日買賣超彙整")
 
@@ -325,7 +361,7 @@ elif page == "🏦 三大法人":
 # ══════════════════════════════════════════════════════════════
 # 頁面 0：今日訊號
 # ══════════════════════════════════════════════════════════════
-elif page == "⚡ 今日訊號":
+elif page == "今日訊號":
     st.title("⚡ 今日訊號")
     st.caption("今日 vs 昨日持股變化 — 加碼/減碼/新增/清倉")
 
@@ -412,7 +448,7 @@ elif page == "⚡ 今日訊號":
 # ══════════════════════════════════════════════════════════════
 # 頁面：題材趨勢
 # ══════════════════════════════════════════════════════════════
-elif page == "📰 題材趨勢":
+elif page == "題材趨勢":
     st.title("📰 題材趨勢")
     st.caption("關鍵字生命週期追蹤 — 萌芽 / 成長 / 爆發 / 衰退")
 
@@ -584,7 +620,7 @@ elif page == "📰 題材趨勢":
 # ══════════════════════════════════════════════════════════════
 # 頁面：新聞×籌碼交叉
 # ══════════════════════════════════════════════════════════════
-elif page == "🔗 新聞×籌碼交叉":
+elif page == "新聞×籌碼交叉":
     st.title("🔗 新聞 × 籌碼 交叉驗證")
     st.caption("新聞題材發酵 + 法人同步建倉 = 高機率標的")
 
@@ -623,7 +659,7 @@ elif page == "🔗 新聞×籌碼交叉":
 # ══════════════════════════════════════════════════════════════
 # 頁面：散戶情緒（Google Trends）
 # ══════════════════════════════════════════════════════════════
-elif page == "📱 散戶情緒":
+elif page == "散戶情緒":
     st.title("📱 散戶情緒指標")
     st.caption("Google Trends 搜尋量 — 散戶關注度越低，越是法人布局期")
 
@@ -709,7 +745,7 @@ elif page == "📱 散戶情緒":
 # ══════════════════════════════════════════════════════════════
 # 頁面 1：今日聰明錢名單
 # ══════════════════════════════════════════════════════════════
-elif page == "🎯 今日聰明錢名單":
+elif page == "聰明錢名單":
     st.title("🎯 今日聰明錢名單")
     st.caption("被最多主動式ETF同時持有的股票 = 專業法人高度共識標的")
 
@@ -815,7 +851,7 @@ elif page == "🎯 今日聰明錢名單":
 # ══════════════════════════════════════════════════════════════
 # 頁面 2：ETF 覆蓋分析
 # ══════════════════════════════════════════════════════════════
-elif page == "🤖 每日AI總結":
+elif page == "每日AI總結":
     st.title("🤖 每日 AI 投資報告")
     st.caption("由 Claude AI 整合 ETF籌碼、法人、基本面、題材、美股，產生專業投資分析")
     df = load_sheet("每日AI總結")
@@ -841,7 +877,7 @@ elif page == "🤖 每日AI總結":
                     st.markdown(row.get("AI分析報告",""))
                     st.divider()
 
-elif page == "📊 ETF 覆蓋分析":
+elif page == "ETF 覆蓋分析":
     st.title("📊 ETF 覆蓋分析")
     st.caption("哪些股票被最多主動式ETF同時納入持股")
 
@@ -975,7 +1011,7 @@ elif page == "📈 個股查詢":
 # 頁面 4：原始持股庫
 # ══════════════════════════════════════════════════════════════
 
-elif page == "📊 持股異動明細":
+elif page == "持股異動明細":
     st.title("📊 持股異動明細")
     st.caption("ETF 每日持股變動明細")
     df = load_sheet("持股異動明細")
@@ -984,7 +1020,7 @@ elif page == "📊 持股異動明細":
     else:
         st.dataframe(df, use_container_width=True)
 
-elif page == "📈 基本面資料":
+elif page == "基本面資料":
     st.title("📈 基本面資料")
     st.caption("月營收、本益比、成長率")
     df = load_sheet("基本面資料")
@@ -993,7 +1029,7 @@ elif page == "📈 基本面資料":
     else:
         st.dataframe(df, use_container_width=True)
 
-elif page == "🎯 題材位置":
+elif page == "題材位置":
     st.title("🎯 題材位置")
     st.caption("新聞題材與散戶情緒交叉分析")
     df = load_sheet("題材位置")
@@ -1001,7 +1037,7 @@ elif page == "🎯 題材位置":
         st.warning("尚無題材位置資料（每日 21:00 後更新）")
     else:
         st.dataframe(df, use_container_width=True)
-elif page == "🗂️ 原始持股庫":
+elif page == "原始持股庫":
     st.title("🗂️ 原始持股庫")
     st.caption("34 檔主動式ETF完整持股明細")
 
