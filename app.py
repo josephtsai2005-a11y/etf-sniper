@@ -135,66 +135,27 @@ with st.sidebar:
     st.divider()
 
     st.markdown("#### 15:30 核心資料")
-    page = st.radio("core", [
-        "多方驗證名單",
-        "今日訊號",
-        "聰明錢名單",
-        "持股異動明細",
-    ], label_visibility="collapsed", key="core")
-
+    for p in ["多方驗證名單","今日訊號","聰明錢名單","持股異動明細"]:
+        if st.button(p, key=f"btn_{p}", use_container_width=True):
+            st.session_state.selected_page = p
     st.markdown("---")
     st.markdown("#### 16:45 法人資料")
-    page2 = st.radio("inst", [
-        "三大法人",
-        "基本面資料",
-    ], label_visibility="collapsed", key="inst")
-
+    for p in ["三大法人","基本面資料"]:
+        if st.button(p, key=f"btn_{p}", use_container_width=True):
+            st.session_state.selected_page = p
     st.markdown("---")
     st.markdown("#### 21:00 新聞分析")
-    page3 = st.radio("news", [
-        "新聞×籌碼交叉",
-        "題材趨勢",
-        "題材位置",
-        "散戶情緒",
-    ], label_visibility="collapsed", key="news")
-
+    for p in ["新聞×籌碼交叉","題材趨勢","題材位置","散戶情緒"]:
+        if st.button(p, key=f"btn_{p}", use_container_width=True):
+            st.session_state.selected_page = p
     st.markdown("---")
     st.markdown("#### 其他")
-    page4 = st.radio("other", [
-        "每日AI總結",
-        "ETF 覆蓋分析",
-        "個股查詢",
-        "原始持股庫",
-    ], label_visibility="collapsed", key="other")
+    for p in ["每日AI總結","ETF 覆蓋分析","個股查詢","原始持股庫"]:
+        if st.button(p, key=f"btn_{p}", use_container_width=True):
+            st.session_state.selected_page = p
 
-    # 追蹤最後點選的分組和選項
     if "selected_page" not in st.session_state:
         st.session_state.selected_page = "多方驗證名單"
-        st.session_state.last_group = "core"
-
-    prev_page = page
-    prev_page2 = page2
-    prev_page3 = page3
-    prev_page4 = page4
-
-    if page != st.session_state.get("prev_core", page):
-        st.session_state.selected_page = page
-        st.session_state.last_group = "core"
-    elif page2 != st.session_state.get("prev_inst", page2):
-        st.session_state.selected_page = page2
-        st.session_state.last_group = "inst"
-    elif page3 != st.session_state.get("prev_news", page3):
-        st.session_state.selected_page = page3
-        st.session_state.last_group = "news"
-    elif page4 != st.session_state.get("prev_other", page4):
-        st.session_state.selected_page = page4
-        st.session_state.last_group = "other"
-
-    st.session_state.prev_core = page
-    st.session_state.prev_inst = page2
-    st.session_state.prev_news = page3
-    st.session_state.prev_other = page4
-
     page = st.session_state.selected_page
 
     st.divider()
@@ -1050,7 +1011,12 @@ elif page == "題材位置":
         st.warning("尚無題材位置資料（每日 21:00 後更新）")
     else:
         df = df.astype(str)
-        st.dataframe(df, use_container_width=True)
+        df.columns = [f"{c}_{i}" if df.columns.tolist().count(c) > 1 else c 
+                      for i, c in enumerate(df.columns)]
+        try:
+            st.dataframe(df, use_container_width=True)
+        except Exception as e:
+            st.write(df.to_dict())
 elif page == "原始持股庫":
     st.title("🗂️ 原始持股庫")
     st.caption("34 檔主動式ETF完整持股明細")
