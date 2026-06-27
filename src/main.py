@@ -20,7 +20,8 @@ from news_fetcher import fetch_all_news, tag_articles, auto_extract_hot_words
 from institutional_fetcher import fetch_batch_institutional, compute_institutional_signal, cross_with_etf
 from fundamental_fetcher import fetch_batch_fundamental
 from trends_fetcher import fetch_all_trends, compute_trends_signal, cross_news_and_trends
-from ai_analyzer import generate_investment_report, write_ai_report_to_sheets, generate_stock_keywords
+from ai_analyzer import generate_investment_report, write_ai_report_to_sheets, generate_stock_keywords, analyze_news_impact
+from topic_analyzer import build_topic_overview, ai_analyze_topic_overview, write_topic_overview_to_sheets
 from us_market_fetcher import fetch_all_us_market, format_us_market_for_ai, get_market_sentiment_summary
 from trend_analyzer import compute_keyword_timeseries, compute_trend_report, match_keywords_to_stocks
 from sheets_writer import get_client, get_or_create_spreadsheet, write_all, read_history
@@ -234,7 +235,7 @@ def _load_news_history(ss, days: int = 14) -> pd.DataFrame:
 
 def _write_trend_to_sheets(ss, trend_df, cross_df, trade_date):
     """寫入題材趨勢報告"""
-    for sheet_name, df in [("題材趨勢", trend_df), ("新聞×籌碼交叉", cross_df)]:
+    for sheet_name, df in [("題材趨勢", trend_df), ("新聞×籌碼交叉(關鍵字版)", cross_df)]:
         existing = [ws.title for ws in ss.worksheets()]
         if sheet_name not in existing:
             ss.add_worksheet(title=sheet_name, rows=1000, cols=20)
@@ -440,6 +441,43 @@ def main():
 
             # 寫入新聞歷史庫
             _write_news_to_sheets(ss2, news_df, TRADE_DATE)
+
+            # ── AI 直接分析新聞影響個股 ──────────────────────
+            if ANTHROPIC_API_KEY:
+                try:
+                    import time as _tai
+                    log.info("AI 分析新聞對個股影響...")
+                    news_impact_df = analyze_news_impact(news_df, smart_df)
+                    if not news_impact_df.empty:
+                        _tai.sleep(5)
+                        SHEET_CROSS = "新聞×籌碼交叉"
+                        _ex = [ws.title for ws in ss2.worksheets()]
+                        if SHEET_CROSS not in _ex:
+                            ss2.add_worksheet(title=SHEET_CROSS, rows=500, cols=10)
+                        ws_cross = ss2.worksheet(SHEET_CROSS)
+                        ws_cross.clear()
+                        ws_cross.append_row([f"新聞×籌碼交叉 {TRADE_DATE}（AI語意分析）"])
+                        _tai.sleep(2)
+                        ws_cross.append_row(news_impact_df.columns.tolist())
+                        ws_cross.append_rows(news_impact_df.fillna("").values.tolist())
+                        log.info(f"AI新聞影響分析完成：{len(news_impact_df)} 筆")
+                except Exception as e:
+                    log.warning(f"AI新聞影響分析失敗: {e}")
+
+            # ── 題材總覽整合 ────────────────────────────────────
+            if ANTHROPIC_API_KEY:
+                try:
+                    import time as _tt
+                    log.info("建立題材總覽...")
+                    topic_df = build_topic_overview(ss2, smart_df, TRADE_DATE)
+                    if not topic_df.empty:
+                        ai_insight = ai_analyze_topic_overview(topic_df, TRADE_DATE)
+                        _tt.sleep(5)
+                        write_topic_overview_to_sheets(ss2, topic_df, ai_insight, TRADE_DATE)
+                        log.info(f"題材總覽完成：{len(topic_df)} 個題材")
+                except Exception as e:
+                    log.warning(f"題材總覽失敗: {e}")
+
 
             # 讀取歷史新聞做趨勢分析
             news_history = _load_news_history(ss2)

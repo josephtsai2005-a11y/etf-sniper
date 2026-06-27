@@ -135,22 +135,18 @@ with st.sidebar:
     st.divider()
 
     st.markdown("#### 15:30 核心資料")
-    for p in ["多方驗證名單","今日訊號","聰明錢名單","持股異動明細"]:
-        if st.button(p, key=f"btn_{p}", use_container_width=True):
-            st.session_state.selected_page = p
-    st.markdown("---")
-    st.markdown("#### 16:45 法人資料")
-    for p in ["三大法人","基本面資料"]:
+    for p in ["多方驗證名單","今日訊號","聰明錢名單","持股異動明細",
+              "三大法人","基本面資料","ETF 覆蓋分析","個股查詢","原始持股庫"]:
         if st.button(p, key=f"btn_{p}", use_container_width=True):
             st.session_state.selected_page = p
     st.markdown("---")
     st.markdown("#### 21:00 新聞分析")
-    for p in ["新聞×籌碼交叉","題材趨勢","題材位置","散戶情緒"]:
+    for p in ["新聞×籌碼交叉","散戶情緒","題材總覽"]:
         if st.button(p, key=f"btn_{p}", use_container_width=True):
             st.session_state.selected_page = p
     st.markdown("---")
-    st.markdown("#### 其他")
-    for p in ["每日AI總結","ETF 覆蓋分析","個股查詢","原始持股庫"]:
+    st.markdown("#### 23:00 AI報告")
+    for p in ["每日AI總結"]:
         if st.button(p, key=f"btn_{p}", use_container_width=True):
             st.session_state.selected_page = p
 
@@ -584,44 +580,63 @@ elif page == "題材趨勢":
 # 頁面：新聞×籌碼交叉
 # ══════════════════════════════════════════════════════════════
 elif page == "新聞×籌碼交叉":
-    st.title("🔗 新聞 × 籌碼 交叉驗證")
-    st.caption("新聞題材發酵 + 法人同步建倉 = 高機率標的")
-
+    st.title("新聞 × 籌碼 交叉驗證")
+    st.caption("Claude AI 語意分析新聞 + ETF籌碼交叉 = 高機率標的")
     cross_df = load_sheet(SHEET_CROSS)
-
     if cross_df.empty:
-        st.warning("尚無交叉驗證資料（需累積新聞資料後自動產出）")
+        st.warning("尚無交叉驗證資料（每日 21:00 後更新）")
         st.stop()
 
-    num_cols(cross_df, ["持有ETF數", "熱詞數", "最高成長率%"])
+    is_ai_version = "影響方向" in cross_df.columns
 
-    st.info("💡 同時滿足「新聞題材發酵」+ 「多檔ETF持有」的個股，是最值得關注的標的")
+    if is_ai_version:
+        st.success("✅ AI語意分析版本")
+        pos = cross_df[cross_df["影響方向"] == "正面"] if "影響方向" in cross_df.columns else pd.DataFrame()
+        neg = cross_df[cross_df["影響方向"] == "負面"] if "影響方向" in cross_df.columns else pd.DataFrame()
+        high = cross_df[cross_df["影響程度"] == "高"] if "影響程度" in cross_df.columns else pd.DataFrame()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("正面影響", f"{len(pos)} 筆")
+        c2.metric("負面影響", f"{len(neg)} 筆")
+        c3.metric("高度影響", f"{len(high)} 筆")
+        st.divider()
+        st.subheader("正面影響標的")
+        if not pos.empty:
+            avail = [c for c in ["股票代號","股票名稱","新聞摘要","影響程度","原因"] if c in pos.columns]
+            st.dataframe(pos[avail].astype(str), use_container_width=True)
+        st.subheader("負面影響標的（需注意）")
+        if not neg.empty:
+            avail = [c for c in ["股票代號","股票名稱","新聞摘要","影響程度","原因"] if c in neg.columns]
+            st.dataframe(neg[avail].astype(str), use_container_width=True)
+        else:
+            st.info("今日無負面影響標的")
+    else:
+        st.info("💡 同時滿足「新聞題材發酵」+「多檔ETF持有」的個股")
+        st.dataframe(cross_df.astype(str), use_container_width=True)
 
-    # 摘要
-    c1, c2 = st.columns(2)
-    c1.metric("題材+籌碼雙重確認", f"{len(cross_df)} 檔")
-    c2.metric("高ETF共識(≥5檔)", f"{(pd.to_numeric(cross_df.get('持有ETF數',pd.Series()), errors='coerce') >= 5).sum()} 檔")
-
-    st.divider()
-
-    display_cols = ["排名", "股票代號", "股票名稱", "持有ETF數", "訊號",
-                    "相關熱詞", "熱詞數", "最高成長率%", "題材階段", "綜合強度"]
-    available = [c for c in display_cols if c in cross_df.columns]
-
-    st.dataframe(
-        cross_df[available].reset_index(drop=True),
-        use_container_width=True,
-        height=500,
-        hide_index=True,
-        column_config={
-            "持有ETF數":   st.column_config.ProgressColumn("ETF持有數", min_value=0, max_value=34, format="%d"),
-            "最高成長率%": st.column_config.NumberColumn("題材成長率%", format="%.1f%%"),
-        }
-    )
-
-# ══════════════════════════════════════════════════════════════
 # 頁面：散戶情緒（Google Trends）
 # ══════════════════════════════════════════════════════════════
+elif page == "題材總覽":
+    st.title("題材總覽")
+    st.caption("ETF布局題材 × 新聞熱度 × 散戶情緒反向指標")
+    df = load_sheet("題材總覽")
+    if df.empty:
+        st.warning("尚無題材總覽資料（每日 21:00 後更新）")
+    else:
+        # 顯示 AI 洞察
+        if len(df) > 0 and "AI分析" in str(df.iloc[0].values):
+            st.info(str(df.iloc[0].values[0]).replace("AI分析：",""))
+            df = df.iloc[1:].reset_index(drop=True)
+        # ETF有布局的題材
+        etf_df = df[df.get("ETF布局數","0").astype(str) != "0"] if "ETF布局數" in df.columns else pd.DataFrame()
+        if not etf_df.empty:
+            st.subheader(f"ETF有布局的題材（{len(etf_df)} 個）")
+            avail = [c for c in ["題材","階段","今日篇數","趨勢","散戶關注","進場訊號","ETF相關持股","ETF布局數"] if c in etf_df.columns]
+            st.dataframe(etf_df[avail].astype(str), use_container_width=True)
+        st.divider()
+        st.subheader("所有題材")
+        avail = [c for c in ["題材","階段","今日篇數","近3日均","趨勢","散戶關注","進場訊號"] if c in df.columns]
+        st.dataframe(df[avail].astype(str), use_container_width=True)
+
 elif page == "散戶情緒":
     st.title("📱 散戶情緒指標")
     st.caption("Google Trends 搜尋量 — 散戶關注度越低，越是法人布局期")

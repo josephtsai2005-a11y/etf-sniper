@@ -8,11 +8,12 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 MODEL = "claude-sonnet-4-6"
 
 def call_claude(prompt, system="", max_tokens=2000):
-    if not ANTHROPIC_API_KEY:
+    api_key = os.environ.get("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY)
+    if not api_key:
         log.warning("缺少 ANTHROPIC_API_KEY")
         return ""
     headers = {
-        "x-api-key": ANTHROPIC_API_KEY,
+        "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }
@@ -128,6 +129,97 @@ def generate_related_stocks(smart_df: pd.DataFrame, trend_df: pd.DataFrame) -> s
 注意：以上僅供參考，非買賣建議。"""
 
     return call_claude(prompt, max_tokens=1500)
+
+
+def analyze_news_impact(news_df, smart_df):
+    """Claude 直接分析新聞對個股的影響（語意理解，不用關鍵字）"""
+    if news_df.empty or smart_df.empty:
+        return pd.DataFrame()
+
+    titles = news_df["標題"].dropna().head(80).tolist()
+    news_str = "\n".join([f"- {t}" for t in titles])
+
+    stocks = smart_df[["股票代號","股票名稱"]].head(30).drop_duplicates()
+    stock_str = "\n".join([f"{r['股票代號']} {r['股票名稱']}" for _, r in stocks.iterrows()])
+
+    prompt = f"""你是台灣股市分析師。請分析以下新聞對台股個股的影響。
+
+今日財經新聞標題：
+{news_str}
+
+ETF重倉股票清單：
+{stock_str}
+
+請分析每則重要新聞對上述股票的影響，只回傳 JSON，格式如下：
+{{"影響清單": [{{"新聞摘要": "20字內", "影響股票": ["代號1"], "影響方向": "正面/負面/中性", "影響程度": "高/中/低", "原因": "30字內"}}]}}
+
+規則：只列有明確影響的新聞，影響股票只列清單內代號，最多15則，只回傳JSON。"""
+
+    result = call_claude(prompt, max_tokens=2000)
+    if not result:
+        return pd.DataFrame()
+
+    try:
+        result = result.strip().replace("`json","").replace("`","")
+        data = json.loads(result)
+
+        # 支援多種 JSON 格式
+        impacts = (data.get("影響清單") or 
+                   data.get("news_stock_impact") or 
+                   data.get("impacts") or 
+                   data.get("analysis") or [])
+
+        rows = []
+        for item in impacts:
+            # 支援多種欄位名稱
+            affected = (item.get("影響股票") or 
+                       item.get("affected_stocks") or [])
+            
+            news_summary = (item.get("新聞摘要") or 
+                           item.get("news","")[:30])
+            direction = (item.get("影響方向") or 
+                        item.get("impact_direction","中性"))
+            degree = (item.get("影響程度") or 
+                     item.get("impact_level","中"))
+            reason = (item.get("原因") or 
+                     item.get("reason",""))
+
+            for stock in affected:
+                # 支援字串或字典格式
+                if isinstance(stock, dict):
+                    code = str(stock.get("code",""))
+                    stock_name = stock.get("name","")
+                    reason2 = stock.get("reason", reason)
+                else:
+                    code = str(stock)
+                    stock_name = ""
+                    reason2 = reason
+
+                if not stock_name:
+                    name_match = smart_df[smart_df["股票代號"].astype(str)==code]["股票名稱"].values
+                    stock_name = name_match[0] if len(name_match) > 0 else ""
+
+                rows.append({
+                    "股票代號": code,
+                    "股票名稱": stock_name,
+                    "新聞摘要": news_summary,
+                    "影響方向": direction,
+                    "影響程度": degree,
+                    "原因": reason2,
+                })
+
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            order = {"高":0,"中":1,"低":2}
+            df["_sort"] = df["影響程度"].map(order).fillna(3)
+            df = df.sort_values(["影響方向","_sort"]).drop(columns=["_sort"])
+        log.info(f"AI新聞影響分析完成：{len(df)} 筆")
+        return df
+    except Exception as e:
+        log.warning(f"AI新聞影響解析失敗: {e}")
+        import traceback
+        log.debug(traceback.format_exc())
+        return pd.DataFrame()
 
 def generate_investment_report(ss, trade_date, us_market_text=""):
     log.info("收集所有分頁資料...")

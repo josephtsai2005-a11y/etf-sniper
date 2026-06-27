@@ -1,6 +1,7 @@
 ﻿with open('app.py', 'r', encoding='utf-8') as f:
     content = f.read()
 
+# 更新選單結構
 old = '''    st.markdown("#### 15:30 核心資料")
     for p in ["多方驗證名單","今日訊號","聰明錢名單","持股異動明細"]:
         if st.button(p, key=f"btn_{p}", use_container_width=True):
@@ -12,7 +13,7 @@ old = '''    st.markdown("#### 15:30 核心資料")
             st.session_state.selected_page = p
     st.markdown("---")
     st.markdown("#### 21:00 新聞分析")
-    for p in ["新聞×籌碼交叉","題材總覽","散戶情緒"]:
+    for p in ["新聞×籌碼交叉","散戶情緒","題材總覽"]:
         if st.button(p, key=f"btn_{p}", use_container_width=True):
             st.session_state.selected_page = p
     st.markdown("---")
