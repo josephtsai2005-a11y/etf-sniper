@@ -288,7 +288,7 @@ elif page == "三大法人":
     if signal_filter and "法人訊號" in filtered.columns:
         filtered = filtered[filtered["法人訊號"].isin(signal_filter)]
 
-    display_cols = ["排名","股票代號","外資買賣超","投信買賣超","自營買賣超","三大合計","買超法人數","法人訊號"]
+    display_cols = ["排名","股票代號","股票名稱","外資買賣超","投信買賣超","自營買賣超","三大合計","買超法人數","法人訊號"]
     avail = [c for c in display_cols if c in filtered.columns]
     st.dataframe(filtered[avail].reset_index(drop=True),
                  use_container_width=True, height=500, hide_index=True,
@@ -1016,7 +1016,9 @@ elif page == "基本面資料":
     if df.empty:
         st.warning("尚無基本面資料（每日 16:45 後更新）")
     else:
-        st.dataframe(df, use_container_width=True)
+        display_cols = ["股票代號","股票名稱","最新月份","月營收(億)","年增率%","月增率%","營收訊號","本益比","本益比訊號","基本面分數"]
+        avail = [c for c in display_cols if c in df.columns]
+        st.dataframe(df[avail].astype(str), use_container_width=True)
 
 elif page == "題材位置":
     st.title("🎯 題材位置")
