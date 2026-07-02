@@ -119,19 +119,20 @@ def ai_analyze_topic_overview(overview_df: pd.DataFrame, trade_date: str) -> str
 
 def write_topic_overview_to_sheets(ss, df: pd.DataFrame, ai_insight: str, trade_date: str):
     """寫入題材總覽到 Sheets"""
-    import time
     SHEET = "題材總覽"
     existing = [ws.title for ws in ss.worksheets()]
     if SHEET not in existing:
         ss.add_worksheet(title=SHEET, rows=500, cols=15)
     ws = ss.worksheet(SHEET)
     ws.clear()
-    ws.append_row([f"題材總覽 {trade_date}　AI洞察已整合"])
+
+    all_rows = [[f"題材總覽 {trade_date}　AI洞察已整合"]]
     if ai_insight:
-        ws.append_row([f"AI分析：{ai_insight}"])
-        ws.append_row([])
+        all_rows.append([f"AI分析：{ai_insight}"])
+        all_rows.append([])
     if not df.empty:
-        time.sleep(3)
-        ws.append_row(df.columns.tolist())
-        ws.append_rows(df.fillna("").values.tolist())
+        all_rows.append(df.columns.tolist())
+        all_rows.extend(df.fillna("").values.tolist())
+
+    ws.append_rows(all_rows, value_input_option="USER_ENTERED")
     log.info(f"題材總覽寫入完成：{len(df)} 個題材")

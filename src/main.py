@@ -42,7 +42,7 @@ SERPAPI_KEY      = os.environ.get("SERPAPI_KEY", "")
 CREDENTIALS_PATH = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
 LINE_TOKEN        = os.environ.get("LINE_NOTIFY_TOKEN", "")
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 # 交易日判斷：15:30 前用前一個交易日，15:30 後用今日
 import pytz as _pytz
 from datetime import timedelta
@@ -127,21 +127,24 @@ def write_smart_money_to_sheets(ss, smart_df, trade_date: str):
 
 def _write_fundamental_to_sheets(ss, fund_df, trade_date):
     """寫入基本面資料到 Sheets"""
-    import time
     SHEET_FUND = "基本面資料"
     existing = [ws.title for ws in ss.worksheets()]
     if SHEET_FUND not in existing:
         ss.add_worksheet(title=SHEET_FUND, rows=500, cols=15)
     ws = ss.worksheet(SHEET_FUND)
     ws.clear()
-    ws.append_row([f"基本面資料 {trade_date}　更新：{now_tw().strftime('%H:%M')}"])
+
+    title_row = [f"基本面資料 {trade_date}　更新：{now_tw().strftime('%H:%M')}"]
+    all_rows = [title_row]
+
     if not fund_df.empty:
         cols = ["股票代號","最新月份","月營收(億)","年增率%","月增率%","營收訊號","本益比","本益比訊號","基本面分數"]
         avail = [c for c in cols if c in fund_df.columns]
-        time.sleep(3)
-        ws.append_row(avail)
+        all_rows.append(avail)
         rows = fund_df[avail].fillna("").values.tolist()
-        ws.append_rows(rows, value_input_option="USER_ENTERED")
+        all_rows.extend(rows)
+
+    ws.append_rows(all_rows, value_input_option="USER_ENTERED")
     log.info(f"基本面資料 寫入完成")
 
 
@@ -242,11 +245,16 @@ def _write_trend_to_sheets(ss, trend_df, cross_df, trade_date):
 
         ws = ss.worksheet(sheet_name)
         ws.clear()
-        ws.append_row([f"題材分析 {trade_date}　更新：{now_tw().strftime('%H:%M')}"])
+
+        title_row = [f"題材分析 {trade_date}　更新：{now_tw().strftime('%H:%M')}"]
+        all_rows = [title_row]
+
         if not df.empty:
-            ws.append_row(df.columns.tolist())
+            all_rows.append(df.columns.tolist())
             rows = df.fillna("").values.tolist()
-            ws.append_rows(rows, value_input_option="USER_ENTERED")
+            all_rows.extend(rows)
+
+        ws.append_rows(all_rows, value_input_option="USER_ENTERED")
         log.info(f"{sheet_name} 寫入完成")
 
 
@@ -265,19 +273,23 @@ def _write_diff_to_sheets(ss, stock_diff, diff_detail, trade_date):
     ws_diff = ss.worksheet(SHEET_DIFF)
     ws_diff.clear()
     header = [f"⚡ 今日訊號 {trade_date}　更新：{now_tw().strftime('%H:%M')}"]
-    ws_diff.append_row(header)
+    all_diff_rows = [header]
 
     if not stock_diff.empty:
         cols = ["排名","股票代號","股票名稱","主要狀態",
                 "加碼ETF數","減碼ETF數","新增ETF數","清倉ETF數",
                 "總變動張數","平均權重變動%","總資金動向","收盤價"]
         available = [c for c in cols if c in stock_diff.columns]
-        ws_diff.append_row(available)
+        all_diff_rows.append(available)
         rows = stock_diff[available].fillna("").values.tolist()
-        ws_diff.append_rows(rows, value_input_option="USER_ENTERED")
+        all_diff_rows.extend(rows)
 
-        # 格式化加碼行（綠色）
+    ws_diff.append_rows(all_diff_rows, value_input_option="USER_ENTERED")
+
+    # 格式化加碼/減碼行（改用 batch_format，1 次 API 呼叫取代逐列呼叫）
+    if not stock_diff.empty:
         try:
+            formats = []
             for i, (_, row) in enumerate(stock_diff.iterrows(), start=3):
                 status = row.get("主要狀態", "")
                 if "加碼" in status or "新增" in status:
@@ -286,7 +298,12 @@ def _write_diff_to_sheets(ss, stock_diff, diff_detail, trade_date):
                     color = {"red": 1.0, "green": 0.88, "blue": 0.88}
                 else:
                     continue
-                ws_diff.format(f"A{i}:K{i}", {"backgroundColor": color})
+                formats.append({
+                    "range": f"A{i}:K{i}",
+                    "format": {"backgroundColor": color}
+                })
+            if formats:
+                ws_diff.batch_format(formats)
         except Exception as e:
             log.warning(f"格式化失敗: {e}")
 
@@ -299,9 +316,10 @@ def _write_diff_to_sheets(ss, stock_diff, diff_detail, trade_date):
         detail_cols = ["股票代號","股票名稱","ETF代碼","狀態",
                        "持股數_今","持股數_昨","變動張數","資金動向(萬)","今日","昨日"]
         avail = [c for c in detail_cols if c in diff_detail.columns]
-        ws_detail.append_row(avail)
+        all_detail_rows = [avail]
         rows = diff_detail[avail].fillna("").values.tolist()
-        ws_detail.append_rows(rows, value_input_option="USER_ENTERED")
+        all_detail_rows.extend(rows)
+        ws_detail.append_rows(all_detail_rows, value_input_option="USER_ENTERED")
     log.info(f"異動明細寫入完成 → {SHEET_DETAIL}")
 
 
@@ -389,6 +407,9 @@ def main():
             if not all_vals or all_vals == [[]]:
                 ws_raw.append_row(avail)
             today_dates = [r[avail.index("抓取時間")] if "抓取時間" in avail else "" for r in all_vals[1:]]
+            unique_dates = list(set(today_dates))
+            log.info(f"盤後原始數據庫現有日期: {sorted(unique_dates)[-5:]}")
+            log.info(f"今日 TRADE_DATE: {TRADE_DATE}")
             if TRADE_DATE not in today_dates:
                 import time
                 time.sleep(3)
@@ -428,6 +449,12 @@ def main():
         except Exception as e:
             log.warning(f"差異比對失敗（不影響主流程）: {e}")
 
+    # ── core 模式到此結束，新聞/法人/AI 交給各自獨立的 job ──
+    if RUN_MODE == "core":
+        log.info("RUN_MODE=core，核心資料完成")
+        log.info("===== 全部完成 =====")
+        return
+
     # ── 階段五：新聞熱度收集與題材分析 ──────────────────────────
     # inst 模式跳過新聞，直接跑法人
     if RUN_MODE == "inst":
@@ -454,17 +481,16 @@ def main():
                       log.info("AI 分析新聞對個股影響...")
                       news_impact_df = analyze_news_impact(news_df, smart_df)
                       if not news_impact_df.empty:
-                          _tai.sleep(5)
                           SHEET_CROSS = "新聞×籌碼交叉"
                           _ex = [ws.title for ws in ss2.worksheets()]
                           if SHEET_CROSS not in _ex:
                               ss2.add_worksheet(title=SHEET_CROSS, rows=500, cols=10)
                           ws_cross = ss2.worksheet(SHEET_CROSS)
                           ws_cross.clear()
-                          ws_cross.append_row([f"新聞×籌碼交叉 {TRADE_DATE}（AI語意分析）"])
-                          _tai.sleep(2)
-                          ws_cross.append_row(news_impact_df.columns.tolist())
-                          ws_cross.append_rows(news_impact_df.fillna("").values.tolist())
+                          all_cross_rows = [[f"新聞×籌碼交叉 {TRADE_DATE}（AI語意分析）"]]
+                          all_cross_rows.append(news_impact_df.columns.tolist())
+                          all_cross_rows.extend(news_impact_df.fillna("").values.tolist())
+                          ws_cross.append_rows(all_cross_rows, value_input_option="USER_ENTERED")
                           log.info(f"AI新聞影響分析完成：{len(news_impact_df)} 筆")
                   except Exception as e:
                       log.warning(f"AI新聞影響分析失敗: {e}")

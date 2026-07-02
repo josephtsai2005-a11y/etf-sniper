@@ -4,11 +4,11 @@ import pytz
 
 log = logging.getLogger(__name__)
 TW_TZ = pytz.timezone("Asia/Taipei")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 MODEL = "claude-sonnet-4-6"
 
 def call_claude(prompt, system="", max_tokens=2000):
-    api_key = os.environ.get("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY)
+    api_key = os.environ.get("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY).strip()
     if not api_key:
         log.warning("缺少 ANTHROPIC_API_KEY")
         return ""
@@ -22,9 +22,13 @@ def call_claude(prompt, system="", max_tokens=2000):
         body["system"] = system
     try:
         resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=body, timeout=60)
-        return resp.json()["content"][0]["text"]
+        data = resp.json()
+        if resp.status_code != 200:
+            log.error(f"Claude API 失敗 (status={resp.status_code}): {data}")
+            return ""
+        return data["content"][0]["text"]
     except Exception as e:
-        log.error(f"Claude API 失敗: {e}")
+        log.error(f"Claude API 呼叫異常: {e}")
         return ""
 
 def collect_all_data(ss):
