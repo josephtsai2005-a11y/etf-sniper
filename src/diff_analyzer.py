@@ -30,6 +30,7 @@ def load_history_from_sheets(ss, days: int = 2) -> pd.DataFrame:
         if not date_col:
             return df
 
+        df[date_col] = df[date_col].astype(str).str.replace("-","")
         dates = sorted(df[date_col].unique())[-days:]
         return df[df[date_col].isin(dates)].copy()
 

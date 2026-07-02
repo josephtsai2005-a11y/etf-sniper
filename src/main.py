@@ -429,76 +429,83 @@ def main():
             log.warning(f"差異比對失敗（不影響主流程）: {e}")
 
     # ── 階段五：新聞熱度收集與題材分析 ──────────────────────────
-    log.info("[5/5] 收集財經新聞 + 題材生命週期分析...")
-    try:
-        # 抓取最新新聞
-        news_df = fetch_all_news(hours_back=26)
-        if not news_df.empty:
-            news_df = tag_articles(news_df)
-            hot_words = auto_extract_hot_words(news_df)
-            log.info(f"新聞抓取：{len(news_df)} 篇，命中關鍵字文章：{(news_df['關鍵字數']>0).sum()} 篇")
-            log.info(f"自動偵測熱詞：{hot_words[:10]}")
+    # inst 模式跳過新聞，直接跑法人
+    if RUN_MODE == "inst":
+        log.info("RUN_MODE=inst，跳過新聞階段，直接跑法人")
+    else:
+        log.info("[5/5] 收集財經新聞 + 題材生命週期分析...")
+    if RUN_MODE != "inst":
+      try:
+          # 抓取最新新聞
+          news_df = fetch_all_news(hours_back=26)
+          if not news_df.empty:
+              news_df = tag_articles(news_df)
+              hot_words = auto_extract_hot_words(news_df)
+              log.info(f"新聞抓取：{len(news_df)} 篇，命中關鍵字文章：{(news_df['關鍵字數']>0).sum()} 篇")
+              log.info(f"自動偵測熱詞：{hot_words[:10]}")
 
-            # 寫入新聞歷史庫
-            _write_news_to_sheets(ss2, news_df, TRADE_DATE)
+              # 寫入新聞歷史庫
+              _write_news_to_sheets(ss2, news_df, TRADE_DATE)
 
-            # ── AI 直接分析新聞影響個股 ──────────────────────
-            if ANTHROPIC_API_KEY:
-                try:
-                    import time as _tai
-                    log.info("AI 分析新聞對個股影響...")
-                    news_impact_df = analyze_news_impact(news_df, smart_df)
-                    if not news_impact_df.empty:
-                        _tai.sleep(5)
-                        SHEET_CROSS = "新聞×籌碼交叉"
-                        _ex = [ws.title for ws in ss2.worksheets()]
-                        if SHEET_CROSS not in _ex:
-                            ss2.add_worksheet(title=SHEET_CROSS, rows=500, cols=10)
-                        ws_cross = ss2.worksheet(SHEET_CROSS)
-                        ws_cross.clear()
-                        ws_cross.append_row([f"新聞×籌碼交叉 {TRADE_DATE}（AI語意分析）"])
-                        _tai.sleep(2)
-                        ws_cross.append_row(news_impact_df.columns.tolist())
-                        ws_cross.append_rows(news_impact_df.fillna("").values.tolist())
-                        log.info(f"AI新聞影響分析完成：{len(news_impact_df)} 筆")
-                except Exception as e:
-                    log.warning(f"AI新聞影響分析失敗: {e}")
+              # ── AI 直接分析新聞影響個股 ──────────────────────
+              if ANTHROPIC_API_KEY:
+                  try:
+                      import time as _tai
+                      log.info("AI 分析新聞對個股影響...")
+                      news_impact_df = analyze_news_impact(news_df, smart_df)
+                      if not news_impact_df.empty:
+                          _tai.sleep(5)
+                          SHEET_CROSS = "新聞×籌碼交叉"
+                          _ex = [ws.title for ws in ss2.worksheets()]
+                          if SHEET_CROSS not in _ex:
+                              ss2.add_worksheet(title=SHEET_CROSS, rows=500, cols=10)
+                          ws_cross = ss2.worksheet(SHEET_CROSS)
+                          ws_cross.clear()
+                          ws_cross.append_row([f"新聞×籌碼交叉 {TRADE_DATE}（AI語意分析）"])
+                          _tai.sleep(2)
+                          ws_cross.append_row(news_impact_df.columns.tolist())
+                          ws_cross.append_rows(news_impact_df.fillna("").values.tolist())
+                          log.info(f"AI新聞影響分析完成：{len(news_impact_df)} 筆")
+                  except Exception as e:
+                      log.warning(f"AI新聞影響分析失敗: {e}")
 
-            # ── 題材總覽整合 ────────────────────────────────────
-            if ANTHROPIC_API_KEY:
-                try:
-                    import time as _tt
-                    log.info("建立題材總覽...")
-                    topic_df = build_topic_overview(ss2, smart_df, TRADE_DATE)
-                    if not topic_df.empty:
-                        ai_insight = ai_analyze_topic_overview(topic_df, TRADE_DATE)
-                        _tt.sleep(5)
-                        write_topic_overview_to_sheets(ss2, topic_df, ai_insight, TRADE_DATE)
-                        log.info(f"題材總覽完成：{len(topic_df)} 個題材")
-                except Exception as e:
-                    log.warning(f"題材總覽失敗: {e}")
+              # ── 題材總覽整合 ────────────────────────────────────
+              if ANTHROPIC_API_KEY:
+                  try:
+                      import time as _tt
+                      log.info("建立題材總覽...")
+                      topic_df = build_topic_overview(ss2, smart_df, TRADE_DATE)
+                      if not topic_df.empty:
+                          ai_insight = ai_analyze_topic_overview(topic_df, TRADE_DATE)
+                          _tt.sleep(5)
+                          write_topic_overview_to_sheets(ss2, topic_df, ai_insight, TRADE_DATE)
+                          log.info(f"題材總覽完成：{len(topic_df)} 個題材")
+                  except Exception as e:
+                      log.warning(f"題材總覽失敗: {e}")
 
 
-            # 讀取歷史新聞做趨勢分析
-            news_history = _load_news_history(ss2)
-            if not news_history.empty:
-                pivot = compute_keyword_timeseries(news_history)
-                trend_df = compute_trend_report(pivot)
-                cross_df = match_keywords_to_stocks(trend_df, smart_df)
+              # 讀取歷史新聞做趨勢分析
+              news_history = _load_news_history(ss2)
+              if not news_history.empty:
+                  pivot = compute_keyword_timeseries(news_history)
+                  trend_df = compute_trend_report(pivot)
+                  cross_df = match_keywords_to_stocks(trend_df, smart_df)
 
-                # 寫入趨勢報告
-                _write_trend_to_sheets(ss2, trend_df, cross_df, TRADE_DATE)
-                log.info(f"題材分析：{len(trend_df)} 個關鍵字，{len(cross_df)} 檔個股有題材支撐")
-    except Exception as e:
-        log.warning(f"新聞模組失敗（不影響主流程）: {e}")
-        import traceback
-        log.debug(traceback.format_exc())
+                  # 寫入趨勢報告
+                  _write_trend_to_sheets(ss2, trend_df, cross_df, TRADE_DATE)
+                  log.info(f"題材分析：{len(trend_df)} 個關鍵字，{len(cross_df)} 檔個股有題材支撐")
+      except Exception as e:
+          log.warning(f"新聞模組失敗（不影響主流程）: {e}")
+          import traceback
+          log.debug(traceback.format_exc())
 
-    # ── news 模式到此結束，inst 模式跑法人/基本面 ────────────
-    if RUN_MODE == "news":
-        log.info("RUN_MODE=news，新聞階段完成")
-        log.info("===== 全部完成 =====")
-        return
+      # ── news 模式到此結束，inst 模式跑法人/基本面 ────────────
+      if RUN_MODE == "news":
+          log.info("RUN_MODE=news，新聞階段完成")
+          log.info("===== 全部完成 =====")
+          return
+    else:
+        log.info("RUN_MODE=inst，跳過新聞/Trends，直接執行法人")
 
     # ── AI 模式：整合所有資料 + 美股 → 產生投資報告 ─────────────
     if RUN_MODE == "ai":
@@ -565,31 +572,35 @@ def main():
     except Exception as e:
         log.warning(f"法人模組失敗（不影響主流程）: {e}")
 
-    # ── 階段七：Google Trends 散戶情緒 ──────────────────────────
-    log.info("[7] 抓取 Google Trends 散戶情緒...")
-    try:
-        if SERPAPI_KEY:
-            import os as _os
-            _os.environ["SERPAPI_KEY"] = SERPAPI_KEY
-            trends_raw = fetch_all_trends()
-            if not trends_raw.empty:
-                trends_signal = compute_trends_signal(trends_raw)
-                # 與新聞趨勢交叉
-                news_hist2 = _load_news_history(ss2)
-                cross_df2 = pd.DataFrame()
-                if not news_hist2.empty:
-                    pivot2 = compute_keyword_timeseries(news_hist2)
-                    news_trend2 = compute_trend_report(pivot2)
-                    cross_df2 = cross_news_and_trends(news_trend2, trends_signal)
-                    cross_df2 = cross_df2.loc[:,~cross_df2.columns.duplicated()]
-                    if "排名" in cross_df2.columns: cross_df2 = cross_df2.drop(columns=["排名"])
+    # ── 階段七：Google Trends 散戶情緒（僅 news 模式）────────────
+    if RUN_MODE == "inst":
+        log.info("RUN_MODE=inst，跳過 Google Trends")
+    else:
+        log.info("[7] 抓取 Google Trends 散戶情緒...")
+    if RUN_MODE != "inst":
+        try:
+            if SERPAPI_KEY:
+                import os as _os
+                _os.environ["SERPAPI_KEY"] = SERPAPI_KEY
+                trends_raw = fetch_all_trends()
+                if not trends_raw.empty:
+                    trends_signal = compute_trends_signal(trends_raw)
+                    # 與新聞趨勢交叉
+                    news_hist2 = _load_news_history(ss2)
+                    cross_df2 = pd.DataFrame()
+                    if not news_hist2.empty:
+                        pivot2 = compute_keyword_timeseries(news_hist2)
+                        news_trend2 = compute_trend_report(pivot2)
+                        cross_df2 = cross_news_and_trends(news_trend2, trends_signal)
+                        cross_df2 = cross_df2.loc[:,~cross_df2.columns.duplicated()]
+                        if "排名" in cross_df2.columns: cross_df2 = cross_df2.drop(columns=["排名"])
 
-                _write_trends_to_sheets(ss2, trends_signal, cross_df2, TRADE_DATE)
-                log.info(f"Google Trends 完成：{len(trends_signal)} 個主題")
-        else:
-            log.warning("缺少 SERPAPI_KEY，跳過 Google Trends")
-    except Exception as e:
-        log.warning(f"Google Trends 失敗（不影響主流程）: {e}")
+                    _write_trends_to_sheets(ss2, trends_signal, cross_df2, TRADE_DATE)
+                    log.info(f"Google Trends 完成：{len(trends_signal)} 個主題")
+            else:
+                log.warning("缺少 SERPAPI_KEY，跳過 Google Trends")
+        except Exception as e:
+            log.warning(f"Google Trends 失敗（不影響主流程）: {e}")
 
     # ── LINE 通知 Top 5 ──────────────────────────────────────
     top5 = smart_df.head(5)
