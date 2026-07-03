@@ -40,9 +40,8 @@ jobs:
           gcloud run jobs update ${{ env.JOB_NAME }} \
             --image ${{ env.IMAGE }}:latest \
             --region ${{ env.REGION }} \
-            --remove-env-vars "GOOGLE_APPLICATION_CREDENTIALS" \
             --set-secrets "/secrets/gcp-sa.json=gcp-sa-json:latest" \
-            --set-env-vars "SPREADSHEET_ID=${{ secrets.SPREADSHEET_ID }},GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcp-sa.json,LINE_NOTIFY_TOKEN=${{ secrets.LINE_NOTIFY_TOKEN }}" \
+            --update-env-vars "SPREADSHEET_ID=${{ secrets.SPREADSHEET_ID }},GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcp-sa.json,LINE_NOTIFY_TOKEN=${{ secrets.LINE_NOTIFY_TOKEN }}" \
             || \
           gcloud run jobs create ${{ env.JOB_NAME }} \
             --image ${{ env.IMAGE }}:latest \
