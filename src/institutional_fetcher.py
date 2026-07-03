@@ -140,26 +140,56 @@ def fetch_all_institutional(trade_date: Optional[str] = None) -> pd.DataFrame:
     """一次抓全市場三大法人，再過濾目標股票（比逐一抓取快且穩定）"""
     if not trade_date:
         trade_date = get_trade_date()
-    url = "https://www.twse.com.tw/fund/TWT38U"
-    params = {"response": "json", "date": trade_date, "selectType": "ALL"}
+    url = "https://www.twse.com.tw/rwd/zh/fund/T86"
+    params = {"response": "json", "date": trade_date, "selectType": "ALLBUT0999"}
     try:
         resp = SESSION.get(url, params=params, timeout=15)
         data = resp.json()
         if data.get("stat") != "OK" or not data.get("data"):
             log.warning(f"三大法人全市場無資料 ({trade_date})")
             return pd.DataFrame()
+
+        fields = data.get("fields", [])
         rows = data.get("data", [])
-        # 欄位重新命名（外資/投信/自營各有買進/賣出/買賣超）
-        cols = ["序號","證券代號","證券名稱",
-                "外資買進","外資賣出","外資買賣超",
-                "投信買進","投信賣出","投信買賣超",
-                "自營買進","自營賣出","自營買賣超"]
-        df = pd.DataFrame(rows, columns=cols)
-        # 清洗數字
-        for col in ["外資買賣超","投信買賣超","自營買賣超"]:
-            df[col] = df[col].astype(str).str.replace(",","").str.replace("+","")
+        df = pd.DataFrame(rows, columns=fields)
+
+        def find_col(df, keywords):
+            for col in df.columns:
+                if all(k in col for k in keywords):
+                    return col
+            return None
+
+        code_col    = find_col(df, ["證券代號"])
+        name_col    = find_col(df, ["證券名稱"])
+        
+        def find_col_exact(df, name):
+            return name if name in df.columns else None
+
+        foreign_col    = find_col_exact(df, "外陸資買賣超股數(不含外資自營商)")
+        dealer_fii_col = find_col_exact(df, "外資自營商買賣超股數")
+        trust_col      = find_col_exact(df, "投信買賣超股數")
+        dealer_col     = find_col_exact(df, "自營商買賣超股數")
+        total_col      = find_col_exact(df, "三大法人買賣超股數")
+
+        for name, col in [("foreign_col",foreign_col),("dealer_fii_col",dealer_fii_col),
+                        ("trust_col",trust_col),("dealer_col",dealer_col),("total_col",total_col)]:
+            if col is None:
+                log.error(f"{name} 找不到對應欄位，TWSE 欄位可能又改了")
+
+        df = df.rename(columns={code_col: "證券代號", name_col: "證券名稱"})
+
+        # 清洗數字欄位（把千分位逗號去掉、轉數字）
+        numeric_cols = [foreign_col, dealer_fii_col, trust_col, dealer_col, total_col]
+        for col in numeric_cols:
+            df[col] = df[col].astype(str).str.replace(",", "").str.replace("+", "")
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-        df["三大合計"] = df["外資買賣超"] + df["投信買賣超"] + df["自營買賣超"]
+
+        # 外資買賣超 = 一般外資 + 外資自營商（業界慣例外資通常合併計算）
+        df["外資買賣超"] = df[foreign_col] + df[dealer_fii_col]
+        df["投信買賣超"] = df[trust_col]
+        df["自營買賣超"] = df[dealer_col]
+        df["三大合計"]   = df[total_col]  # 直接用 API 算好的合計，不要自己重算
+
         df["證券代號"] = df["證券代號"].astype(str).str.strip()
         df["抓取日期"] = trade_date
         log.info(f"三大法人全市場：{len(df)} 筆 ({trade_date})")
