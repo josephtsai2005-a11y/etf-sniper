@@ -38,6 +38,11 @@ jobs:
       - name: Update Cloud Run Job
         run: |
           gcloud run jobs update ${{ env.JOB_NAME }} \
+            --region ${{ env.REGION }} \
+            --remove-env-vars "GOOGLE_APPLICATION_CREDENTIALS" \
+          || echo "略過移除（可能是尚未存在該變數，或 job 尚未建立）"
+
+          gcloud run jobs update ${{ env.JOB_NAME }} \
             --image ${{ env.IMAGE }}:latest \
             --region ${{ env.REGION }} \
             --set-secrets "/secrets/gcp-sa.json=gcp-sa-json:latest" \
