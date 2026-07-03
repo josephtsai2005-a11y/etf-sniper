@@ -48,7 +48,8 @@ jobs:
             --image ${{ env.IMAGE }}:latest \
             --region ${{ env.REGION }} \
             --set-env-vars "SPREADSHEET_ID=${{ secrets.SPREADSHEET_ID }}" \
-            --set-secrets "GOOGLE_APPLICATION_CREDENTIALS=gcp-sa-json:latest" \
+            --set-secrets "/secrets/gcp-sa.json=gcp-sa-json:latest" \
+            --set-env-vars "GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcp-sa.json" \
             --set-env-vars "LINE_NOTIFY_TOKEN=${{ secrets.LINE_NOTIFY_TOKEN }}" \
             --max-retries 1 \
             --task-timeout 1800
