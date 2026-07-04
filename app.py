@@ -638,16 +638,33 @@ elif page == "題材總覽":
         if len(df) > 0 and "AI分析" in str(df.iloc[0].values):
             st.info(str(df.iloc[0].values[0]).replace("AI分析：",""))
             df = df.iloc[1:].reset_index(drop=True)
+
+        num_cols(df, ["今日篇數","近3日均","ETF布局數"])
+
         # ETF有布局的題材
-        etf_df = df[df.get("ETF布局數","0").astype(str) != "0"] if "ETF布局數" in df.columns else pd.DataFrame()
+        etf_df = df[pd.to_numeric(df.get("ETF布局數", 0), errors="coerce").fillna(0) != 0] if "ETF布局數" in df.columns else pd.DataFrame()
         if not etf_df.empty:
             st.subheader(f"ETF有布局的題材（{len(etf_df)} 個）")
             avail = [c for c in ["題材","階段","今日篇數","趨勢","散戶關注","進場訊號","ETF相關持股","ETF布局數"] if c in etf_df.columns]
-            st.dataframe(etf_df[avail].astype(str), use_container_width=True)
+            st.dataframe(
+                etf_df[avail].reset_index(drop=True),
+                use_container_width=True, hide_index=True,
+                column_config={
+                    "今日篇數":   st.column_config.NumberColumn("今日篇數", format="%.0f"),
+                    "ETF布局數":  st.column_config.NumberColumn("ETF布局數", format="%.0f"),
+                }
+            )
         st.divider()
         st.subheader("所有題材")
         avail = [c for c in ["題材","階段","今日篇數","近3日均","趨勢","散戶關注","進場訊號"] if c in df.columns]
-        st.dataframe(df[avail].astype(str), use_container_width=True)
+        st.dataframe(
+            df[avail].reset_index(drop=True),
+            use_container_width=True, hide_index=True,
+            column_config={
+                "今日篇數": st.column_config.NumberColumn("今日篇數", format="%.0f"),
+                "近3日均":  st.column_config.NumberColumn("近3日均", format="%.1f"),
+            }
+        )
 
 elif page == "散戶情緒":
     st.title("📱 散戶情緒指標")
@@ -975,7 +992,7 @@ elif page == "個股查詢":
         st.info("找不到符合的股票")
         st.stop()
 
-    num_cols(result, ["持有ETF數", "平均權重%", "收盤價", "漲跌幅%", "持股市值(萬)"])
+    num_cols(result, ["持有ETF數", "平均權重%", "收盤價", "漲跌幅%", "MA20", "持股市值(萬)"])
 
     display_cols = [
         "排名", "股票代號", "股票名稱", "持有ETF數", "平均權重%",
@@ -1019,6 +1036,7 @@ elif page == "持股異動明細":
     if df.empty:
         st.warning("尚無持股異動明細（每日 15:30 後更新）")
     else:
+        num_cols(df, ["持股數_今","持股數_昨","變動張數","資金動向(萬)"])
         st.dataframe(df, use_container_width=True)
 
 elif page == "基本面資料":
@@ -1029,9 +1047,20 @@ elif page == "基本面資料":
         st.warning("尚無基本面資料（每日 16:45 後更新）")
     else:
         df = enrich_with_name(df)
+        num_cols(df, ["月營收(億)","年增率%","月增率%","本益比","基本面分數"])
         display_cols = ["股票代號","股票名稱","最新月份","月營收(億)","年增率%","月增率%","營收訊號","本益比","本益比訊號","基本面分數"]
         avail = [c for c in display_cols if c in df.columns]
-        st.dataframe(df[avail].astype(str), use_container_width=True)
+        st.dataframe(
+            df[avail].reset_index(drop=True),
+            use_container_width=True, hide_index=True,
+            column_config={
+                "月營收(億)": st.column_config.NumberColumn("月營收(億)", format="%.2f"),
+                "年增率%":    st.column_config.NumberColumn("年增率%", format="%.1f%%"),
+                "月增率%":    st.column_config.NumberColumn("月增率%", format="%.1f%%"),
+                "本益比":     st.column_config.NumberColumn("本益比", format="%.1f"),
+                "基本面分數": st.column_config.NumberColumn("基本面分數", format="%.1f"),
+            }
+        )
 
 elif page == "題材位置":
     st.title("🎯 題材位置")
@@ -1088,5 +1117,6 @@ elif page == "原始持股庫":
         filtered = filtered[mask]
 
     st.caption(f"顯示 {len(filtered)} 筆")
+    num_cols(filtered, ["權重%", "持股數"])
     st.dataframe(filtered.reset_index(drop=True),
                  use_container_width=True, height=600, hide_index=True)
