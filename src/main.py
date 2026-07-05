@@ -509,7 +509,6 @@ def main():
                   except Exception as e:
                       log.warning(f"題材總覽失敗: {e}")
 
-
               # 讀取歷史新聞做趨勢分析
               news_history = _load_news_history(ss2)
               if not news_history.empty:
@@ -525,6 +524,28 @@ def main():
           import traceback
           log.debug(traceback.format_exc())
 
+      # ── 階段五.五：Google Trends 散戶情緒（news 模式專屬）──────────
+      log.info("[5.5] 抓取 Google Trends 散戶情緒...")
+      try:
+          trends_raw = fetch_all_trends()
+          if not trends_raw.empty:
+              trends_signal = compute_trends_signal(trends_raw)
+              news_hist2 = _load_news_history(ss2)
+              cross_df2 = pd.DataFrame()
+              if not news_hist2.empty:
+                  pivot2 = compute_keyword_timeseries(news_hist2)
+                  news_trend2 = compute_trend_report(pivot2)
+                  cross_df2 = cross_news_and_trends(news_trend2, trends_signal)
+                  cross_df2 = cross_df2.loc[:,~cross_df2.columns.duplicated()]
+                  if "排名" in cross_df2.columns:
+                      cross_df2 = cross_df2.drop(columns=["排名"])
+              _write_trends_to_sheets(ss2, trends_signal, cross_df2, TRADE_DATE)
+              log.info(f"Google Trends 完成：{len(trends_signal)} 個主題")
+          else:
+              log.warning("Google Trends 無資料")
+      except Exception as e:
+          log.warning(f"Google Trends 失敗（不影響主流程）: {e}")
+
       # ── news 模式到此結束，inst 模式跑法人/基本面 ────────────
       if RUN_MODE == "news":
           log.info("RUN_MODE=news，新聞階段完成")
@@ -532,6 +553,7 @@ def main():
           return
     else:
         log.info("RUN_MODE=inst，跳過新聞/Trends，直接執行法人")
+
 
     # ── AI 模式：整合所有資料 + 美股 → 產生投資報告 ─────────────
     if RUN_MODE == "ai":
@@ -598,35 +620,6 @@ def main():
     except Exception as e:
         log.warning(f"法人模組失敗（不影響主流程）: {e}")
 
-    # ── 階段七：Google Trends 散戶情緒（僅 news 模式）────────────
-    if RUN_MODE == "inst":
-        log.info("RUN_MODE=inst，跳過 Google Trends")
-    else:
-        log.info("[7] 抓取 Google Trends 散戶情緒...")
-    if RUN_MODE != "inst":
-        try:
-            if SERPAPI_KEY:
-                import os as _os
-                _os.environ["SERPAPI_KEY"] = SERPAPI_KEY
-                trends_raw = fetch_all_trends()
-                if not trends_raw.empty:
-                    trends_signal = compute_trends_signal(trends_raw)
-                    # 與新聞趨勢交叉
-                    news_hist2 = _load_news_history(ss2)
-                    cross_df2 = pd.DataFrame()
-                    if not news_hist2.empty:
-                        pivot2 = compute_keyword_timeseries(news_hist2)
-                        news_trend2 = compute_trend_report(pivot2)
-                        cross_df2 = cross_news_and_trends(news_trend2, trends_signal)
-                        cross_df2 = cross_df2.loc[:,~cross_df2.columns.duplicated()]
-                        if "排名" in cross_df2.columns: cross_df2 = cross_df2.drop(columns=["排名"])
-
-                    _write_trends_to_sheets(ss2, trends_signal, cross_df2, TRADE_DATE)
-                    log.info(f"Google Trends 完成：{len(trends_signal)} 個主題")
-            else:
-                log.warning("缺少 SERPAPI_KEY，跳過 Google Trends")
-        except Exception as e:
-            log.warning(f"Google Trends 失敗（不影響主流程）: {e}")
 
     # ── LINE 通知 Top 5 ──────────────────────────────────────
     top5 = smart_df.head(5)
