@@ -42,106 +42,114 @@ def get_last_trading_date() -> str:
     return today.strftime("%Y%m%d")
 
 
-def fetch_etfinfo_holdings(etf_code: str, trade_date: str = None) -> pd.DataFrame:
+def fetch_etfinfo_holdings(etf_code: str, trade_date: str = None, retries: int = 2) -> pd.DataFrame:
     """
     爬取 etfinfo.tw 成分股頁面（BeautifulSoup 解析）
     資料：代號、名稱、權重、股數
     """
     url = f"https://www.etfinfo.tw/etf/{etf_code}/holdings"
-    try:
-        resp = SESSION.get(url, timeout=20)
-        if resp.status_code != 200:
-            log.debug(f"  {etf_code} HTTP {resp.status_code}")
-            return pd.DataFrame()
+    soup = None
 
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        # 找持股 table（有 代號/名稱/權重 欄位）
-        rows = []
-        table = soup.find("table")
-        if not table:
-            log.debug(f"  {etf_code} 無 table")
-            return pd.DataFrame()
-
-        for tr in table.find_all("tr"):
-            tds = tr.find_all(["td", "th"])
-            if len(tds) < 2:
+    for attempt in range(retries):
+        try:
+            resp = SESSION.get(url, timeout=40)
+            if resp.status_code != 200:
+                log.debug(f"  {etf_code} HTTP {resp.status_code}")
+                return pd.DataFrame()
+            soup = BeautifulSoup(resp.text, "html.parser")
+            break  # 成功取得回應，跳出重試迴圈
+        except requests.exceptions.Timeout:
+            if attempt < retries - 1:
+                log.warning(f"  {etf_code} 逾時，重試第 {attempt + 2} 次...")
+                time.sleep(3)
                 continue
-            row_text = [td.get_text(strip=True) for td in tds]
-            rows.append(row_text)
-
-        if len(rows) < 2:
+            else:
+                log.error(f"  {etf_code} 錯誤: 重試{retries}次後仍逾時")
+                return pd.DataFrame()
+        except Exception as e:
+            log.error(f"  {etf_code} 錯誤: {e}")
             return pd.DataFrame()
 
-        # 第一行為 header
-        header = rows[0]
-        data = rows[1:]
-        df = pd.DataFrame(data, columns=header[:len(data[0])] if data else header)
-
-        # etfinfo HTML 結構（已確認）：
-        # <a href="/stock/2330" class="stock-code-link">2330</a>
-        # <span class="stock-name-sub">台積電</span>
-        stock_rows = []
-        for tr in table.find_all("tr"):
-            tds = tr.find_all("td")
-            if not tds:
-                continue
-
-            first_td = tds[0]
-            stock_code = None
-            stock_name = None
-
-            # 代號：從 <a href="/stock/XXXX"> 取
-            a_tag = first_td.find("a", href=True)
-            if a_tag:
-                m = re.search(r"/stock/(\d{4,6})", a_tag.get("href", ""))
-                if m:
-                    stock_code = m.group(1)
-
-            # 名稱：從 <span class="stock-name-sub"> 取（已確認此 class 名稱）
-            name_span = first_td.find("span", class_="stock-name-sub")
-            if name_span:
-                stock_name = name_span.get_text(strip=True)
-
-            if not stock_code:
-                continue
-
-            # 其餘欄位
-            all_text = [td.get_text(strip=True) for td in tds]
-
-            # 找權重（含%的數字）
-            weight = ""
-            shares = ""
-            for cell in all_text[1:]:
-                if "%" in cell and not weight:
-                    w = re.search(r"([\d.]+)%", cell)
-                    if w:
-                        weight = w.group(1)
-                # 找股數（純數字，通常較大）
-                if re.match(r"^[\d,]+$", cell) and not shares:
-                    shares = cell.replace(",", "")
-
-            stock_rows.append({
-                "股票代號": stock_code,
-                "股票名稱": stock_name,
-                "權重%": weight,
-                "持股數": shares,
-                "ETF代碼": etf_code,
-                "資料來源": "etfinfo",
-                "抓取時間": trade_date if trade_date else datetime.now(__import__("pytz").timezone("Asia/Taipei")).strftime("%Y%m%d"),
-            })
-
-        if not stock_rows:
-            log.debug(f"  {etf_code} 解析不到股票行")
-            return pd.DataFrame()
-
-        result = pd.DataFrame(stock_rows)
-        log.info(f"  {etf_code} OK: {len(result)} 檔持股")
-        return result
-
-    except Exception as e:
-        log.error(f"  {etf_code} 錯誤: {e}")
+    if soup is None:
         return pd.DataFrame()
+
+    # 找持股 table（有 代號/名稱/權重 欄位）
+    rows = []
+    table = soup.find("table")
+    if not table:
+        log.debug(f"  {etf_code} 無 table")
+        return pd.DataFrame()
+
+    for tr in table.find_all("tr"):
+        tds = tr.find_all(["td", "th"])
+        if len(tds) < 2:
+            continue
+        row_text = [td.get_text(strip=True) for td in tds]
+        rows.append(row_text)
+
+    if len(rows) < 2:
+        return pd.DataFrame()
+
+    # 第一行為 header
+    header = rows[0]
+    data = rows[1:]
+    df = pd.DataFrame(data, columns=header[:len(data[0])] if data else header)
+
+    # etfinfo HTML 結構（已確認）：
+    # <a href="/stock/2330" class="stock-code-link">2330</a>
+    # <span class="stock-name-sub">台積電</span>
+    stock_rows = []
+    for tr in table.find_all("tr"):
+        tds = tr.find_all("td")
+        if not tds:
+            continue
+
+        first_td = tds[0]
+        stock_code = None
+        stock_name = None
+
+        a_tag = first_td.find("a", href=True)
+        if a_tag:
+            m = re.search(r"/stock/(\d{4,6})", a_tag.get("href", ""))
+            if m:
+                stock_code = m.group(1)
+
+        name_span = first_td.find("span", class_="stock-name-sub")
+        if name_span:
+            stock_name = name_span.get_text(strip=True)
+
+        if not stock_code:
+            continue
+
+        all_text = [td.get_text(strip=True) for td in tds]
+
+        weight = ""
+        shares = ""
+        for cell in all_text[1:]:
+            if "%" in cell and not weight:
+                w = re.search(r"([\d.]+)%", cell)
+                if w:
+                    weight = w.group(1)
+            if re.match(r"^[\d,]+$", cell) and not shares:
+                shares = cell.replace(",", "")
+
+        stock_rows.append({
+            "股票代號": stock_code,
+            "股票名稱": stock_name,
+            "權重%": weight,
+            "持股數": shares,
+            "ETF代碼": etf_code,
+            "資料來源": "etfinfo",
+            "抓取時間": trade_date if trade_date else datetime.now(__import__("pytz").timezone("Asia/Taipei")).strftime("%Y%m%d"),
+        })
+
+    if not stock_rows:
+        log.debug(f"  {etf_code} 解析不到股票行")
+        return pd.DataFrame()
+
+    result = pd.DataFrame(stock_rows)
+    log.info(f"  {etf_code} OK: {len(result)} 檔持股")
+    return result
 
 
 def fetch_etfinfo_active_changes(etf_code: str) -> dict:
