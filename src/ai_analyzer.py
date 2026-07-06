@@ -311,7 +311,7 @@ def generate_investment_report(ss, trade_date, us_market_text=""):
 報告約 900-1200 字。若資料不足請明確說明，不要強行推薦。"""
 
     log.info("呼叫 Claude API 產生主報告...")
-    main_report = call_claude(prompt, system=system_prompt, max_tokens=2000)
+    main_report = call_claude(prompt, system=system_prompt, max_tokens=4000)
 
     # 獨立呼叫產生受惠股
     log.info("呼叫 Claude API 產生受惠股推薦...")
