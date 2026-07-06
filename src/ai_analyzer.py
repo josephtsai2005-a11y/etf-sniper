@@ -21,7 +21,7 @@ def call_claude(prompt, system="", max_tokens=2000):
     if system:
         body["system"] = system
     try:
-        resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=body, timeout=60)
+        resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=body, timeout=120)
         data = resp.json()
         if resp.status_code != 200:
             log.error(f"Claude API 失敗 (status={resp.status_code}): {data}")
