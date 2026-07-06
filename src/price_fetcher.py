@@ -22,37 +22,37 @@ SESSION.headers.update({
 
 def get_stock_price_single(stock_code: str) -> dict:
     """
-    取得單一股票當月行情
-    回傳：收盤價、漲跌、漲跌幅%、MA20、站上月線、成交量、成交金額
+    取得單一股票近期行情（跨月合併，確保有足夠交易日計算 MA20）
     """
-    trade_date = datetime.now().strftime("%Y%m%d")
-    month = trade_date[:6] + "01"
+    today = datetime.now()
+    this_month = today.strftime("%Y%m") + "01"
+    prev_month_date = (today.replace(day=1) - timedelta(days=1)).strftime("%Y%m") + "01"
 
     url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
-    params = {
-        "response": "json",
-        "date": month,
-        "stockNo": stock_code,
-    }
 
-    try:
+    def fetch_month(date_str):
+        params = {"response": "json", "date": date_str, "stockNo": stock_code}
         resp = SESSION.get(url, params=params, timeout=15)
         data = resp.json()
-
         if data.get("stat") != "OK" or not data.get("data"):
-            return {}
-
+            return pd.DataFrame()
         fields = data.get("fields", [])
         rows = data.get("data", [])
-        df = pd.DataFrame(rows, columns=fields)
+        return pd.DataFrame(rows, columns=fields)
 
-        # 清洗數字
+    try:
+        df_this = fetch_month(this_month)
+        df_prev = fetch_month(prev_month_date)
+        df = pd.concat([df_prev, df_this], ignore_index=True) if not df_prev.empty else df_this
+
+        if df.empty:
+            return {}
+
         for col in df.columns:
             if col not in ["日期"]:
                 df[col] = df[col].astype(str).str.replace(",", "").str.replace("+", "")
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        # 找欄位
         close_col  = next((c for c in df.columns if "收盤" in c), None)
         change_col = next((c for c in df.columns if "漲跌" in c and "幅" not in c), None)
         vol_col    = next((c for c in df.columns if "成交股數" in c or "成交量" in c), None)
