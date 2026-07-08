@@ -229,8 +229,7 @@ if page == "多方驗證名單":
     # 篩選
     col1, col2 = st.columns(2)
     with col1:
-        min_score = st.slider("最低綜合評分", 0.0, 10.0, 5.0, 0.5)
-    with col2:
+        min_score = st.slider("最低綜合評分（滿分11）", 0.0, 11.0, 5.0, 0.5)
         min_inst = st.slider("最少買超法人數", 0, 3, 1)
 
     filtered = multi_df.copy()
