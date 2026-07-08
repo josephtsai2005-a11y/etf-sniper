@@ -87,42 +87,61 @@ def fetch_all_institutional(trade_date: Optional[str] = None) -> pd.DataFrame:
         rows = data.get("data", [])
         df = pd.DataFrame(rows, columns=fields)
 
-        def find_col(df, keywords):
-            for col in df.columns:
-                if all(k in col for k in keywords):
-                    return col
-            return None
-
-        code_col    = find_col(df, ["證券代號"])
-        name_col    = find_col(df, ["證券名稱"])
-        
         def find_col_exact(df, name):
             return name if name in df.columns else None
 
-        foreign_col    = find_col_exact(df, "外陸資買賣超股數(不含外資自營商)")
-        dealer_fii_col = find_col_exact(df, "外資自營商買賣超股數")
-        trust_col      = find_col_exact(df, "投信買賣超股數")
-        dealer_col     = find_col_exact(df, "自營商買賣超股數")
-        total_col      = find_col_exact(df, "三大法人買賣超股數")
+        code_col = find_col_exact(df, "證券代號")
+        name_col = find_col_exact(df, "證券名稱")
 
-        for name, col in [("foreign_col",foreign_col),("dealer_fii_col",dealer_fii_col),
-                        ("trust_col",trust_col),("dealer_col",dealer_col),("total_col",total_col)]:
-            if col is None:
-                log.error(f"{name} 找不到對應欄位，TWSE 欄位可能又改了")
+        foreign_buy_col  = find_col_exact(df, "外陸資買進股數(不含外資自營商)")
+        foreign_sell_col = find_col_exact(df, "外陸資賣出股數(不含外資自營商)")
+        foreign_col      = find_col_exact(df, "外陸資買賣超股數(不含外資自營商)")
+        fii_buy_col      = find_col_exact(df, "外資自營商買進股數")
+        fii_sell_col     = find_col_exact(df, "外資自營商賣出股數")
+        dealer_fii_col   = find_col_exact(df, "外資自營商買賣超股數")
+
+        trust_buy_col  = find_col_exact(df, "投信買進股數")
+        trust_sell_col = find_col_exact(df, "投信賣出股數")
+        trust_col      = find_col_exact(df, "投信買賣超股數")
+
+        dealer_self_buy_col   = find_col_exact(df, "自營商買進股數(自行買賣)")
+        dealer_self_sell_col  = find_col_exact(df, "自營商賣出股數(自行買賣)")
+        dealer_hedge_buy_col  = find_col_exact(df, "自營商買進股數(避險)")
+        dealer_hedge_sell_col = find_col_exact(df, "自營商賣出股數(避險)")
+        dealer_col            = find_col_exact(df, "自營商買賣超股數")
+
+        total_col = find_col_exact(df, "三大法人買賣超股數")
 
         df = df.rename(columns={code_col: "證券代號", name_col: "證券名稱"})
 
-        # 清洗數字欄位（把千分位逗號去掉、轉數字）
-        numeric_cols = [foreign_col, dealer_fii_col, trust_col, dealer_col, total_col]
+        numeric_cols = [
+            foreign_buy_col, foreign_sell_col, foreign_col,
+            fii_buy_col, fii_sell_col, dealer_fii_col,
+            trust_buy_col, trust_sell_col, trust_col,
+            dealer_self_buy_col, dealer_self_sell_col,
+            dealer_hedge_buy_col, dealer_hedge_sell_col, dealer_col,
+            total_col,
+        ]
         for col in numeric_cols:
             df[col] = df[col].astype(str).str.replace(",", "").str.replace("+", "")
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-        # 外資買賣超 = 一般外資 + 外資自營商（業界慣例外資通常合併計算）
+        # 買賣超（沿用今天已修正的邏輯）
         df["外資買賣超"] = df[foreign_col] + df[dealer_fii_col]
         df["投信買賣超"] = df[trust_col]
         df["自營買賣超"] = df[dealer_col]
-        df["三大合計"]   = df[total_col]  # 直接用 API 算好的合計，不要自己重算
+        df["三大合計"]   = df[total_col]
+
+        # 新增：買進/賣出原始量（強度指標用）
+        df["外資買進"] = df[foreign_buy_col] + df[fii_buy_col]
+        df["外資賣出"] = df[foreign_sell_col] + df[fii_sell_col]
+        df["投信買進"] = df[trust_buy_col]
+        df["投信賣出"] = df[trust_sell_col]
+        df["自營買進"] = df[dealer_self_buy_col] + df[dealer_hedge_buy_col]
+        df["自營賣出"] = df[dealer_self_sell_col] + df[dealer_hedge_sell_col]
+
+        df["三大合計買進"] = df["外資買進"] + df["投信買進"] + df["自營買進"]
+        df["三大合計賣出"] = df["外資賣出"] + df["投信賣出"] + df["自營賣出"]
 
         df["證券代號"] = df["證券代號"].astype(str).str.strip()
         df["抓取日期"] = trade_date
