@@ -11,6 +11,7 @@ import logging
 import re
 from datetime import datetime, timedelta
 from typing import Optional
+from trend_analyzer import _DEFAULT_MAP as DEFAULT_MAP
 import pytz
 
 log = logging.getLogger(__name__)
@@ -234,6 +235,7 @@ def cross_with_etf(
     inst_df: pd.DataFrame,
     smart_df: pd.DataFrame,
     fundamental_df: pd.DataFrame = None,
+    retail_df: pd.DataFrame = None,
 ) -> pd.DataFrame:
     """
     三大法人 × 主動ETF持股 × 基本面 交叉驗證
@@ -282,6 +284,42 @@ def cross_with_etf(
         merged["三大合計"] / inst_volume.replace(0, pd.NA) * 100
     ).round(1).fillna(0)
 
+    def match_retail_sentiment(smart_df, retail_df):
+        """自動比對股票名稱與散戶情緒主題，回傳 {股票代號: 散戶關注度} 字典"""
+        if retail_df is None or retail_df.empty or "主題" not in retail_df.columns:
+            return {}
+        all_topics = retail_df["主題"].tolist()
+        result = {}
+        for _, stock_row in smart_df.iterrows():
+            code = str(stock_row.get("股票代號", ""))
+            name = str(stock_row.get("股票名稱", ""))
+            matched_topics = [t for t in all_topics if name and len(name) >= 2 and name in t]
+            if not matched_topics:
+                related_kws = DEFAULT_MAP.get(code, [])
+                matched_topics = [t for t in all_topics if t in related_kws]
+            if matched_topics:
+                matched_rows = retail_df[retail_df["主題"].isin(matched_topics)]
+                sentiments = matched_rows["散戶關注度"].tolist()
+                if any("淡漠" in s for s in sentiments):
+                    result[code] = "淡漠"
+                elif any("萌芽" in s for s in sentiments):
+                    result[code] = "萌芽"
+                elif sentiments:
+                    result[code] = sentiments[0]
+        return result
+
+    retail_map = match_retail_sentiment(smart_df, retail_df) if retail_df is not None else {}
+
+    def sentiment_score(code):
+        sentiment = retail_map.get(str(code), "")
+        if "淡漠" in sentiment:
+            return 1
+        elif "萌芽" in sentiment:
+            return 0.5
+        else:
+            return 0
+
+
     # ── 綜合評分（0-10分）──────────────────────────────────────
     def total_score(row):
         # ETF 持股共識（0-3分）
@@ -312,10 +350,10 @@ def cross_with_etf(
         else:
             tech_score = 0.5
 
-        # 散戶情緒（0-1分，搜尋量低=好）
-        # 暫時不加，等 Trends 資料穩定後加入
+        # 散戶情緒（0-1分，散戶淡漠但有題材=反向布局訊號）
+        sent_score = sentiment_score(row.get("股票代號", ""))
 
-        return round(etf_score + inst_score + fund_score + tech_score, 1)
+        return round(etf_score + inst_score + fund_score + tech_score + sent_score, 1)
 
     merged["綜合評分"] = merged.apply(total_score, axis=1)
 

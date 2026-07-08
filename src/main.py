@@ -685,7 +685,18 @@ def main():
 
         if not inst_df.empty:
             inst_df = compute_institutional_signal(inst_df)
-            cross_df = cross_with_etf(inst_df, smart_df, fundamental_df)
+            try:
+                ws_retail = ss2.worksheet("散戶情緒")
+                retail_vals = ws_retail.get_all_values()
+                if len(retail_vals) > 2:
+                    retail_df = pd.DataFrame(retail_vals[2:], columns=retail_vals[1])
+                else:
+                    retail_df = pd.DataFrame()
+            except Exception as e:
+                log.warning(f"讀取散戶情緒失敗（不影響主流程）: {e}")
+                retail_df = pd.DataFrame()
+
+            cross_df = cross_with_etf(inst_df, smart_df, fundamental_df, retail_df)
 
             # 寫入 Sheets
             import time as _t; _t.sleep(15)
