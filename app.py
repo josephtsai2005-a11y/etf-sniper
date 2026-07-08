@@ -775,7 +775,7 @@ elif page == "聰明錢名單":
         st.stop()
 
     # 數字轉換
-    num_cols(df, ["持有ETF數", "平均權重%", "排名", "收盤價", "漲跌幅%", "MA20", "持股市值(萬)"])
+    num_cols(df, ["持有ETF數", "平均權重%", "排名", "收盤價", "漲跌幅%", "MA5", "MA10", "MA20", "連續站上月線天數", "量能比", "持股市值(萬)"])
 
     # 篩選
     col1, col2 = st.columns([1, 3])
@@ -801,7 +801,7 @@ elif page == "聰明錢名單":
     display_cols = [
         "排名", "股票代號", "股票名稱",
         "持有ETF數", "平均權重%", "訊號",
-        "收盤價", "漲跌", "站上MA20", "持股市值(萬)"
+        "收盤價", "漲跌", "站上MA20", "連續站上月線天數", "均線排列", "量能比", "持股市值(萬)"
     ]
     available = [c for c in display_cols if c in filtered.columns]
 
@@ -813,6 +813,8 @@ elif page == "聰明錢名單":
         "收盤價":     st.column_config.NumberColumn("收盤價",     format="%.1f"),
         "持股市值(萬)": st.column_config.NumberColumn("持股市值(萬)", format="%.0f 萬"),
         "站上MA20":   st.column_config.CheckboxColumn("站上月線"),
+        "連續站上月線天數": st.column_config.NumberColumn("連續站上天數", format="%d 天"),
+        "量能比":     st.column_config.NumberColumn("量能比", format="%.2f"),
     }
 
     st.dataframe(
