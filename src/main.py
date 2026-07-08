@@ -97,7 +97,7 @@ def write_smart_money_to_sheets(ss, smart_df, trade_date: str):
     header_row = [f"⚡ 聰明錢名單 {trade_date}　更新：{now_tw().strftime('%H:%M')}"]
     ws_smart.append_row(header_row)
 
-    cols = ["排名", "股票代號", "股票名稱", "持有ETF數", "平均權重%", "訊號", "收盤價", "漲跌幅%", "MA20", "站上MA20", "持股市值(萬)", "持有ETF清單"]
+    cols = ["排名", "股票代號", "股票名稱", "持有ETF數", "平均權重%", "訊號", "收盤價", "漲跌幅%", "MA20", "站上MA20", "成交量", "持股市值(萬)", "持有ETF清單"]
     available = [c for c in cols if c in smart_df.columns]
     ws_smart.append_row(available)
 
@@ -257,6 +257,65 @@ def _write_trend_to_sheets(ss, trend_df, cross_df, trade_date):
         ws.append_rows(all_rows, value_input_option="USER_ENTERED")
         log.info(f"{sheet_name} 寫入完成")
 
+def _write_etf_strength_history(ss, stock_diff, trade_date):
+    """把每日ETF力道資料追加寫入歷史分頁，供之後計算連續天數"""
+    SHEET = "ETF力道歷史"
+    existing = [ws.title for ws in ss.worksheets()]
+    if SHEET not in existing:
+        ss.add_worksheet(title=SHEET, rows=20000, cols=10)
+    ws = ss.worksheet(SHEET)
+    all_vals = ws.get_all_values()
+
+    cols = ["股票代號","股票名稱","總變動張數","成交量","ETF力道%","加碼ETF數","減碼ETF數"]
+    avail = [c for c in cols if c in stock_diff.columns]
+
+    if not all_vals or all_vals == [[]]:
+        ws.append_row(["日期"] + avail)
+
+    rows = []
+    for _, row in stock_diff[avail].fillna(0).iterrows():
+        rows.append([trade_date] + row.tolist())
+    if rows:
+        ws.append_rows(rows, value_input_option="USER_ENTERED")
+    log.info(f"ETF力道歷史追加完成：{len(rows)} 筆 ({trade_date})")
+
+def _add_consecutive_days(ss, stock_diff, trade_date, lookback=10, retries=2):
+    """計算每檔股票連續被淨加碼的天數"""
+    for attempt in range(retries):
+        try:
+            ws = ss.worksheet("ETF力道歷史")
+            all_vals = ws.get_all_values()
+            if len(all_vals) < 2:
+                stock_diff["連續加碼天數"] = 0
+                return stock_diff
+
+            headers = all_vals[0]
+            hist_df = pd.DataFrame(all_vals[1:], columns=headers)
+            hist_df["總變動張數"] = pd.to_numeric(hist_df["總變動張數"], errors="coerce").fillna(0)
+
+            def count_consecutive(code):
+                sub = hist_df[hist_df["股票代號"] == code].tail(lookback)
+                sub = sub.sort_values("日期")
+                count = 0
+                for _, r in sub.iloc[::-1].iterrows():
+                    if r["總變動張數"] > 0:
+                        count += 1
+                    else:
+                        break
+                return count
+
+            stock_diff["連續加碼天數"] = stock_diff["股票代號"].apply(count_consecutive)
+            return stock_diff
+        except Exception as e:
+            if attempt < retries - 1:
+                log.warning(f"計算連續加碼天數失敗，重試中: {e}")
+                time.sleep(3)
+                continue
+            else:
+                log.warning(f"計算連續加碼天數失敗（不影響主流程）: {str(e)[:200]}")
+                stock_diff["連續加碼天數"] = 0
+                return stock_diff
+    
 
 def _write_diff_to_sheets(ss, stock_diff, diff_detail, trade_date):
     """寫入差異比對結果到 Google Sheets"""
@@ -277,8 +336,8 @@ def _write_diff_to_sheets(ss, stock_diff, diff_detail, trade_date):
 
     if not stock_diff.empty:
         cols = ["排名","股票代號","股票名稱","主要狀態",
-                "加碼ETF數","減碼ETF數","新增ETF數","清倉ETF數",
-                "總變動張數","平均權重變動%","總資金動向","收盤價"]
+        "加碼ETF數","減碼ETF數","新增ETF數","清倉ETF數",
+        "總變動張數","ETF力道%","連續加碼天數","平均權重變動%","總資金動向","收盤價"]
         available = [c for c in cols if c in stock_diff.columns]
         all_diff_rows.append(available)
         rows = stock_diff[available].fillna("").values.tolist()
@@ -442,6 +501,21 @@ def main():
                         price_ref = smart_df[["股票代號","收盤價"]].drop_duplicates()
                         diff_detail = compute_fund_flow(diff_detail, price_ref)
                     stock_diff = aggregate_stock_diff(diff_detail)
+
+                    # ── ETF買賣力道% + 連續加碼天數 ──────────────────
+                    if "成交量" in smart_df.columns:
+                        vol_ref = smart_df[["股票代號","成交量"]].drop_duplicates()
+                        stock_diff = stock_diff.merge(vol_ref, on="股票代號", how="left")
+                        stock_diff["成交量"] = pd.to_numeric(stock_diff["成交量"], errors="coerce").fillna(0)
+                        stock_diff["ETF力道%"] = (
+                            stock_diff["總變動張數"].abs() / stock_diff["成交量"].replace(0, pd.NA) * 100
+                        ).round(2).fillna(0)
+                    else:
+                        stock_diff["ETF力道%"] = 0
+
+                    _write_etf_strength_history(ss2, stock_diff, TRADE_DATE)
+                    stock_diff = _add_consecutive_days(ss2, stock_diff, TRADE_DATE)
+
                     _write_diff_to_sheets(ss2, stock_diff, diff_detail, TRADE_DATE)
                     log.info(f"差異比對完成：{len(stock_diff)} 檔有變動")
                 else:
