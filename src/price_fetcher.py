@@ -23,6 +23,7 @@ SESSION.headers.update({
 def get_stock_price_single(stock_code: str) -> dict:
     """
     取得單一股票近期行情（跨月合併，確保有足夠交易日計算 MA20）
+    新增：MA5/MA10、均線排列狀態、連續站上月線天數、量能比
     """
     today = datetime.now()
     this_month = today.strftime("%Y%m") + "01"
@@ -66,8 +67,37 @@ def get_stock_price_single(stock_code: str) -> dict:
             return {}
 
         latest_close = closes[-1]
+        ma5  = round(sum(closes[-5:])  / min(len(closes), 5),  2)
+        ma10 = round(sum(closes[-10:]) / min(len(closes), 10), 2)
         ma20 = round(sum(closes[-20:]) / min(len(closes), 20), 2)
         above_ma20 = latest_close > ma20
+
+        # 均線排列狀態
+        if ma5 > ma10 > ma20:
+            ma_alignment = "多頭排列"
+        elif ma5 < ma10 < ma20:
+            ma_alignment = "空頭排列"
+        else:
+            ma_alignment = "糾結"
+
+        # 連續站上月線天數：回溯計算過去每一天的MA20，反推連續天數
+        consecutive_above = 0
+        if len(closes) >= 21:
+            for i in range(len(closes) - 1, 19, -1):  # 從最新一天往回，至少要有20天可算MA20
+                day_ma20 = sum(closes[i-20:i]) / 20
+                if closes[i] > day_ma20:
+                    consecutive_above += 1
+                else:
+                    break
+
+        # 量能比：今日成交量 / 近5日均量
+        volume_ratio = 0
+        if vol_col and len(df) >= 5:
+            recent_vols = df[vol_col].dropna().tolist()
+            if len(recent_vols) >= 5:
+                today_vol = recent_vols[-1]
+                avg5_vol = sum(recent_vols[-6:-1]) / 5  # 不含今天的前5日均量
+                volume_ratio = round(today_vol / avg5_vol, 2) if avg5_vol > 0 else 0
 
         change = float(df[change_col].iloc[-1]) if change_col else 0
         prev = latest_close - change
@@ -81,8 +111,13 @@ def get_stock_price_single(stock_code: str) -> dict:
             "收盤價":   latest_close,
             "漲跌":     change,
             "漲跌幅%":  change_pct,
+            "MA5":      ma5,
+            "MA10":     ma10,
             "MA20":     ma20,
             "站上MA20": above_ma20,
+            "均線排列": ma_alignment,
+            "連續站上月線天數": consecutive_above,
+            "量能比":   volume_ratio,
             "成交量":   volume,
             "成交金額": amount,
         }
