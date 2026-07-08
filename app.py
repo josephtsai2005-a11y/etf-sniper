@@ -880,7 +880,7 @@ elif page == "每日AI總結":
             _report = _p1 + _p2
             st.caption(f"📅 {_date} 更新：{_time}")
             if _report.strip():
-                st.markdown(_report)
+                st.markdown(_report, unsafe_allow_html=True)
             else:
                 st.warning("報告內容為空，請等待 23:00 後更新")
             st.divider()
@@ -890,7 +890,7 @@ elif page == "每日AI總結":
                         _rp1 = _row.get("AI分析報告（上）",_row.get("AI分析報告",""))
                         _rp2 = _row.get("AI分析報告（下）","")
                         st.caption(f"📅 {_row.get('日期','')} {_row.get('更新時間','')}")
-                        st.markdown(_rp1 + _rp2)
+                        st.markdown(_rp1 + _rp2, unsafe_allow_html=True)
                         st.divider()
     except Exception as _e:
         st.error(f"無法載入 AI 報告: {_e}")
