@@ -249,7 +249,8 @@ def cross_with_etf(
     smart_df["股票代號"] = smart_df["股票代號"].astype(str).str.strip()
 
     merged = smart_df.merge(
-        inst_df[["股票代號","外資買賣超","投信買賣超","自營買賣超","三大合計","買超法人數","法人訊號"]],
+        inst_df[["股票代號","外資買賣超","投信買賣超","自營買賣超","三大合計","買超法人數","法人訊號",
+                  "三大合計買進","三大合計賣出"]],
         on="股票代號", how="left",
     )
 
@@ -264,6 +265,22 @@ def cross_with_etf(
     merged["買超法人數"] = pd.to_numeric(merged.get("買超法人數"), errors="coerce").fillna(0).astype(int)
     merged["三大合計"]   = pd.to_numeric(merged.get("三大合計"),   errors="coerce").fillna(0)
     merged["基本面分數"] = pd.to_numeric(merged.get("基本面分數"), errors="coerce").fillna(0)
+    merged["三大合計買進"] = pd.to_numeric(merged.get("三大合計買進"), errors="coerce").fillna(0)
+    merged["三大合計賣出"] = pd.to_numeric(merged.get("三大合計賣出"), errors="coerce").fillna(0)
+
+    # ── 法人強度指標 ──────────────────────────────────────────
+    inst_volume = merged["三大合計買進"] + merged["三大合計賣出"]
+
+    # 法人換手強度%：法人交易量佔當日總成交量比例
+    merged["成交量"] = pd.to_numeric(merged.get("成交量"), errors="coerce").fillna(0)
+    merged["法人換手強度%"] = (
+        inst_volume / merged["成交量"].replace(0, pd.NA) * 100
+    ).round(1).fillna(0)
+
+    # 買超轉換率%：淨買超佔法人總交易量比例，越接近100%代表訊號一致性越高
+    merged["買超轉換率%"] = (
+        merged["三大合計"] / inst_volume.replace(0, pd.NA) * 100
+    ).round(1).fillna(0)
 
     # ── 綜合評分（0-10分）──────────────────────────────────────
     def total_score(row):
@@ -278,13 +295,27 @@ def cross_with_etf(
         # 基本面月營收（0-2分）
         fund_score = min(float(row.get("基本面分數", 0)), 2)
 
-        # 技術面（0-1分）
-        ma_score = 1 if str(row.get("站上MA20","")).lower() in ["true","1","是"] else 0
+        # 技術面（0-2分）：站上月線是門檻，排列+量能決定訊號品質
+        above_ma20 = str(row.get("站上MA20","")).lower() in ["true","1","是"]
+        alignment  = row.get("均線排列") == "多頭排列"
+        try:
+            volume_ratio = float(row.get("量能比", 0) or 0)
+        except (ValueError, TypeError):
+            volume_ratio = 0
+
+        if not above_ma20:
+            tech_score = 0
+        elif alignment and volume_ratio >= 1.2:
+            tech_score = 2
+        elif alignment or volume_ratio >= 1.2:
+            tech_score = 1
+        else:
+            tech_score = 0.5
 
         # 散戶情緒（0-1分，搜尋量低=好）
         # 暫時不加，等 Trends 資料穩定後加入
 
-        return round(etf_score + inst_score + fund_score + ma_score, 1)
+        return round(etf_score + inst_score + fund_score + tech_score, 1)
 
     merged["綜合評分"] = merged.apply(total_score, axis=1)
 
