@@ -354,7 +354,7 @@ elif page == "今日訊號":
         st.info("💡 今日是系統第一天執行，明天盤後即可看到今日vs昨日的完整比對")
         st.stop()
 
-    num_cols(diff_df, ["加碼ETF數","減碼ETF數","新增ETF數","清倉ETF數","總變動張數","總資金動向","收盤價"])
+    num_cols(diff_df, ["加碼ETF數","減碼ETF數","新增ETF數","清倉ETF數","總變動張數","ETF力道%","連續加碼天數","總資金動向","收盤價"])
 
     # 摘要
     c1, c2, c3, c4 = st.columns(4)
@@ -378,8 +378,8 @@ elif page == "今日訊號":
 
     # 主表格
     display_cols = ["排名","股票代號","股票名稱","主要狀態",
-                    "加碼ETF數","減碼ETF數","新增ETF數","清倉ETF數",
-                    "總變動張數","平均權重變動%","總資金動向","收盤價"]
+                "加碼ETF數","減碼ETF數","新增ETF數","清倉ETF數",
+                "總變動張數","ETF力道%","連續加碼天數","平均權重變動%","總資金動向","收盤價"]
     available = [c for c in display_cols if c in filtered.columns]
 
     st.dataframe(
@@ -389,6 +389,8 @@ elif page == "今日訊號":
         hide_index=True,
         column_config={
             "總變動張數":    st.column_config.NumberColumn("總變動張數", format="%.1f 張"),
+            "ETF力道%":     st.column_config.NumberColumn("ETF力道%", format="%.2f%%"),
+            "連續加碼天數":  st.column_config.NumberColumn("連續加碼天數", format="%d 天"),
             "平均權重變動%": st.column_config.NumberColumn("權重變動%", format="%.2f%%"),
             "總資金動向":   st.column_config.NumberColumn("資金動向(萬)", format="%.1f 萬"),
             "收盤價":       st.column_config.NumberColumn("收盤價", format="%.1f"),
