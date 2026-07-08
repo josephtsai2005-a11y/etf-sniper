@@ -59,13 +59,24 @@ def load_sheet(sheet_name: str) -> pd.DataFrame:
         if not all_values or len(all_values) < 2:
             return pd.DataFrame()
 
-        # 找欄位標題行
-        header_idx = 0
-        for i, row in enumerate(all_values[:5]):
+        # 找欄位標題行：擴充關鍵字 + 排除空白列 + 排除過長內容(AI分析文字)
+        header_idx = None
+        header_keywords = ["排名", "股票代號", "股票名稱", "代號", "題材", "主題", "關鍵字"]
+        for i, row in enumerate(all_values[:8]):
             row_text = " ".join(str(c) for c in row)
-            if any(k in row_text for k in ["排名", "股票代號", "股票名稱", "代號"]):
+            if not row_text.strip():
+                continue
+            if len(row_text) > 100:
+                continue
+            non_empty_cols = sum(1 for c in row if str(c).strip())
+            if non_empty_cols < 2:  # 標題列通常只有1個非空欄位
+                continue
+            if any(k in row_text for k in header_keywords):
                 header_idx = i
                 break
+
+        if header_idx is None:
+            header_idx = 0
 
         headers = all_values[header_idx]
         data_rows = all_values[header_idx + 1:]
