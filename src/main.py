@@ -97,7 +97,9 @@ def write_smart_money_to_sheets(ss, smart_df, trade_date: str):
     header_row = [f"⚡ 聰明錢名單 {trade_date}　更新：{now_tw().strftime('%H:%M')}"]
     ws_smart.append_row(header_row)
 
-    cols = ["排名", "股票代號", "股票名稱", "持有ETF數", "平均權重%", "訊號", "收盤價", "漲跌幅%", "MA20", "站上MA20", "成交量", "持股市值(萬)", "持有ETF清單"]
+    cols = ["排名", "股票代號", "股票名稱", "持有ETF數", "平均權重%", "訊號", "收盤價", "漲跌幅%",
+        "MA5", "MA10", "MA20", "站上MA20", "均線排列", "連續站上月線天數", "量能比",
+        "成交量", "持股市值(萬)", "持有ETF清單"]
     available = [c for c in cols if c in smart_df.columns]
     ws_smart.append_row(available)
 
