@@ -159,7 +159,8 @@ def enrich_with_prices(df: pd.DataFrame, top_n: int = 50) -> pd.DataFrame:
     df["股票代號"] = df["股票代號"].astype(str).str.strip()
 
     # 保留原本名稱欄，合併股價（不合入名稱）
-    price_cols = ["股票代號", "收盤價", "漲跌", "漲跌幅%", "MA20", "站上MA20", "成交量", "成交金額"]
+    price_cols = ["股票代號", "收盤價", "漲跌", "漲跌幅%", "MA5", "MA10", "MA20", "站上MA20",
+              "均線排列", "連續站上月線天數", "量能比", "成交量", "成交金額"]
     price_df = price_df[[c for c in price_cols if c in price_df.columns]]
 
     merged = df.merge(price_df, on="股票代號", how="left")
