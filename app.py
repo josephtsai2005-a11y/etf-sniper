@@ -880,9 +880,13 @@ elif page == "每日AI總結":
     def render_report_in_chunks(full_report):
         """把報告依照 ## 或 ### 標題切割成多段，分次渲染避免單次內容過長造成截斷"""
         sections = re.split(r'(?=\n#{2,3} )', full_report)
-        for section in sections:
+        st.caption(f"🔧 除錯：共切成 {len(sections)} 段")
+        for i, section in enumerate(sections):
             if section.strip():
-                st.markdown(section, unsafe_allow_html=True)
+                try:
+                    st.markdown(section, unsafe_allow_html=True)
+                except Exception as e:
+                    st.error(f"第{i}段渲染失敗: {e}")
 
     try:
         _client = get_client()
