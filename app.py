@@ -9,6 +9,7 @@ import plotly.graph_objects as go
 import gspread
 from google.oauth2.service_account import Credentials
 import os
+import re
 from datetime import datetime
 
 st.set_page_config(
@@ -875,6 +876,14 @@ elif page == "聰明錢名單":
 elif page == "每日AI總結":
     st.title("每日 AI 投資報告")
     st.caption("由 Claude AI 整合 ETF籌碼、法人、基本面、題材、美股，產生專業投資分析")
+
+    def render_report_in_chunks(full_report):
+        """把報告依照 ## 標題切割成多段，分次渲染避免單次內容過長造成截斷"""
+        sections = re.split(r'(?=\n## )', full_report)
+        for section in sections:
+            if section.strip():
+                st.markdown(section, unsafe_allow_html=True)
+
     try:
         _client = get_client()
         _sid = st.secrets.get("SPREADSHEET_ID","") or os.environ.get("SPREADSHEET_ID","")
@@ -894,7 +903,7 @@ elif page == "每日AI總結":
             _report = _p1 + _p2
             st.caption(f"📅 {_date} 更新：{_time}")
             if _report.strip():
-                st.markdown(_report, unsafe_allow_html=True)
+                render_report_in_chunks(_report)
             else:
                 st.warning("報告內容為空，請等待 23:00 後更新")
             st.divider()
@@ -904,7 +913,7 @@ elif page == "每日AI總結":
                         _rp1 = _row.get("AI分析報告（上）",_row.get("AI分析報告",""))
                         _rp2 = _row.get("AI分析報告（下）","")
                         st.caption(f"📅 {_row.get('日期','')} {_row.get('更新時間','')}")
-                        st.markdown(_rp1 + _rp2, unsafe_allow_html=True)
+                        render_report_in_chunks(_rp1 + _rp2)
                         st.divider()
     except Exception as _e:
         st.error(f"無法載入 AI 報告: {_e}")
