@@ -878,8 +878,8 @@ elif page == "每日AI總結":
     st.caption("由 Claude AI 整合 ETF籌碼、法人、基本面、題材、美股，產生專業投資分析")
 
     def render_report_in_chunks(full_report):
-        """把報告依照 ## 標題切割成多段，分次渲染避免單次內容過長造成截斷"""
-        sections = re.split(r'(?=\n## )', full_report)
+        """把報告依照 ## 或 ### 標題切割成多段，分次渲染避免單次內容過長造成截斷"""
+        sections = re.split(r'(?=\n#{2,3} )', full_report)
         for section in sections:
             if section.strip():
                 st.markdown(section, unsafe_allow_html=True)
