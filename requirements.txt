@@ -1,6 +1,7 @@
 ﻿requests==2.31.0
 pandas==2.2.3
 numpy==1.26.4
+pyarrow==14.0.2
 gspread==6.0.2
 google-auth==2.27.0
 google-auth-oauthlib==1.2.0
