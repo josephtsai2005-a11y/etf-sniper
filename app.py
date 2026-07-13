@@ -904,6 +904,7 @@ elif page == "每日AI總結":
             _time = _latest.get("更新時間","")
             _p1 = _latest.get("AI分析報告（上）", _latest.get("AI分析報告",""))
             _p2 = _latest.get("AI分析報告（下）","")
+            st.write(f"🔧 除錯：_p1長度={len(_p1)}, _p2長度={len(_p2)}, _p1結尾50字='{_p1[-50:]}', _p2開頭50字='{_p2[:50]}'")
             _report = _p1 + _p2
             st.caption(f"📅 {_date} 更新：{_time}")
             if _report.strip():
