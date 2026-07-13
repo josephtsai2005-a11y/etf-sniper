@@ -884,7 +884,7 @@ elif page == "每日AI總結":
         for i, section in enumerate(sections):
             if section.strip():
                 try:
-                    st.markdown(section, unsafe_allow_html=False)
+                    st.markdown(section, unsafe_allow_html=True)
                 except Exception as e:
                     st.error(f"第{i}段渲染失敗: {e}")
 
@@ -904,7 +904,6 @@ elif page == "每日AI總結":
             _time = _latest.get("更新時間","")
             _p1 = _latest.get("AI分析報告（上）", _latest.get("AI分析報告",""))
             _p2 = _latest.get("AI分析報告（下）","")
-            st.write(f"🔧 除錯：_p1長度={len(_p1)}, _p2長度={len(_p2)}, _p1結尾50字='{_p1[-50:]}', _p2開頭50字='{_p2[:50]}'")
             _report = _p1 + _p2
             st.caption(f"📅 {_date} 更新：{_time}")
             if _report.strip():
@@ -1110,18 +1109,23 @@ elif page == "持股異動明細":
             },
         )
 
-        if "ETF代碼" in filtered.columns and "變動張數" in filtered.columns and not filtered.empty:
+if "ETF代碼" in filtered.columns and "變動張數" in filtered.columns and not filtered.empty:
             st.subheader("各ETF買賣張數排行")
-            etf_summary = filtered.groupby("ETF代碼")["變動張數"].sum().sort_values()
-            fig = px.bar(
-                x=etf_summary.values, y=etf_summary.index, orientation="h",
-                labels={"x":"變動張數合計","y":"ETF代碼"},
-                color=etf_summary.values,
-                color_continuous_scale=["#FF8C00","#E6F1FB","#1D9E75"],
+            etf_summary = (
+                filtered.groupby("ETF代碼", as_index=False)["變動張數"]
+                .sum()
+                .sort_values("變動張數")
             )
-            fig.update_layout(height=max(300, len(etf_summary)*22), showlegend=False,
-                               plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig, use_container_width=True)
+            if len(etf_summary) > 0:
+                fig = px.bar(
+                    etf_summary, x="變動張數", y="ETF代碼", orientation="h",
+                    labels={"變動張數":"變動張數合計","ETF代碼":""},
+                    color="變動張數",
+                    color_continuous_scale=["#FF8C00","#E6F1FB","#1D9E75"],
+                )
+                fig.update_layout(height=max(300, len(etf_summary)*22), showlegend=False,
+                                   plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
+                st.plotly_chart(fig, use_container_width=True)
 
 elif page == "基本面資料":
     st.title("📈 基本面資料")
