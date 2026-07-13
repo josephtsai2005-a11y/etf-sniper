@@ -47,13 +47,6 @@ def get_or_create_spreadsheet(client: gspread.Client, spreadsheet_id: str) -> gs
     except gspread.exceptions.SpreadsheetNotFound:
         raise ValueError(f"找不到試算表 ID: {spreadsheet_id}，請確認 ID 正確且已共用給 Service Account")
 
-    # 確保四個分頁存在
-    existing = [ws.title for ws in ss.worksheets()]
-    for sheet_name in [SHEET_RAW, SHEET_ANALYSIS, SHEET_SNIPER, SHEET_HISTORY]:
-        if sheet_name not in existing:
-            ss.add_worksheet(title=sheet_name, rows=5000, cols=30)
-            log.info(f"建立新分頁：{sheet_name}")
-
     return ss
 
 

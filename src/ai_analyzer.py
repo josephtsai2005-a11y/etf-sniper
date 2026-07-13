@@ -148,18 +148,21 @@ def analyze_news_impact(news_df, smart_df):
 
     prompt = f"""你是台灣股市分析師。請分析以下新聞對台股個股的影響。
 
-今日財經新聞標題：
-{news_str}
+    今日財經新聞標題：
+    {news_str}
 
-ETF重倉股票清單：
-{stock_str}
+    ETF重倉股票清單：
+    {stock_str}
 
-請分析每則重要新聞對上述股票的影響，只回傳 JSON，格式如下：
-{{"影響清單": [{{"新聞摘要": "20字內", "影響股票": ["代號1"], "影響方向": "正面/負面/中性", "影響程度": "高/中/低", "原因": "30字內"}}]}}
+    請分析每則重要新聞對上述股票的影響，只回傳 JSON，格式如下：
+    {{"影響清單": [{{"新聞摘要": "20字內", "影響股票": [{{"code": "代號", "reason": "30字內，需針對該股票具體說明受影響的角色"}}], "影響方向": "正面/負面/中性", "影響程度": "高/中/低"}}]}}
 
-規則：只列有明確影響的新聞，影響股票只列清單內代號，最多15則，只回傳JSON。"""
+    規則：
+    - 如果一則新聞同時影響多檔股票，每一檔股票的"reason"都要分別具體說明該股票在這個事件裡的角色
+    （例如是供應商、客戶、同業競爭者，或產業鏈上下游），不要用同一句話套用在所有股票上
+    - 影響股票只列清單內代號，最多15則，只回傳JSON。"""
 
-    result = call_claude(prompt, max_tokens=2000)
+    result = call_claude(prompt, max_tokens=3500)
     if not result:
         return pd.DataFrame()
 
@@ -314,6 +317,14 @@ def write_ai_report_to_sheets(ss, report, trade_date):
         ws.append_row(["日期", "更新時間", "AI分析報告（上）", "AI分析報告（下）"])
     else:
         ws = ss.worksheet(SHEET)
+
+    # 強制確保表頭正確，避免舊分頁殘留過期表頭導致欄位對不上
+    header = ["日期", "更新時間", "AI分析報告（上）", "AI分析報告（下）"]
+    current_header = ws.row_values(1)
+    if current_header != header:
+        ws.update('A1:D1', [header])
+        log.info(f"表頭已修正：{current_header} → {header}")
+
     now = datetime.now(TW_TZ).strftime("%H:%M")
     time.sleep(3)
     # 拆成兩半避免 Sheets 單格字數限制（50000字）
