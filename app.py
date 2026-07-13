@@ -388,11 +388,11 @@ elif page == "今日訊號":
         height=500,
         hide_index=True,
         column_config={
-            "總變動張數":    st.column_config.NumberColumn("總變動張數", format="%.1f 張"),
+            "總變動張數":    st.column_config.NumberColumn("總變動張數(張)", format="%.1f"),
             "ETF力道%":     st.column_config.NumberColumn("ETF力道%", format="%.2f%%"),
             "連續加碼天數":  st.column_config.NumberColumn("連續加碼天數", format="%d 天"),
             "平均權重變動%": st.column_config.NumberColumn("權重變動%", format="%.2f%%"),
-            "總資金動向":   st.column_config.NumberColumn("資金動向(千萬)", format="%.2f 千萬"),
+            "總資金動向":   st.column_config.NumberColumn("資金動向(千萬)", format="%.2f"),
             "收盤價":       st.column_config.NumberColumn("收盤價", format="%.1f"),
             "加碼ETF數":    st.column_config.NumberColumn("加碼ETF", format="%d"),
             "減碼ETF數":    st.column_config.NumberColumn("減碼ETF", format="%d"),
@@ -811,7 +811,7 @@ elif page == "聰明錢名單":
         ),
         "平均權重%":  st.column_config.NumberColumn("平均權重%",  format="%.2f%%"),
         "收盤價":     st.column_config.NumberColumn("收盤價",     format="%.1f"),
-        "持股市值(千萬)": st.column_config.NumberColumn("持股市值(千萬)", format="%.2f 千萬"),
+        "持股市值(千萬)": st.column_config.NumberColumn("持股市值(千萬)", format="%.2f"),
         "站上MA20":   st.column_config.CheckboxColumn("站上月線"),
         "連續站上月線天數": st.column_config.NumberColumn("連續站上天數", format="%d 天"),
         "量能比":     st.column_config.NumberColumn("量能比", format="%.2f"),
@@ -1103,8 +1103,8 @@ elif page == "持股異動明細":
             column_config={
                 "持股數_今":       st.column_config.NumberColumn("持股數(今,股)", format="%.0f"),
                 "持股數_昨":       st.column_config.NumberColumn("持股數(昨,股)", format="%.0f"),
-                "變動張數":        st.column_config.NumberColumn("變動張數", format="%.1f 張"),
-                "資金動向(千萬)":  st.column_config.NumberColumn("資金動向(千萬)", format="%.2f 千萬"),
+                "變動張數":        st.column_config.NumberColumn("變動張數(張)", format="%.1f"),
+                "資金動向(千萬)":  st.column_config.NumberColumn("資金動向(千萬)", format="%.2f"),
             },
         )
 
