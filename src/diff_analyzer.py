@@ -182,9 +182,9 @@ def compute_fund_flow(diff_df: pd.DataFrame, price_df: pd.DataFrame) -> pd.DataF
 
     merged = diff_df.merge(price_df, on="股票代號", how="left")
     merged["收盤價"] = pd.to_numeric(merged["收盤價"], errors="coerce")
-    merged["資金動向(萬)"] = (
-        merged["變動張數"] * merged["收盤價"] * 1000 / 10000
-    ).round(1)
+    merged["資金動向(千萬)"] = (
+        merged["變動張數"] * merged["收盤價"] * 1000 / 10000000
+    ).round(2)
 
     return merged
 
@@ -200,7 +200,7 @@ def aggregate_stock_diff(diff_df: pd.DataFrame) -> pd.DataFrame:
     code_col = "股票代號"
 
     # 計算各欄位是否存在
-    has_amount  = "資金動向(萬)" in diff_df.columns
+    has_amount  = "資金動向(千萬)" in diff_df.columns
     has_price   = "收盤價" in diff_df.columns
     has_weight  = "權重變動%" in diff_df.columns
 
@@ -213,7 +213,7 @@ def aggregate_stock_diff(diff_df: pd.DataFrame) -> pd.DataFrame:
         "總變動張數": ("變動張數", "sum"),
     }
     if has_amount:
-        agg_dict["總資金動向"] = ("資金動向(萬)", "sum")
+        agg_dict["總資金動向"] = ("資金動向(千萬)", "sum")
     if has_price:
         agg_dict["收盤價"] = ("收盤價", "first")
     if has_weight:

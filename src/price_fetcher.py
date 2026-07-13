@@ -132,7 +132,7 @@ def enrich_with_prices(df: pd.DataFrame, top_n: int = 50) -> pd.DataFrame:
     主入口：把股價欄位合併進 DataFrame
     - 只抓 Top N 檔（避免時間過長）
     - 股票名稱從原本的 df 保留，不會被覆蓋
-    - 計算「持股市值(萬)」= 持股數 × 收盤價 / 10000
+    - 計算「持股市值(千萬)」= 持股數 × 收盤價 / 10000000
     """
     if df.empty or "股票代號" not in df.columns:
         return df
@@ -170,7 +170,7 @@ def enrich_with_prices(df: pd.DataFrame, top_n: int = 50) -> pd.DataFrame:
         shares = pd.to_numeric(
             merged["持股數"].astype(str).str.replace(",", ""), errors="coerce"
         )
-        merged["持股市值(萬)"] = (shares * merged["收盤價"] / 10000).round(0)
+        merged["持股市值(千萬)"] = (shares * merged["收盤價"] / 10000000).round(0)
 
     got = merged["收盤價"].notna().sum()
     log.info(f"股價合併完成：{got}/{len(merged)} 筆有股價")

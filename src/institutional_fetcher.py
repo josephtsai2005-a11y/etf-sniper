@@ -133,6 +133,10 @@ def fetch_all_institutional(trade_date: Optional[str] = None) -> pd.DataFrame:
         df["自營買賣超"] = df[dealer_col]
         df["三大合計"]   = df[total_col]
 
+        # TWSE 原始欄位單位為「股」，統一換算為「張」（1張=1000股）
+        for col in ["外資買賣超", "投信買賣超", "自營買賣超", "三大合計"]:
+            df[col] = (df[col] / 1000).round(0)
+
         # 新增：買進/賣出原始量（強度指標用）
         df["外資買進"] = df[foreign_buy_col] + df[fii_buy_col]
         df["外資賣出"] = df[foreign_sell_col] + df[fii_sell_col]

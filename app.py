@@ -392,7 +392,7 @@ elif page == "今日訊號":
             "ETF力道%":     st.column_config.NumberColumn("ETF力道%", format="%.2f%%"),
             "連續加碼天數":  st.column_config.NumberColumn("連續加碼天數", format="%d 天"),
             "平均權重變動%": st.column_config.NumberColumn("權重變動%", format="%.2f%%"),
-            "總資金動向":   st.column_config.NumberColumn("資金動向(萬)", format="%.1f 萬"),
+            "總資金動向":   st.column_config.NumberColumn("資金動向(千萬)", format="%.2f 千萬"),
             "收盤價":       st.column_config.NumberColumn("收盤價", format="%.1f"),
             "加碼ETF數":    st.column_config.NumberColumn("加碼ETF", format="%d"),
             "減碼ETF數":    st.column_config.NumberColumn("減碼ETF", format="%d"),
@@ -417,7 +417,7 @@ elif page == "今日訊號":
             orientation="h",
             color="總資金動向",
             color_continuous_scale=["#E24B4A", "#CCCCCC", "#1D9E75"],
-            labels={"總資金動向": "資金動向(萬元)", "標籤": ""},
+            labels={"總資金動向": "資金動向(千萬)", "標籤": ""},
         )
         fig.add_vline(x=0, line_dash="dot", line_color="gray")
         fig.update_layout(
@@ -775,7 +775,7 @@ elif page == "聰明錢名單":
         st.stop()
 
     # 數字轉換
-    num_cols(df, ["持有ETF數", "平均權重%", "排名", "收盤價", "漲跌幅%", "MA5", "MA10", "MA20", "連續站上月線天數", "量能比", "持股市值(萬)"])
+    num_cols(df, ["持有ETF數", "平均權重%", "排名", "收盤價", "漲跌幅%", "MA5", "MA10", "MA20", "連續站上月線天數", "量能比", "持股市值(千萬)"])
 
     # 篩選
     col1, col2 = st.columns([1, 3])
@@ -801,7 +801,7 @@ elif page == "聰明錢名單":
     display_cols = [
         "排名", "股票代號", "股票名稱",
         "持有ETF數", "平均權重%", "訊號",
-        "收盤價", "漲跌", "站上MA20", "連續站上月線天數", "均線排列", "量能比", "持股市值(萬)"
+        "收盤價", "漲跌", "站上MA20", "連續站上月線天數", "均線排列", "量能比", "持股市值(千萬)"
     ]
     available = [c for c in display_cols if c in filtered.columns]
 
@@ -811,7 +811,7 @@ elif page == "聰明錢名單":
         ),
         "平均權重%":  st.column_config.NumberColumn("平均權重%",  format="%.2f%%"),
         "收盤價":     st.column_config.NumberColumn("收盤價",     format="%.1f"),
-        "持股市值(萬)": st.column_config.NumberColumn("持股市值(萬)", format="%.0f 萬"),
+        "持股市值(千萬)": st.column_config.NumberColumn("持股市值(千萬)", format="%.2f 千萬"),
         "站上MA20":   st.column_config.CheckboxColumn("站上月線"),
         "連續站上月線天數": st.column_config.NumberColumn("連續站上天數", format="%d 天"),
         "量能比":     st.column_config.NumberColumn("量能比", format="%.2f"),
@@ -884,7 +884,7 @@ elif page == "每日AI總結":
         for i, section in enumerate(sections):
             if section.strip():
                 try:
-                    st.markdown(section, unsafe_allow_html=True)
+                    st.markdown(section, unsafe_allow_html=False)
                 except Exception as e:
                     st.error(f"第{i}段渲染失敗: {e}")
 
@@ -1019,11 +1019,11 @@ elif page == "個股查詢":
         st.info("找不到符合的股票")
         st.stop()
 
-    num_cols(result, ["持有ETF數", "平均權重%", "收盤價", "漲跌幅%", "MA20", "持股市值(萬)"])
+    num_cols(result, ["持有ETF數", "平均權重%", "收盤價", "漲跌幅%", "MA20", "持股市值(千萬)"])
 
     display_cols = [
         "排名", "股票代號", "股票名稱", "持有ETF數", "平均權重%",
-        "訊號", "收盤價", "漲跌幅%", "MA20", "站上MA20", "持股市值(萬)", "持有ETF清單"
+        "訊號", "收盤價", "漲跌幅%", "MA20", "站上MA20", "持股市值(千萬)", "持有ETF清單"
     ]
     available = [c for c in display_cols if c in result.columns]
     st.dataframe(result[available].reset_index(drop=True),
@@ -1058,13 +1058,69 @@ elif page == "個股查詢":
 
 elif page == "持股異動明細":
     st.title("📊 持股異動明細")
-    st.caption("ETF 每日持股變動明細")
+    st.caption("各檔ETF對個股的每日買賣明細（張數 / 資金動向）")
     df = load_sheet("持股異動明細")
     if df.empty:
         st.warning("尚無持股異動明細（每日 15:30 後更新）")
     else:
-        num_cols(df, ["持股數_今","持股數_昨","變動張數","資金動向(萬)"])
-        st.dataframe(df, use_container_width=True)
+        num_cols(df, ["持股數_今","持股數_昨","變動張數","資金動向(千萬)"])
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            etf_options = ["全部"] + sorted(df["ETF代碼"].dropna().unique().tolist()) if "ETF代碼" in df.columns else ["全部"]
+            selected_etf = st.selectbox("篩選ETF", etf_options)
+        with col2:
+            status_options = ["全部"] + sorted(df["狀態"].dropna().unique().tolist()) if "狀態" in df.columns else ["全部"]
+            selected_status = st.selectbox("篩選狀態", status_options)
+        with col3:
+            keyword = st.text_input("搜尋股票代號/名稱", "")
+
+        filtered = df.copy()
+        if selected_etf != "全部" and "ETF代碼" in filtered.columns:
+            filtered = filtered[filtered["ETF代碼"] == selected_etf]
+        if selected_status != "全部" and "狀態" in filtered.columns:
+            filtered = filtered[filtered["狀態"] == selected_status]
+        if keyword:
+            mask = pd.Series(False, index=filtered.index)
+            if "股票代號" in filtered.columns:
+                mask |= filtered["股票代號"].astype(str).str.contains(keyword, na=False)
+            if "股票名稱" in filtered.columns:
+                mask |= filtered["股票名稱"].astype(str).str.contains(keyword, na=False)
+            filtered = filtered[mask]
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("符合筆數", f"{len(filtered)} 筆")
+        if "變動張數" in filtered.columns:
+            c2.metric("合計變動張數", f"{filtered['變動張數'].sum():,.0f} 張")
+        if "資金動向(千萬)" in filtered.columns:
+            c3.metric("合計資金動向", f"{filtered['資金動向(千萬)'].sum():,.2f} 千萬")
+
+        display_cols = ["股票代號","股票名稱","ETF代碼","狀態","持股數_今","持股數_昨",
+                         "變動張數","資金動向(千萬)","今日","昨日"]
+        avail = [c for c in display_cols if c in filtered.columns]
+        st.dataframe(
+            filtered[avail],
+            use_container_width=True,
+            column_config={
+                "持股數_今":       st.column_config.NumberColumn("持股數(今,股)", format="%.0f"),
+                "持股數_昨":       st.column_config.NumberColumn("持股數(昨,股)", format="%.0f"),
+                "變動張數":        st.column_config.NumberColumn("變動張數", format="%.1f 張"),
+                "資金動向(千萬)":  st.column_config.NumberColumn("資金動向(千萬)", format="%.2f 千萬"),
+            },
+        )
+
+        if "ETF代碼" in filtered.columns and "變動張數" in filtered.columns and not filtered.empty:
+            st.subheader("各ETF買賣張數排行")
+            etf_summary = filtered.groupby("ETF代碼")["變動張數"].sum().sort_values()
+            fig = px.bar(
+                x=etf_summary.values, y=etf_summary.index, orientation="h",
+                labels={"x":"變動張數合計","y":"ETF代碼"},
+                color=etf_summary.values,
+                color_continuous_scale=["#FF8C00","#E6F1FB","#1D9E75"],
+            )
+            fig.update_layout(height=max(300, len(etf_summary)*22), showlegend=False,
+                               plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig, use_container_width=True)
 
 elif page == "基本面資料":
     st.title("📈 基本面資料")
