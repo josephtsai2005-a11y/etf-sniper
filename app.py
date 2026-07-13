@@ -1108,7 +1108,7 @@ elif page == "持股異動明細":
             },
         )
 
-if "ETF代碼" in filtered.columns and "變動張數" in filtered.columns and not filtered.empty:
+        if "ETF代碼" in filtered.columns and "變動張數" in filtered.columns and not filtered.empty:
             st.subheader("各ETF買賣張數排行")
             etf_summary = (
                 filtered.groupby("ETF代碼", as_index=False)["變動張數"]
