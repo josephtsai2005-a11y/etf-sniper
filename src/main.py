@@ -24,7 +24,7 @@ from ai_analyzer import generate_investment_report, write_ai_report_to_sheets, g
 from topic_analyzer import build_topic_overview, ai_analyze_topic_overview, write_topic_overview_to_sheets
 from us_market_fetcher import fetch_all_us_market, format_us_market_for_ai, get_market_sentiment_summary
 from trend_analyzer import compute_keyword_timeseries, compute_trend_report, match_keywords_to_stocks
-from sheets_writer import get_client, get_or_create_spreadsheet, write_all, read_history
+from sheets_writer import get_client, get_or_create_spreadsheet
 from analyzer import run_analysis
 
 def now_tw():
