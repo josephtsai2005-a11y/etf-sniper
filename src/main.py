@@ -25,6 +25,8 @@ from topic_analyzer import build_topic_overview, ai_analyze_topic_overview, writ
 from us_market_fetcher import fetch_all_us_market, format_us_market_for_ai, get_market_sentiment_summary
 from trend_analyzer import compute_keyword_timeseries, compute_trend_report, match_keywords_to_stocks
 from sheets_writer import get_client, get_or_create_spreadsheet
+from keyword_generator import get_or_generate_keyword_map
+from backtest_tracker import record_daily_snapshot, backfill_returns
 from analyzer import run_analysis
 
 def now_tw():
@@ -590,11 +592,21 @@ def main():
               if not news_history.empty:
                   pivot = compute_keyword_timeseries(news_history)
                   trend_df = compute_trend_report(pivot)
-                  cross_df = match_keywords_to_stocks(trend_df, smart_df)
+
+                  # AI自動生成關鍵字（取代手動DEFAULT_MAP，每月增量更新、保留舊關鍵字）
+                  try:
+                      ai_keyword_map = get_or_generate_keyword_map(ss2, smart_df, max_new_calls=50)
+                      log.info(f"AI關鍵字映射：本次可用 {len(ai_keyword_map)} 檔股票的關鍵字")
+                  except Exception as e:
+                      log.warning(f"AI關鍵字生成失敗，改用內建DEFAULT_MAP: {e}")
+                      ai_keyword_map = None
+
+                  cross_df = match_keywords_to_stocks(trend_df, smart_df, stock_keyword_map=ai_keyword_map)
 
                   # 寫入趨勢報告
                   _write_trend_to_sheets(ss2, trend_df, cross_df, TRADE_DATE)
                   log.info(f"題材分析：{len(trend_df)} 個關鍵字，{len(cross_df)} 檔個股有題材支撐")
+
       except Exception as e:
           log.warning(f"新聞模組失敗（不影響主流程）: {e}")
           import traceback
@@ -702,6 +714,14 @@ def main():
             import time as _t; _t.sleep(15)
             _write_institutional_to_sheets(ss2, inst_df, cross_df, TRADE_DATE)
             log.info(f"法人資料完成：{len(inst_df)} 檔，三大齊買：{(inst_df['買超法人數']==3).sum()} 檔")
+
+            # 回測記錄：把今天每檔股票的評分/法人訊號/收盤價存成獨立快照，並回填舊紀錄的報酬率
+            try:
+                _t.sleep(10)
+                record_daily_snapshot(ss2, cross_df, TRADE_DATE)
+                backfill_returns(ss2)
+            except Exception as e:
+                log.warning(f"回測記錄失敗（不影響主流程）: {e}")
         else:
             log.warning("法人資料為空（盤後 16:30 後才有）")
     except Exception as e:

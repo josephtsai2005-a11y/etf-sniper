@@ -172,6 +172,11 @@ with st.sidebar:
     for p in ["每日AI總結"]:
         if st.button(p, key=f"btn_{p}", use_container_width=True):
             st.session_state.selected_page = p
+    st.markdown("---")
+    st.markdown("#### 回測分析")
+    for p in ["回測績效", "關鍵字審核"]:
+        if st.button(p, key=f"btn_{p}", use_container_width=True):
+            st.session_state.selected_page = p
 
     if "selected_page" not in st.session_state:
         st.session_state.selected_page = "多方驗證名單"
@@ -1207,3 +1212,182 @@ elif page == "原始持股庫":
     num_cols(filtered, ["權重%", "持股數"])
     st.dataframe(filtered.reset_index(drop=True),
                  use_container_width=True, height=600, hide_index=True)
+
+elif page == "回測績效":
+    st.title("📈 回測績效追蹤")
+    st.caption("驗證「綜合評分」「法人訊號」「法人交易量/一致性」與未來實際報酬率的相關性")
+
+    from backtest_tracker import (
+        get_backtest_summary, get_signal_summary, get_institutional_intensity_summary,
+        _load_backtest_sheet, MAX_WINDOW,
+    )
+
+    raw_backtest = _load_backtest_sheet(ss)
+    total_records = len(raw_backtest) if not raw_backtest.empty else 0
+
+    if total_records == 0:
+        st.warning("尚無回測記錄，資料會從下次 etf-sniper-inst job（16:45）開始累積，每天新增一批獨立快照。")
+        st.info("💡 說明：回測不追蹤「固定一籃子股票」，而是把每天每檔股票的評分/訊號/收盤價各存一筆獨立紀錄，"
+                "之後用「同股票、N個交易日後」的紀錄回頭查詢股價計算報酬率，因此每天上榜組成變動不影響回測有效性。")
+        st.stop()
+
+    st.metric("累積快照筆數", f"{total_records:,} 筆")
+    st.markdown("---")
+
+    # ── ① 綜合評分 vs 未來報酬率 ──────────────────────────
+    st.subheader("① 綜合評分 → 未來報酬率／勝率／波段最大機會")
+    st.caption("如果評分系統有效，分數越高的組別，未來報酬、勝率、以及出現大波段機會的比例應該越高")
+
+    score_summary = get_backtest_summary(ss)
+    if score_summary.empty:
+        st.info("尚無足夠資料統計（需要至少 T+1 交易日後的資料才會有第一批結果）")
+    else:
+        display_cols = ["評分區間", "樣本數"]
+        for n in [1, 3, 5, 10, 20]:
+            for suffix in [f"T{n}平均報酬%", f"T{n}勝率%"]:
+                if suffix in score_summary.columns:
+                    display_cols.append(suffix)
+        max_col = f"T{MAX_WINDOW}內平均最大報酬%"
+        prob_col = "出現50%+機會比例%"
+        if max_col in score_summary.columns:
+            display_cols += [max_col, prob_col]
+
+        st.dataframe(
+            score_summary[[c for c in display_cols if c in score_summary.columns]],
+            use_container_width=True, hide_index=True,
+        )
+        st.caption(f"💡 「T{MAX_WINDOW}內平均最大報酬%」是掃描進場後20個交易日內出現過的最高點計算，"
+                   f"不是只看第20天當天價格，能反映「盤整後才噴出」的波段行情；"
+                   f"「出現50%+機會比例%」則是這個評分區間裡，有多少比例的樣本在20天內曾經漲超過50%。")
+
+        if "T5平均報酬%" in score_summary.columns:
+            plot_df = score_summary.dropna(subset=["T5平均報酬%"])
+            if not plot_df.empty:
+                fig = px.bar(
+                    plot_df, x="評分區間", y="T5平均報酬%",
+                    color="T5平均報酬%",
+                    color_continuous_scale=["#E85D5D", "#E6F1FB", "#1D9E75"],
+                    text="T5平均報酬%",
+                )
+                fig.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
+                fig.update_layout(
+                    title="各評分區間 T+5交易日 平均報酬率比較",
+                    plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                    showlegend=False,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("---")
+
+    # ── ② 法人訊號 vs 未來報酬率 ──────────────────────────
+    st.subheader("② 法人訊號類型 → 未來報酬率／勝率")
+    st.caption("判斷哪種法人訊號（三大齊買/外資主導/雙向買超...）與未來報酬呈正相關或負相關")
+
+    signal_summary = get_signal_summary(ss)
+    if signal_summary.empty:
+        st.info("尚無足夠資料統計（每種訊號類型需累積至少5筆樣本才會顯示，避免樣本太少誤導）")
+    else:
+        display_cols2 = ["法人訊號", "樣本數"]
+        for n in [1, 3, 5, 10, 20]:
+            for suffix in [f"T{n}平均報酬%", f"T{n}勝率%"]:
+                if suffix in signal_summary.columns:
+                    display_cols2.append(suffix)
+        st.dataframe(
+            signal_summary[[c for c in display_cols2 if c in signal_summary.columns]],
+            use_container_width=True, hide_index=True,
+        )
+
+        if "T5平均報酬%" in signal_summary.columns:
+            plot_df2 = signal_summary.dropna(subset=["T5平均報酬%"]).sort_values("T5平均報酬%")
+            if not plot_df2.empty:
+                fig2 = px.bar(
+                    plot_df2, x="T5平均報酬%", y="法人訊號", orientation="h",
+                    color="T5平均報酬%",
+                    color_continuous_scale=["#E85D5D", "#E6F1FB", "#1D9E75"],
+                    labels={"T5平均報酬%": "T+5交易日平均報酬%", "法人訊號": ""},
+                )
+                fig2.update_layout(
+                    title="各法人訊號類型 T+5交易日 平均報酬率排行（由低到高）",
+                    plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                    showlegend=False,
+                    height=max(300, len(plot_df2) * 40),
+                )
+                st.plotly_chart(fig2, use_container_width=True)
+
+    st.markdown("---")
+
+    # ── ③ 法人交易量/一致性 vs 未來報酬率 ──────────────────────────
+    st.subheader("③ 法人交易量／一致性 → 未來報酬率")
+    st.caption("驗證：三大合計張數本身不等於成交量或漲幅——用「法人換手強度%」「買超轉換率%」實際檢驗")
+
+    intensity_results = get_institutional_intensity_summary(ss)
+    if not intensity_results:
+        st.info("尚無足夠資料統計（每個區間需累積至少5筆樣本才會顯示）")
+    else:
+        if "換手強度" in intensity_results:
+            st.markdown("**法人換手強度%**（法人交易量佔當日總成交量比例，越高代表法人參與度越高，不是散戶在自己玩）")
+            st.dataframe(intensity_results["換手強度"], use_container_width=True, hide_index=True)
+
+        if "買超轉換率" in intensity_results:
+            st.markdown("**買超轉換率%**（淨買超佔法人總交易量比例，越接近100%代表法人方向越一致，"
+                        "越低代表法人內部買賣分歧、方向不明確）")
+            st.dataframe(intensity_results["買超轉換率"], use_container_width=True, hide_index=True)
+
+        st.caption("💡 如果這兩個表格顯示「數值越高，未來報酬確實越好」，代表法人交易量與一致性是有效訊號；"
+                   "如果沒有明顯差異甚至相反，代表法人量能本身不足以當作獨立判斷依據，需要搭配其他指標一起看。")
+
+    st.markdown("---")
+    with st.expander("🔍 查看原始回測記錄（除錯用）"):
+        st.dataframe(raw_backtest.tail(200), use_container_width=True, hide_index=True)
+
+
+elif page == "關鍵字審核":
+    st.title("🔍 AI關鍵字審核")
+    st.caption("AI生成的候選關鍵字不會直接生效，需要在這裡核准後才會被拿去比對新聞/Trends")
+
+    from keyword_generator import get_pending_keywords, apply_review_decisions, STATUS_APPROVED, STATUS_REJECTED
+
+    pending_df = get_pending_keywords(ss)
+
+    if pending_df.empty:
+        st.success("目前沒有待審核的關鍵字。AI會依股票代號固定分配到週一~週五陸續產生候選字，若當週沒有新股票需要更新，這裡就會是空的。")
+        st.stop()
+
+    st.info(f"共有 **{len(pending_df)}** 筆候選關鍵字待審核，來自 **{pending_df['股票代號'].nunique()}** 檔股票")
+
+    # 依股票分組顯示，方便一次看完同一檔股票的所有候選字
+    edited_frames = []
+    for (code, name), grp in pending_df.groupby(["股票代號", "股票名稱"]):
+        with st.expander(f"{code} {name}（{len(grp)} 個候選字）", expanded=True):
+            display_grp = grp[["關鍵字", "生成日期"]].copy()
+            display_grp["決定"] = "待審核"
+            edited = st.data_editor(
+                display_grp,
+                key=f"editor_{code}",
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "決定": st.column_config.SelectboxColumn(
+                        "決定", options=["待審核", "核准", "拒絕"], required=True,
+                    ),
+                },
+                disabled=["關鍵字", "生成日期"],
+            )
+            edited["股票代號"] = code
+            edited_frames.append(edited)
+
+    st.markdown("---")
+    if st.button("✅ 送出審核結果", type="primary", use_container_width=True):
+        decisions = {}
+        for frame in edited_frames:
+            for _, row in frame.iterrows():
+                if row["決定"] == "核准":
+                    decisions[(row["股票代號"], row["關鍵字"])] = STATUS_APPROVED
+                elif row["決定"] == "拒絕":
+                    decisions[(row["股票代號"], row["關鍵字"])] = STATUS_REJECTED
+        if not decisions:
+            st.warning("沒有任何項目被標記為核准或拒絕，維持待審核狀態不變。")
+        else:
+            updated = apply_review_decisions(ss, decisions)
+            st.success(f"已更新 {updated} 筆關鍵字的審核狀態！核准的關鍵字下次job執行時就會生效。")
+            st.rerun()
