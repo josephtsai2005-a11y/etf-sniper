@@ -177,7 +177,7 @@ def _write_institutional_to_sheets(ss, inst_df, cross_df, trade_date):
     import time
     for sheet_name, df, cols in [
         ("三大法人", inst_df, ["排名","股票代號","外資買賣超","投信買賣超","自營買賣超","三大合計","買超法人數","法人訊號"]),
-        ("多方驗證名單", cross_df, ["排名","股票代號","股票名稱","持有ETF數","買超法人數","法人訊號","綜合評分","多方驗證","三大合計","收盤價","漲跌幅%"]),
+        ("多方驗證名單", cross_df, ["排名","股票代號","股票名稱","持有ETF數","買超法人數","法人訊號","綜合評分","多方驗證","三大合計","買超轉換率%","法人換手強度%","收盤價","漲跌幅%"]),
     ]:
         existing = [ws.title for ws in ss.worksheets()]
         if sheet_name not in existing:

@@ -174,7 +174,7 @@ with st.sidebar:
             st.session_state.selected_page = p
     st.markdown("---")
     st.markdown("#### 回測分析")
-    for p in ["回測績效", "關鍵字審核"]:
+    for p in ["回測績效", "關鍵字審核", "持倉監控"]:
         if st.button(p, key=f"btn_{p}", use_container_width=True):
             st.session_state.selected_page = p
 
@@ -1391,3 +1391,139 @@ elif page == "關鍵字審核":
             updated = apply_review_decisions(ss, decisions)
             st.success(f"已更新 {updated} 筆關鍵字的審核狀態！核准的關鍵字下次job執行時就會生效。")
             st.rerun()
+
+elif page == "持倉監控":
+    st.title("💼 持倉監控")
+    st.caption("進出場訊號規則：進場嚴選評分/法人一致性高的標的；出場採「停損／停利／訊號轉弱」三重條件，先觸發先出")
+
+    from position_manager import (
+        add_position, close_position, evaluate_open_positions, get_entry_candidates,
+        _load_positions, STATUS_OPEN, STATUS_CLOSED,
+        MAX_POSITIONS, ENTRY_MIN_SCORE, ENTRY_MIN_CONVERSION, ENTRY_MAX_PRICE,
+        DEFAULT_STOP_LOSS_PCT, DEFAULT_TAKE_PROFIT_PCT,
+    )
+
+    cross_df = load_sheet("多方驗證名單")
+
+    # ── ① 目前持倉出場評估 ──────────────────────────
+    st.subheader("① 目前持倉 —— 出場訊號檢查")
+
+    eval_df = evaluate_open_positions(ss, cross_df) if not cross_df.empty else pd.DataFrame()
+
+    if eval_df.empty:
+        st.info("目前沒有記錄中的持倉，或最新資料尚未讀到。可在下方「新增持倉」登記你實際買進的股票。")
+    else:
+        for _, row in eval_df.iterrows():
+            ret = row["目前報酬率%"]
+            ret_display = f"{ret:+.2f}%" if ret is not None else "N/A"
+            header = f"{row['股票代號']} {row['股票名稱']} ｜ 進場價{row['進場價']} → 目前{row['目前收盤價']}（{ret_display}）"
+
+            if row["建議出場"]:
+                with st.expander(f"🔴 建議出場：{header}", expanded=True):
+                    for reason in row["觸發原因"]:
+                        st.markdown(f"- {reason}")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        exit_price = st.number_input(
+                            "出場價", value=float(row["目前收盤價"]) if row["目前收盤價"] else 0.0,
+                            key=f"exit_price_{row['row_index']}"
+                        )
+                    with c2:
+                        if st.button("確認出場", key=f"close_{row['row_index']}", type="primary"):
+                            today_str = datetime.now().strftime("%Y-%m-%d")
+                            close_position(ss, int(row["row_index"]), today_str, exit_price,
+                                          "; ".join(row["觸發原因"]))
+                            st.success("已記錄出場！")
+                            st.rerun()
+            else:
+                with st.expander(f"🟢 持有中：{header}", expanded=False):
+                    st.caption("目前未觸發任何出場條件")
+
+    st.markdown("---")
+
+    # ── ② 新增持倉 ──────────────────────────
+    st.subheader("② 新增持倉")
+    st.caption("實際買進後，在這裡登記進場資訊，系統之後每天會自動幫你檢查出場條件")
+
+    with st.form("add_position_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            new_code = st.text_input("股票代號")
+            new_price = st.number_input("進場價", min_value=0.0, step=0.1)
+            new_stop_loss = st.slider("停損%（觸及即建議出場）", 5.0, 20.0, DEFAULT_STOP_LOSS_PCT, 0.5)
+        with col2:
+            new_date = st.date_input("進場日期", value=datetime.now())
+            new_take_profit = st.slider("停利%（觸及即建議出場）", 10.0, 50.0, DEFAULT_TAKE_PROFIT_PCT, 1.0)
+
+        submitted = st.form_submit_button("新增持倉", type="primary", use_container_width=True)
+        if submitted:
+            if not new_code or new_price <= 0:
+                st.error("請填寫股票代號與進場價")
+            else:
+                match = cross_df[cross_df["股票代號"].astype(str) == new_code] if not cross_df.empty else pd.DataFrame()
+                if not match.empty:
+                    name = match.iloc[0].get("股票名稱", "")
+                    score = pd.to_numeric(match.iloc[0].get("綜合評分"), errors="coerce")
+                    signal = match.iloc[0].get("法人訊號", "")
+                    conversion = pd.to_numeric(match.iloc[0].get("買超轉換率%"), errors="coerce")
+                else:
+                    name, score, signal, conversion = "", None, "", None
+                    st.warning("在多方驗證名單找不到這檔股票的最新資料，仍會新增紀錄但缺少進場評分/訊號基準")
+
+                add_position(
+                    ss, new_code, name, str(new_date), new_price,
+                    score if pd.notna(score) else 0, signal,
+                    conversion if pd.notna(conversion) else 0,
+                    new_stop_loss, new_take_profit,
+                )
+                st.success(f"已新增持倉：{new_code} {name}")
+                st.rerun()
+
+    st.markdown("---")
+
+    # ── ③ 今日進場候選（依規則篩選）──────────────────────────
+    st.subheader("③ 今日進場候選（依規則自動篩選）")
+
+    price_limit = st.slider(
+        "股價上限（資金有限時可調整，優先看零股負擔較輕的標的）",
+        min_value=50, max_value=3000, value=int(ENTRY_MAX_PRICE), step=50,
+    )
+    st.caption(f"篩選條件：綜合評分 ≥ {ENTRY_MIN_SCORE}分 且 買超轉換率% ≥ {ENTRY_MIN_CONVERSION}% 且 股價 ≤ {price_limit}元，"
+               f"取評分最高前{MAX_POSITIONS}檔（因資金有限，嚴選不求多）")
+
+    candidates = get_entry_candidates(cross_df, MAX_POSITIONS, price_limit) if not cross_df.empty else pd.DataFrame()
+    if candidates.empty:
+        st.info("目前沒有符合進場條件的標的，或多方驗證名單尚無資料")
+    else:
+        display_cols = ["排名", "股票代號", "股票名稱", "綜合評分", "法人訊號", "買超轉換率%", "收盤價", "漲跌幅%"]
+        st.dataframe(
+            candidates[[c for c in display_cols if c in candidates.columns]],
+            use_container_width=True, hide_index=True,
+        )
+
+    st.markdown("---")
+
+    # ── 已出場歷史 ──────────────────────────
+    with st.expander("📜 已出場歷史"):
+        all_positions = _load_positions(ss)
+        closed = all_positions[all_positions["狀態"] == STATUS_CLOSED] if not all_positions.empty else pd.DataFrame()
+        if closed.empty:
+            st.caption("尚無已出場紀錄")
+        else:
+            closed_display = closed.copy()
+            closed_display["進場價"] = pd.to_numeric(closed_display["進場價"], errors="coerce")
+            closed_display["出場價"] = pd.to_numeric(closed_display["出場價"], errors="coerce")
+            closed_display["實際報酬率%"] = (
+                (closed_display["出場價"] - closed_display["進場價"]) / closed_display["進場價"] * 100
+            ).round(2)
+            st.dataframe(
+                closed_display[["股票代號", "股票名稱", "進場日期", "進場價", "出場日期", "出場價",
+                                "實際報酬率%", "出場原因"]],
+                use_container_width=True, hide_index=True,
+            )
+            avg_ret = closed_display["實際報酬率%"].mean()
+            win_rate = (closed_display["實際報酬率%"] > 0).sum() / len(closed_display) * 100
+            c1, c2 = st.columns(2)
+            c1.metric("平均報酬率", f"{avg_ret:.2f}%")
+            c2.metric("勝率", f"{win_rate:.1f}%")
+
