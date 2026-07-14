@@ -10,7 +10,11 @@ import gspread
 from google.oauth2.service_account import Credentials
 import os
 import re
+import sys
 from datetime import datetime
+
+# 讓app.py（在repo根目錄）可以import放在src/資料夾裡的模組
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
 st.set_page_config(
     page_title="ETF 狙擊系統",
