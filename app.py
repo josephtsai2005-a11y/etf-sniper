@@ -1221,6 +1221,10 @@ elif page == "回測績效":
     st.title("📈 回測績效追蹤")
     st.caption("驗證「綜合評分」「法人訊號」「法人交易量/一致性」與未來實際報酬率的相關性")
 
+    _client = get_client()
+    _sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
+    ss = _client.open_by_key(_sid)
+
     from backtest_tracker import (
         get_backtest_summary, get_signal_summary, get_institutional_intensity_summary,
         _load_backtest_sheet, MAX_WINDOW,
@@ -1349,6 +1353,10 @@ elif page == "關鍵字審核":
     st.title("🔍 AI關鍵字審核")
     st.caption("AI生成的候選關鍵字不會直接生效，需要在這裡核准後才會被拿去比對新聞/Trends")
 
+    _client = get_client()
+    _sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
+    ss = _client.open_by_key(_sid)
+
     from keyword_generator import get_pending_keywords, apply_review_decisions, STATUS_APPROVED, STATUS_REJECTED
 
     pending_df = get_pending_keywords(ss)
@@ -1399,6 +1407,10 @@ elif page == "關鍵字審核":
 elif page == "持倉監控":
     st.title("💼 持倉監控")
     st.caption("進出場訊號規則：進場嚴選評分/法人一致性高的標的；出場採「停損／停利／訊號轉弱」三重條件，先觸發先出")
+
+    _client = get_client()
+    _sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
+    ss = _client.open_by_key(_sid)
 
     from position_manager import (
         add_position, close_position, evaluate_open_positions, get_entry_candidates,
