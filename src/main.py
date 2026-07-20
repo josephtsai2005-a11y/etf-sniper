@@ -133,19 +133,19 @@ def write_smart_money_to_sheets(ss, smart_df, trade_date: str):
 def _write_fundamental_to_sheets(ss, fund_df, trade_date, retries: int = 2):
     """寫入基本面資料到 Sheets（含重試，避免偶發網路中斷導致抓到資料卻寫不進去）"""
     import time as _t
- 
+
     SHEET_FUND = "基本面資料"
- 
+
     title_row = [f"基本面資料 {trade_date}　更新：{now_tw().strftime('%H:%M')}"]
     all_rows = [title_row]
- 
+
     if not fund_df.empty:
         cols = ["股票代號","最新月份","月營收(億)","年增率%","月增率%","營收訊號","本益比","本益比訊號","基本面分數"]
         avail = [c for c in cols if c in fund_df.columns]
         all_rows.append(avail)
         rows = fund_df[avail].fillna("").values.tolist()
         all_rows.extend(rows)
- 
+
     last_error = None
     for attempt in range(retries + 1):
         try:
@@ -164,8 +164,7 @@ def _write_fundamental_to_sheets(ss, fund_df, trade_date, retries: int = 2):
                 _t.sleep(5)
                 continue
             log.warning(f"基本面資料寫入失敗（已重試{retries}次，放棄本次寫入）: {e}")
-            raise last_error
- 
+            raise last_error 
 
 
 def _write_trends_to_sheets(ss, trends_df, cross_df, trade_date):
