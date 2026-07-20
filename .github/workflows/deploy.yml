@@ -42,7 +42,7 @@ jobs:
               --region ${{ env.REGION }} \
               --image ${{ env.IMAGE }}:latest \
               --set-secrets "/secrets/gcp-sa.json=gcp-sa-json:latest" \
-              --update-env-vars "SPREADSHEET_ID=${{ secrets.SPREADSHEET_ID }},GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcp-sa.json,LINE_NOTIFY_TOKEN=${{ secrets.LINE_NOTIFY_TOKEN }}" \
+              --update-env-vars "SPREADSHEET_ID=${{ secrets.SPREADSHEET_ID }},GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcp-sa.json,LINE_NOTIFY_TOKEN=${{ secrets.LINE_NOTIFY_TOKEN }},FINMIND_TOKEN=${{ secrets.FINMIND_TOKEN }}" \
             || echo "⚠️ $JOB 更新失敗，請手動檢查（可能該job尚未建立，需先手動 gcloud run jobs create）"
           done
 
