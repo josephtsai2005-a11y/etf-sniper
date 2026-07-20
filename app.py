@@ -1221,13 +1221,9 @@ elif page == "回測績效":
     st.title("📈 回測績效追蹤")
     st.caption("驗證「綜合評分」「法人訊號」「法人交易量/一致性」與未來實際報酬率的相關性")
 
-    _client = get_client()
-    _sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
-    ss = _client.open_by_key(_sid)
-
     from backtest_tracker import (
         get_backtest_summary, get_signal_summary, get_institutional_intensity_summary,
-        _load_backtest_sheet, MAX_WINDOW,
+        _load_backtest_sheet, MAX_WINDOW, score_bucket,
     )
 
     raw_backtest = _load_backtest_sheet(ss)
@@ -1284,6 +1280,50 @@ elif page == "回測績效":
                     showlegend=False,
                 )
                 st.plotly_chart(fig, use_container_width=True)
+
+        # ── 個股明細鑽取：看是哪幾檔股票組成這個評分區間的統計 ──
+        st.markdown("**🔎 查看評分區間內的個股明細**")
+        bucket_options = [b for b in ["8分以上", "6-8分", "4-6分", "4分以下"] if b in score_summary["評分區間"].tolist()]
+        if bucket_options:
+            selected_bucket = st.selectbox("選擇評分區間", bucket_options, key="bucket_drilldown")
+
+            detail_df = raw_backtest.copy()
+            detail_df["綜合評分"] = pd.to_numeric(detail_df["綜合評分"], errors="coerce")
+            detail_df["評分區間"] = detail_df["綜合評分"].apply(score_bucket)
+            detail_df = detail_df[detail_df["評分區間"] == selected_bucket].copy()
+
+            detail_cols = ["記錄日期", "股票代號", "股票名稱", "進場收盤價", "綜合評分", "法人訊號",
+                           "T1報酬率%", "T3報酬率%", "T5報酬率%", "T10報酬率%", "T20報酬率%",
+                           f"T{MAX_WINDOW}內最大報酬%"]
+            avail_cols = [c for c in detail_cols if c in detail_df.columns]
+
+            # 依股票代號彙總，方便看「同一檔股票出現幾次、平均表現如何」
+            view_mode = st.radio("檢視方式", ["逐筆快照明細", "依股票彙總"], horizontal=True, key="bucket_view_mode")
+
+            if view_mode == "逐筆快照明細":
+                st.dataframe(
+                    detail_df[avail_cols].sort_values("記錄日期", ascending=False),
+                    use_container_width=True, hide_index=True,
+                )
+            else:
+                agg_dict = {"記錄日期": "count"}
+                for n in [1, 3, 5, 10, 20]:
+                    col = f"T{n}報酬率%"
+                    if col in detail_df.columns:
+                        detail_df[col] = pd.to_numeric(detail_df[col], errors="coerce")
+                        agg_dict[col] = "mean"
+                max_col = f"T{MAX_WINDOW}內最大報酬%"
+                if max_col in detail_df.columns:
+                    detail_df[max_col] = pd.to_numeric(detail_df[max_col], errors="coerce")
+                    agg_dict[max_col] = "max"
+
+                stock_agg = detail_df.groupby(["股票代號", "股票名稱"]).agg(agg_dict).reset_index()
+                stock_agg = stock_agg.rename(columns={"記錄日期": "出現次數"})
+                stock_agg = stock_agg.sort_values("出現次數", ascending=False)
+                st.dataframe(stock_agg, use_container_width=True, hide_index=True)
+                st.caption("💡 「出現次數」代表這檔股票在此評分區間被記錄了幾次快照（不同交易日各算一次），報酬率為該股票在此區間所有快照的平均值")
+        else:
+            st.caption("目前尚無資料可鑽取明細")
 
     st.markdown("---")
 

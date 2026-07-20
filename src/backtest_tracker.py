@@ -204,6 +204,20 @@ def backfill_returns(ss):
         log.info("回測回填：本次無新資料可回填")
 
 
+def score_bucket(s):
+    """評分區間分類（模組層級函式，供 get_backtest_summary 與 Streamlit 頁面明細鑽取共用）"""
+    if pd.isna(s):
+        return "無評分"
+    if s >= 8:
+        return "8分以上"
+    elif s >= 6:
+        return "6-8分"
+    elif s >= 4:
+        return "4-6分"
+    else:
+        return "4分以下"
+
+
 def get_backtest_summary(ss) -> pd.DataFrame:
     """依「綜合評分區間」分組，統計各期間平均報酬率、勝率、以及T20內最大報酬%"""
     df = _load_backtest_sheet(ss)
@@ -211,19 +225,6 @@ def get_backtest_summary(ss) -> pd.DataFrame:
         return pd.DataFrame()
 
     df["綜合評分"] = pd.to_numeric(df["綜合評分"], errors="coerce")
-
-    def score_bucket(s):
-        if pd.isna(s):
-            return "無評分"
-        if s >= 8:
-            return "8分以上"
-        elif s >= 6:
-            return "6-8分"
-        elif s >= 4:
-            return "4-6分"
-        else:
-            return "4分以下"
-
     df["評分區間"] = df["綜合評分"].apply(score_bucket)
 
     records = []
