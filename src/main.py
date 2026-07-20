@@ -679,8 +679,8 @@ def main():
     log.info("[6.5] 抓取基本面資料（月營收、本益比）...")
     fundamental_df = pd.DataFrame()
     try:
-        stock_codes = smart_df["股票代號"].dropna().astype(str).unique().tolist()[:30]
-        fundamental_df = fetch_batch_fundamental(stock_codes, delay=0.5)
+        stock_codes = smart_df["股票代號"].dropna().astype(str).unique().tolist()
+        fundamental_df = fetch_batch_fundamental(stock_codes, delay=0.3)
         if not fundamental_df.empty:
             log.info(f"基本面完成：{len(fundamental_df)} 檔，高速成長：{fundamental_df.get('營收訊號','').eq('🚀 高速成長').sum() if '營收訊號' in fundamental_df.columns else 0} 檔")
             # 寫入 Sheets
@@ -692,7 +692,7 @@ def main():
     # ── 階段六：三大法人買賣超 ─────────────────────────────────
     log.info("[6] 抓取三大法人買賣超...")
     try:
-        stock_codes = smart_df["股票代號"].dropna().astype(str).unique().tolist()[:50]
+        stock_codes = smart_df["股票代號"].dropna().astype(str).unique().tolist()
         inst_df = fetch_batch_institutional(stock_codes, TRADE_DATE)
 
         if not inst_df.empty:
