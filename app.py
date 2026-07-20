@@ -1221,6 +1221,10 @@ elif page == "回測績效":
     st.title("📈 回測績效追蹤")
     st.caption("驗證「綜合評分」「法人訊號」「法人交易量/一致性」與未來實際報酬率的相關性")
 
+    _client = get_client()
+    _sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
+    ss = _client.open_by_key(_sid)
+
     from backtest_tracker import (
         get_backtest_summary, get_signal_summary, get_institutional_intensity_summary,
         _load_backtest_sheet, MAX_WINDOW, score_bucket,
