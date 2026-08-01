@@ -1427,9 +1427,9 @@ elif page == "關鍵字審核":
             rows = [grp.iloc[i:i + n_cols] for i in range(0, len(grp), n_cols)]
             for row_group in rows:
                 cols = st.columns(n_cols)
-                for c, (_, kw_row) in zip(cols, row_group.iterrows()):
+                for c, (row_idx, kw_row) in zip(cols, row_group.iterrows()):
                     kw = kw_row["關鍵字"]
-                    checked = c.checkbox(f"🗑️ {kw}", key=f"del_{code}_{kw}")
+                    checked = c.checkbox(f"🗑️ {kw}", key=f"del_row_{row_idx}")
                     if checked:
                         checked_keys.add((code, kw))
 
