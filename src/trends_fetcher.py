@@ -56,10 +56,18 @@ def fetch_trends_pytrends(keyword: str, retries: int = 3) -> pd.DataFrame:
                 time.sleep(30)
     return pd.DataFrame()
 
-def fetch_all_trends() -> pd.DataFrame:
-    """批次抓取所有追蹤主題的 Google Trends"""
+def fetch_all_trends(extra_topics: Optional[dict] = None) -> pd.DataFrame:
+    """
+    批次抓取所有追蹤主題的 Google Trends
+    extra_topics: 額外動態主題（例如已核准的個股AI關鍵字），格式同 TRENDS_TOPICS
+                  會跟固定的10個大盤主題合併一起抓，但受節流限制不會無限增加job時間
+    """
     all_dfs = []
-    topics = list(TRENDS_TOPICS.keys())
+    combined_topics = dict(TRENDS_TOPICS)
+    if extra_topics:
+        combined_topics.update(extra_topics)
+
+    topics = list(combined_topics.keys())
     total = len(topics)
 
     for i, keyword in enumerate(topics, 1):
@@ -76,7 +84,7 @@ def fetch_all_trends() -> pd.DataFrame:
         return pd.DataFrame()
 
     result = pd.concat(all_dfs, ignore_index=True)
-    log.info(f"Google Trends 完成：{result['關鍵字'].nunique()} 個主題有資料")
+    log.info(f"Google Trends 完成：{result['關鍵字'].nunique()} 個主題有資料（含{len(extra_topics) if extra_topics else 0}個動態個股關鍵字）")
     return result
 
 def compute_trends_signal(trends_df: pd.DataFrame) -> pd.DataFrame:

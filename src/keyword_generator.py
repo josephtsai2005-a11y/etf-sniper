@@ -8,6 +8,8 @@ AI自動生成個股題材關鍵字，取代 trend_analyzer.py 裡手動維護�
   - 只有管理者在Streamlit「關鍵字審核」頁面核准後，才會真的被拿去比對新聞/Trends
   - 自動過濾常見籠統詞（財報、營收、展望...），減少需要人工審核的雜訊
   - 拒絕過的關鍵字會被記住，同一檔股票不會重複生成一樣的候選字來煩管理者
+  - 已核准的關鍵字，另可透過 get_dynamic_trend_keywords() 挑一部分動態納入
+    Google Trends追蹤（trends_fetcher.py原本只有寫死的10個大盤主題）
 """
 import hashlib
 import logging
@@ -36,9 +38,9 @@ STOPWORDS = {
 }
 
 
-def _weekday_bucket(code: str) -> int:
-    """依股票代號算出固定分配到星期幾（0=週一...4=週五），同一檔股票每次算出來都一樣"""
-    h = int(hashlib.md5(code.encode("utf-8")).hexdigest(), 16)
+def _weekday_bucket(key: str) -> int:
+    """依字串（股票代號或關鍵字皆可）算出固定分配到星期幾（0=週一...4=週五），同一個字串每次算出來都一樣"""
+    h = int(hashlib.md5(key.encode("utf-8")).hexdigest(), 16)
     return h % WEEKLY_BUCKETS
 
 
@@ -114,6 +116,40 @@ def apply_review_decisions(ss, decisions: dict):
     if updated > 0:
         _write_keyword_queue(ss, df)
     return updated
+
+
+def get_dynamic_trend_keywords(ss, max_extra: int = 8) -> dict:
+    """
+    從「已核准」的個股AI關鍵字裡，挑選一部分供 Google Trends 動態追蹤
+    （個股/產業題材會隨新聞持續變動，不能只靠trends_fetcher.py寫死的10個大盤主題）
+
+    節流設計：pytrends每個關鍵字要花15-30秒，不能無限制把所有已核准關鍵字全部塞進去，
+    否則job執行時間會暴增。做法：
+      1. 同樣用「依關鍵字固定分配到週一~週五」的分桶邏輯（跟關鍵字生成節流同一套機制）
+      2. 每天最多再加 max_extra 個動態關鍵字，控制單次job時間增幅在可預期範圍
+      3. 一週內，所有已核准關鍵字都會輪流被追蹤到，不是永遠只測同一小批
+
+    回傳格式：{顯示名稱: 實際查詢字串}，可直接餵給 trends_fetcher.fetch_all_trends(extra_topics=...)
+    """
+    approved_map = get_approved_keyword_map(ss)  # {股票代號: [關鍵字,...]}
+    if not approved_map:
+        return {}
+
+    all_keywords = []
+    for code, kws in approved_map.items():
+        all_keywords.extend(kws)
+    all_keywords = sorted(set(all_keywords))  # 去重，多檔股票可能核准同一個關鍵字
+
+    if not all_keywords:
+        return {}
+
+    today_weekday = datetime.now(TW_TZ).weekday()
+    todays_keywords = [kw for kw in all_keywords if _weekday_bucket(kw) == today_weekday]
+
+    if len(todays_keywords) > max_extra:
+        todays_keywords = todays_keywords[:max_extra]
+
+    return {kw: kw for kw in todays_keywords}
 
 
 def _load_relevant_news_titles(ss, stock_name: str, max_titles: int = 3) -> list:

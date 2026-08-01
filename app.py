@@ -1395,7 +1395,7 @@ elif page == "回測績效":
 
 elif page == "關鍵字審核":
     st.title("🔍 AI關鍵字審核")
-    st.caption("AI生成的候選關鍵字不會直接生效，需要在這裡核准後才會被拿去比對新聞/Trends")
+    st.caption("勾選要「刪除／拒絕」的關鍵字，其餘未勾選的會一次核准。核准後才會生效（比對新聞/Trends）")
 
     _client = get_client()
     _sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
@@ -1409,44 +1409,46 @@ elif page == "關鍵字審核":
         st.success("目前沒有待審核的關鍵字。AI會依股票代號固定分配到週一~週五陸續產生候選字，若當週沒有新股票需要更新，這裡就會是空的。")
         st.stop()
 
-    st.info(f"共有 **{len(pending_df)}** 筆候選關鍵字待審核，來自 **{pending_df['股票代號'].nunique()}** 檔股票")
+    st.info(f"共有 **{len(pending_df)}** 筆候選關鍵字待審核，來自 **{pending_df['股票代號'].nunique()}** 檔股票。"
+            f"勾選你想**刪除**的關鍵字，其餘未勾選的送出後會**全部核准**。")
 
-    # 依股票分組顯示，方便一次看完同一檔股票的所有候選字
-    edited_frames = []
+    # 全部展開/收合的輔助按鈕
+    col_a, col_b = st.columns([1, 5])
+    with col_a:
+        if st.button("🔄 重新整理"):
+            st.rerun()
+
+    checked_keys = set()  # 存放被勾選要刪除的 (股票代號, 關鍵字)
+
     for (code, name), grp in pending_df.groupby(["股票代號", "股票名稱"]):
         with st.expander(f"{code} {name}（{len(grp)} 個候選字）", expanded=True):
-            display_grp = grp[["關鍵字", "生成日期"]].copy()
-            display_grp["決定"] = "待審核"
-            edited = st.data_editor(
-                display_grp,
-                key=f"editor_{code}",
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "決定": st.column_config.SelectboxColumn(
-                        "決定", options=["待審核", "核准", "拒絕"], required=True,
-                    ),
-                },
-                disabled=["關鍵字", "生成日期"],
-            )
-            edited["股票代號"] = code
-            edited_frames.append(edited)
+            # 每檔股票內部用 checkbox 逐一列出，勾選=標記刪除
+            n_cols = 3
+            rows = [grp.iloc[i:i + n_cols] for i in range(0, len(grp), n_cols)]
+            for row_group in rows:
+                cols = st.columns(n_cols)
+                for c, (_, kw_row) in zip(cols, row_group.iterrows()):
+                    kw = kw_row["關鍵字"]
+                    checked = c.checkbox(f"🗑️ {kw}", key=f"del_{code}_{kw}")
+                    if checked:
+                        checked_keys.add((code, kw))
 
     st.markdown("---")
-    if st.button("✅ 送出審核結果", type="primary", use_container_width=True):
+    st.caption(f"目前勾選要刪除：**{len(checked_keys)}** 個關鍵字；其餘 **{len(pending_df) - len(checked_keys)}** 個將被核准")
+
+    if st.button("✅ 送出（勾選的刪除，其餘全部核准）", type="primary", use_container_width=True):
         decisions = {}
-        for frame in edited_frames:
-            for _, row in frame.iterrows():
-                if row["決定"] == "核准":
-                    decisions[(row["股票代號"], row["關鍵字"])] = STATUS_APPROVED
-                elif row["決定"] == "拒絕":
-                    decisions[(row["股票代號"], row["關鍵字"])] = STATUS_REJECTED
-        if not decisions:
-            st.warning("沒有任何項目被標記為核准或拒絕，維持待審核狀態不變。")
-        else:
-            updated = apply_review_decisions(ss, decisions)
-            st.success(f"已更新 {updated} 筆關鍵字的審核狀態！核准的關鍵字下次job執行時就會生效。")
-            st.rerun()
+        for _, row in pending_df.iterrows():
+            key = (row["股票代號"], row["關鍵字"])
+            if key in checked_keys:
+                decisions[key] = STATUS_REJECTED
+            else:
+                decisions[key] = STATUS_APPROVED
+
+        updated = apply_review_decisions(ss, decisions)
+        st.success(f"已處理 {updated} 筆：核准 {len(pending_df) - len(checked_keys)} 個，刪除 {len(checked_keys)} 個。"
+                   f"核准的關鍵字下次job執行時就會生效。")
+        st.rerun()
 
 elif page == "持倉監控":
     st.title("💼 持倉監控")

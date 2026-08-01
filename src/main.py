@@ -20,6 +20,7 @@ from news_fetcher import fetch_all_news, tag_articles, auto_extract_hot_words
 from institutional_fetcher import fetch_batch_institutional, compute_institutional_signal, cross_with_etf
 from fundamental_fetcher import fetch_batch_fundamental
 from trends_fetcher import fetch_all_trends, compute_trends_signal, cross_news_and_trends
+from keyword_generator import get_dynamic_trend_keywords
 from ai_analyzer import generate_investment_report, write_ai_report_to_sheets, generate_stock_keywords, analyze_news_impact
 from topic_analyzer import build_topic_overview, ai_analyze_topic_overview, write_topic_overview_to_sheets
 from us_market_fetcher import fetch_all_us_market, format_us_market_for_ai, get_market_sentiment_summary
@@ -630,7 +631,14 @@ def main():
       # ── 階段五.五：Google Trends 散戶情緒（news 模式專屬）──────────
       log.info("[5.5] 抓取 Google Trends 散戶情緒...")
       try:
-          trends_raw = fetch_all_trends()
+          try:
+              extra_trend_keywords = get_dynamic_trend_keywords(ss2, max_extra=8)
+              log.info(f"動態個股關鍵字：本次追加 {len(extra_trend_keywords)} 個（{list(extra_trend_keywords.keys())}）")
+          except Exception as e:
+              log.warning(f"動態關鍵字取得失敗，僅使用固定10個大盤主題: {e}")
+              extra_trend_keywords = {}
+
+          trends_raw = fetch_all_trends(extra_topics=extra_trend_keywords)
           if not trends_raw.empty:
               trends_signal = compute_trends_signal(trends_raw)
               news_hist2 = _load_news_history(ss2)
