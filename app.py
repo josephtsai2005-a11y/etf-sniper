@@ -1219,7 +1219,7 @@ elif page == "原始持股庫":
 
 elif page == "回測績效":
     st.title("📈 回測績效追蹤")
-    st.caption("驗證「綜合評分」「法人訊號」「法人交易量/一致性」與未來實際報酬率的相關性")
+    st.caption("驗證「綜合評分」「法人訊號」「法人交易量/一致性」「相對大盤表現」與未來實際報酬率的相關性")
 
     _client = get_client()
     _sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
@@ -1227,7 +1227,7 @@ elif page == "回測績效":
 
     from backtest_tracker import (
         get_backtest_summary, get_signal_summary, get_institutional_intensity_summary,
-        _load_backtest_sheet, MAX_WINDOW, score_bucket,
+        get_relative_strength_by_period, _load_backtest_sheet, MAX_WINDOW, score_bucket,
     )
 
     raw_backtest = _load_backtest_sheet(ss)
@@ -1301,7 +1301,6 @@ elif page == "回測績效":
                            f"T{MAX_WINDOW}內最大報酬%"]
             avail_cols = [c for c in detail_cols if c in detail_df.columns]
 
-            # 依股票代號彙總，方便看「同一檔股票出現幾次、平均表現如何」
             view_mode = st.radio("檢視方式", ["逐筆快照明細", "依股票彙總"], horizontal=True, key="bucket_view_mode")
 
             if view_mode == "逐筆快照明細":
@@ -1316,10 +1315,10 @@ elif page == "回測績效":
                     if col in detail_df.columns:
                         detail_df[col] = pd.to_numeric(detail_df[col], errors="coerce")
                         agg_dict[col] = "mean"
-                max_col = f"T{MAX_WINDOW}內最大報酬%"
-                if max_col in detail_df.columns:
-                    detail_df[max_col] = pd.to_numeric(detail_df[max_col], errors="coerce")
-                    agg_dict[max_col] = "max"
+                max_col2 = f"T{MAX_WINDOW}內最大報酬%"
+                if max_col2 in detail_df.columns:
+                    detail_df[max_col2] = pd.to_numeric(detail_df[max_col2], errors="coerce")
+                    agg_dict[max_col2] = "max"
 
                 stock_agg = detail_df.groupby(["股票代號", "股票名稱"]).agg(agg_dict).reset_index()
                 stock_agg = stock_agg.rename(columns={"記錄日期": "出現次數"})
@@ -1387,6 +1386,69 @@ elif page == "回測績效":
 
         st.caption("💡 如果這兩個表格顯示「數值越高，未來報酬確實越好」，代表法人交易量與一致性是有效訊號；"
                    "如果沒有明顯差異甚至相反，代表法人量能本身不足以當作獨立判斷依據，需要搭配其他指標一起看。")
+
+    st.markdown("---")
+
+    # ── ④ 相對大盤表現／反彈強度分析 ──────────────────────────
+    st.subheader("④ 相對大盤表現 → 評分是否能預測抗跌力／反彈強度")
+    st.caption("用「超額報酬%」= 個股報酬率 − 大盤(0050)同期報酬率，排除大盤系統性漲跌的干擾，"
+               "可自訂期間單獨檢視「回檔期」或「反彈期」評分是否真的有相對選股能力")
+
+    BENCHMARK_COL = "大盤0050收盤價"
+    has_benchmark = BENCHMARK_COL in raw_backtest.columns and pd.to_numeric(
+        raw_backtest[BENCHMARK_COL], errors="coerce"
+    ).notna().any()
+
+    if not has_benchmark:
+        st.warning("目前尚無大盤(0050)基準資料，需等下次 job 執行後才會開始記錄。"
+                   "在此之前只能看①②③區塊的絕對報酬率統計。")
+    else:
+        available_dates = sorted(raw_backtest["記錄日期"].dropna().unique().tolist())
+        if available_dates:
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                period_mode = st.radio("分析範圍", ["全部期間", "自訂區間"], horizontal=True, key="period_mode")
+            start_d, end_d = None, None
+            if period_mode == "自訂區間":
+                with col2:
+                    start_d = st.selectbox("起始日期", available_dates, index=0, key="rs_start")
+                with col3:
+                    end_d = st.selectbox("結束日期", available_dates, index=len(available_dates) - 1, key="rs_end")
+
+            rel_summary = get_relative_strength_by_period(ss, start_d, end_d)
+            if rel_summary.empty:
+                st.info("此期間尚無足夠資料統計")
+            else:
+                display_cols4 = ["評分區間", "樣本數"]
+                for n in [1, 3, 5, 10, 20]:
+                    for suffix in [f"T{n}超額報酬%", f"T{n}跑贏大盤率%"]:
+                        if suffix in rel_summary.columns:
+                            display_cols4.append(suffix)
+                st.dataframe(
+                    rel_summary[[c for c in display_cols4 if c in rel_summary.columns]],
+                    use_container_width=True, hide_index=True,
+                )
+
+                if "T5超額報酬%" in rel_summary.columns:
+                    plot_df4 = rel_summary.dropna(subset=["T5超額報酬%"])
+                    if not plot_df4.empty:
+                        fig4 = px.bar(
+                            plot_df4, x="評分區間", y="T5超額報酬%",
+                            color="T5超額報酬%",
+                            color_continuous_scale=["#E85D5D", "#E6F1FB", "#1D9E75"],
+                            text="T5超額報酬%",
+                        )
+                        fig4.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
+                        fig4.update_layout(
+                            title="各評分區間 T+5交易日 相對大盤超額報酬率比較",
+                            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                            showlegend=False,
+                        )
+                        st.plotly_chart(fig4, use_container_width=True)
+
+                st.caption("💡 正的超額報酬代表跑贏大盤（大盤跌時代表相對抗跌，大盤漲時代表領漲）。"
+                           "如果評分越高的組別超額報酬越明顯為正，就是「評分真的有選股能力」的證據，"
+                           "不會被大盤系統性漲跌淹沒判讀。")
 
     st.markdown("---")
     with st.expander("🔍 查看原始回測記錄（除錯用）"):

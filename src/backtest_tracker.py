@@ -14,6 +14,9 @@ backtest_tracker.py
   - 額外記錄「法人換手強度%」「買超轉換率%」，用來驗證法人交易量/一致性
     跟未來報酬是否真的正相關（三大合計張數本身不等於成交量或漲幅，
     需要用這兩個指標實際檢驗）
+  - 同步記錄大盤基準（0050）收盤價，計算「相對大盤超額報酬%」——
+    在大盤系統性上漲/下跌時，絕對報酬率會被大盤方向淹沒，
+    超額報酬才能看出評分系統是否真的有選股能力（尤其驗證反彈期的相對強弱）
 """
 import logging
 import pandas as pd
@@ -26,15 +29,17 @@ TW_TZ = pytz.timezone("Asia/Taipei")
 SHEET_BACKTEST = "回測記錄"
 HORIZONS = [1, 3, 5, 10, 20]  # 追蹤 T+1/T+3/T+5/T+10/T+20 個「交易日」後的報酬率
 MAX_WINDOW = 20  # 「區間內最大報酬%」的觀察窗口天數
+BENCHMARK_COL = "大盤0050收盤價"
 
 
 def _load_backtest_sheet(ss) -> pd.DataFrame:
     """讀取回測記錄分頁，不存在則回傳空表（含正確欄位結構）"""
     base_cols = ["記錄日期", "股票代號", "股票名稱", "進場收盤價", "綜合評分", "法人訊號",
-                 "持有ETF數", "成交量", "法人換手強度%", "買超轉換率%"]
+                 "持有ETF數", "成交量", "法人換手強度%", "買超轉換率%", BENCHMARK_COL]
     return_cols = [f"T{n}報酬率%" for n in HORIZONS]
+    excess_cols = [f"T{n}超額報酬%" for n in HORIZONS]
     extra_cols = [f"T{MAX_WINDOW}內最大報酬%", f"T{MAX_WINDOW}內最大報酬發生日"]
-    all_cols = base_cols + return_cols + extra_cols
+    all_cols = base_cols + return_cols + excess_cols + extra_cols
 
     try:
         ws = ss.worksheet(SHEET_BACKTEST)
@@ -54,7 +59,7 @@ def _write_backtest_sheet(ss, df: pd.DataFrame):
     """整表覆寫回Sheets"""
     existing = [ws.title for ws in ss.worksheets()]
     if SHEET_BACKTEST not in existing:
-        ws = ss.add_worksheet(title=SHEET_BACKTEST, rows=20000, cols=20)
+        ws = ss.add_worksheet(title=SHEET_BACKTEST, rows=20000, cols=25)
     else:
         ws = ss.worksheet(SHEET_BACKTEST)
     ws.clear()
@@ -66,10 +71,12 @@ def _write_backtest_sheet(ss, df: pd.DataFrame):
             ws.append_rows(rows[i:i + chunk], value_input_option="USER_ENTERED")
 
 
-def record_daily_snapshot(ss, smart_df: pd.DataFrame, trade_date: str):
+def record_daily_snapshot(ss, smart_df: pd.DataFrame, trade_date: str, benchmark_price: float = None):
     """
     每日記錄快照：把今天有評分/收盤價的股票各存一筆獨立紀錄
     建議在 inst 模式（16:45）、cross_df（多方驗證名單）已經算好各項法人指標之後呼叫
+    benchmark_price: 當天大盤基準（0050）收盤價，由main.py抓取後傳入
+                     （若為None，超額報酬欄位會留空，之後也無法回填）
     """
     if smart_df.empty or "收盤價" not in smart_df.columns:
         log.warning("回測記錄：資料缺少收盤價欄位，跳過本次記錄")
@@ -96,7 +103,9 @@ def record_daily_snapshot(ss, smart_df: pd.DataFrame, trade_date: str):
             "成交量": row.get("成交量", ""),
             "法人換手強度%": row.get("法人換手強度%", ""),
             "買超轉換率%": row.get("買超轉換率%", ""),
+            BENCHMARK_COL: benchmark_price if benchmark_price else "",
             **{f"T{n}報酬率%": "" for n in HORIZONS},
+            **{f"T{n}超額報酬%": "" for n in HORIZONS},
             f"T{MAX_WINDOW}內最大報酬%": "",
             f"T{MAX_WINDOW}內最大報酬發生日": "",
         })
@@ -107,14 +116,13 @@ def record_daily_snapshot(ss, smart_df: pd.DataFrame, trade_date: str):
 
     combined = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True) if not df.empty else pd.DataFrame(new_rows)
     _write_backtest_sheet(ss, combined)
-    log.info(f"回測記錄：{trade_date} 新增 {len(new_rows)} 筆快照")
+    log.info(f"回測記錄：{trade_date} 新增 {len(new_rows)} 筆快照" + (f"（大盤0050={benchmark_price}）" if benchmark_price else "（未取得大盤基準價）"))
 
 
 def backfill_returns(ss):
     """
     回填報酬率：掃描所有還沒填報酬率的舊紀錄，用「同股票、N個交易日後」的紀錄回填
-    同時計算「T+20內最大報酬%」：掃描整個T+1~T+20區間找最高點，
-    而不是只看第20天當天的價格，避免漏掉「盤整後才噴出」的波段行情
+    同時計算「T+20內最大報酬%」與「相對大盤超額報酬%」
     建議每天執行一次（inst模式尾聲），會自動處理所有累積未完成的回填
     """
     df = _load_backtest_sheet(ss)
@@ -122,15 +130,20 @@ def backfill_returns(ss):
         return
 
     df["進場收盤價"] = pd.to_numeric(df["進場收盤價"], errors="coerce")
+    df[BENCHMARK_COL] = pd.to_numeric(df[BENCHMARK_COL], errors="coerce")
 
     trading_days = sorted(df["記錄日期"].unique().tolist())
     day_index = {d: i for i, d in enumerate(trading_days)}
 
-    price_lookup = {}  # (股票代號, 記錄日期) -> 進場收盤價
+    price_lookup = {}       # (股票代號, 記錄日期) -> 進場收盤價
+    benchmark_lookup = {}   # 記錄日期 -> 大盤0050收盤價（同一天所有列共用同一個值，取第一筆非空）
     for _, row in df.iterrows():
         price_lookup[(row["股票代號"], row["記錄日期"])] = row["進場收盤價"]
+        if row["記錄日期"] not in benchmark_lookup and pd.notna(row[BENCHMARK_COL]):
+            benchmark_lookup[row["記錄日期"]] = row[BENCHMARK_COL]
 
     updated_count = 0
+    excess_updated_count = 0
     max_updated_count = 0
 
     for idx, row in df.iterrows():
@@ -141,40 +154,54 @@ def backfill_returns(ss):
             continue
 
         rec_idx = day_index[rec_date]
+        entry_benchmark = benchmark_lookup.get(rec_date)
 
-        # ── 固定天數 T+N 報酬率 ──────────────────────────
+        # ── 固定天數 T+N 報酬率 + 相對大盤超額報酬% ──────────────
         for n in HORIZONS:
             col = f"T{n}報酬率%"
-            if row.get(col, "") not in ["", None] and not pd.isna(row.get(col, "")):
-                continue
+            excess_col = f"T{n}超額報酬%"
+            already_has_return = row.get(col, "") not in ["", None] and not pd.isna(row.get(col, ""))
 
             target_idx = rec_idx + n
             if target_idx >= len(trading_days):
                 continue
 
-            found_price = None
-            for lookahead in range(0, 4):
-                probe_idx = target_idx + lookahead
-                if probe_idx >= len(trading_days):
-                    break
-                probe_date = trading_days[probe_idx]
-                if (code, probe_date) in price_lookup:
-                    p = price_lookup[(code, probe_date)]
-                    if pd.notna(p):
-                        found_price = p
-                        break
+            target_date = trading_days[target_idx]
 
-            if found_price is not None and entry_price:
-                ret_pct = round((found_price - entry_price) / entry_price * 100, 2)
-                df.at[idx, col] = ret_pct
-                updated_count += 1
+            if not already_has_return:
+                found_price = None
+                for lookahead in range(0, 4):
+                    probe_idx = target_idx + lookahead
+                    if probe_idx >= len(trading_days):
+                        break
+                    probe_date = trading_days[probe_idx]
+                    if (code, probe_date) in price_lookup:
+                        p = price_lookup[(code, probe_date)]
+                        if pd.notna(p):
+                            found_price = p
+                            break
+
+                if found_price is not None and entry_price:
+                    ret_pct = round((found_price - entry_price) / entry_price * 100, 2)
+                    df.at[idx, col] = ret_pct
+                    updated_count += 1
+
+            # 超額報酬：即使個股報酬率已經算過，只要超額報酬還沒算，且大盤基準資料齊全就補算
+            already_has_excess = row.get(excess_col, "") not in ["", None] and not pd.isna(row.get(excess_col, ""))
+            if not already_has_excess and entry_benchmark:
+                target_benchmark = benchmark_lookup.get(target_date)
+                current_ret_val = df.at[idx, col] if col in df.columns else None
+                if target_benchmark and pd.notna(current_ret_val) and current_ret_val != "":
+                    benchmark_ret_pct = (target_benchmark - entry_benchmark) / entry_benchmark * 100
+                    excess = round(float(current_ret_val) - benchmark_ret_pct, 2)
+                    df.at[idx, excess_col] = excess
+                    excess_updated_count += 1
 
         # ── T+20內最大報酬% （掃描整個區間找最高點，不是只看第20天）──
         max_col = f"T{MAX_WINDOW}內最大報酬%"
         date_col = f"T{MAX_WINDOW}內最大報酬發生日"
         already_has_max = row.get(max_col, "") not in ["", None] and not pd.isna(row.get(max_col, ""))
         window_end_idx = rec_idx + MAX_WINDOW
-        window_closed = window_end_idx < len(trading_days)  # 完整20天資料都已存在，才算「最終結果」
 
         if not already_has_max and entry_price:
             best_ret = None
@@ -191,15 +218,14 @@ def backfill_returns(ss):
                             best_date = probe_date
 
             if best_ret is not None:
-                # 區間尚未走完前，先存入「目前為止的最大值」，等區間走完（window_closed）才不再更新，視為最終結果
-                # （這樣可以提早看到趨勢，不用整整等20天才有資料）
                 df.at[idx, max_col] = round(best_ret, 2)
                 df.at[idx, date_col] = best_date
                 max_updated_count += 1
 
-    if updated_count > 0 or max_updated_count > 0:
+    if updated_count > 0 or max_updated_count > 0 or excess_updated_count > 0:
         _write_backtest_sheet(ss, df)
-        log.info(f"回測回填完成：T+N報酬率 {updated_count} 筆，T{MAX_WINDOW}內最大報酬 {max_updated_count} 筆")
+        log.info(f"回測回填完成：T+N報酬率 {updated_count} 筆，超額報酬 {excess_updated_count} 筆，"
+                  f"T{MAX_WINDOW}內最大報酬 {max_updated_count} 筆")
     else:
         log.info("回測回填：本次無新資料可回填")
 
@@ -219,7 +245,7 @@ def score_bucket(s):
 
 
 def get_backtest_summary(ss) -> pd.DataFrame:
-    """依「綜合評分區間」分組，統計各期間平均報酬率、勝率、以及T20內最大報酬%"""
+    """依「綜合評分區間」分組，統計各期間平均報酬率、勝率、超額報酬、以及T20內最大報酬%"""
     df = _load_backtest_sheet(ss)
     if df.empty:
         return pd.DataFrame()
@@ -235,13 +261,21 @@ def get_backtest_summary(ss) -> pd.DataFrame:
         row = {"評分區間": bucket, "樣本數": len(sub)}
         for n in HORIZONS:
             col = f"T{n}報酬率%"
+            excess_col = f"T{n}超額報酬%"
             vals = pd.to_numeric(sub[col], errors="coerce").dropna()
+            excess_vals = pd.to_numeric(sub[excess_col], errors="coerce").dropna()
             if len(vals) > 0:
                 row[f"T{n}平均報酬%"] = round(vals.mean(), 2)
                 row[f"T{n}勝率%"] = round((vals > 0).sum() / len(vals) * 100, 1)
             else:
                 row[f"T{n}平均報酬%"] = None
                 row[f"T{n}勝率%"] = None
+            if len(excess_vals) > 0:
+                row[f"T{n}超額報酬%"] = round(excess_vals.mean(), 2)
+                row[f"T{n}跑贏大盤率%"] = round((excess_vals > 0).sum() / len(excess_vals) * 100, 1)
+            else:
+                row[f"T{n}超額報酬%"] = None
+                row[f"T{n}跑贏大盤率%"] = None
 
         max_col = f"T{MAX_WINDOW}內最大報酬%"
         max_vals = pd.to_numeric(sub[max_col], errors="coerce").dropna()
@@ -330,3 +364,46 @@ def get_institutional_intensity_summary(ss) -> dict:
             results[label] = pd.DataFrame(records)
 
     return results
+
+
+def get_relative_strength_by_period(ss, start_date: str = None, end_date: str = None) -> pd.DataFrame:
+    """
+    驗證「反彈強度與評分關聯」專用：指定一段期間（例如大盤回檔/反彈區間），
+    依評分區間統計「相對大盤超額報酬%」，用來檢驗評分高的股票在這段期間
+    是否真的比大盤抗跌／反彈更強
+
+    start_date/end_date: "YYYY-MM-DD" 格式（對應「記錄日期」），皆為None則使用全部資料
+    """
+    df = _load_backtest_sheet(ss)
+    if df.empty:
+        return pd.DataFrame()
+
+    if start_date:
+        df = df[df["記錄日期"] >= start_date]
+    if end_date:
+        df = df[df["記錄日期"] <= end_date]
+
+    if df.empty:
+        return pd.DataFrame()
+
+    df["綜合評分"] = pd.to_numeric(df["綜合評分"], errors="coerce")
+    df["評分區間"] = df["綜合評分"].apply(score_bucket)
+
+    records = []
+    for bucket in ["8分以上", "6-8分", "4-6分", "4分以下"]:
+        sub = df[df["評分區間"] == bucket]
+        if sub.empty:
+            continue
+        row = {"評分區間": bucket, "樣本數": len(sub)}
+        for n in HORIZONS:
+            excess_col = f"T{n}超額報酬%"
+            vals = pd.to_numeric(sub[excess_col], errors="coerce").dropna()
+            if len(vals) > 0:
+                row[f"T{n}超額報酬%"] = round(vals.mean(), 2)
+                row[f"T{n}跑贏大盤率%"] = round((vals > 0).sum() / len(vals) * 100, 1)
+            else:
+                row[f"T{n}超額報酬%"] = None
+                row[f"T{n}跑贏大盤率%"] = None
+        records.append(row)
+
+    return pd.DataFrame(records)

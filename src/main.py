@@ -741,7 +741,17 @@ def main():
             # 回測記錄：把今天每檔股票的評分/法人訊號/收盤價存成獨立快照，並回填舊紀錄的報酬率
             try:
                 _t.sleep(10)
-                record_daily_snapshot(ss2, cross_df, TRADE_DATE)
+
+                # 抓大盤基準（0050）當天收盤價，用來計算相對大盤超額報酬%
+                benchmark_price = None
+                try:
+                    benchmark_result = get_stock_price_single("0050")
+                    if benchmark_result:
+                        benchmark_price = benchmark_result.get("收盤價")
+                except Exception as e:
+                    log.warning(f"大盤基準(0050)股價抓取失敗，本次超額報酬將無法計算: {e}")
+
+                record_daily_snapshot(ss2, cross_df, TRADE_DATE, benchmark_price=benchmark_price)
                 backfill_returns(ss2)
             except Exception as e:
                 log.warning(f"回測記錄失敗（不影響主流程）: {e}")
