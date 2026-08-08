@@ -23,6 +23,8 @@ import pandas as pd
 from datetime import datetime
 import pytz
 
+from ai_analyzer import call_claude
+
 log = logging.getLogger(__name__)
 TW_TZ = pytz.timezone("Asia/Taipei")
 
@@ -30,6 +32,10 @@ SHEET_BACKTEST = "回測記錄"
 HORIZONS = [1, 3, 5, 10, 20]  # 追蹤 T+1/T+3/T+5/T+10/T+20 個「交易日」後的報酬率
 MAX_WINDOW = 20  # 「區間內最大報酬%」的觀察窗口天數
 BENCHMARK_COL = "大盤0050收盤價"
+
+# ── AI分析報告的資料充足性門檻（避免對雜訊下結論）──────────────────
+MIN_SAMPLES_PER_BUCKET = 100  # 每個評分區間至少要有這麼多筆樣本，統計上才有基本意義
+MIN_TRADING_DAYS = 20         # 至少要走滿一次完整的T20觀察窗口，才代表有一批「最終結果」可用
 
 
 def _load_backtest_sheet(ss) -> pd.DataFrame:
@@ -407,3 +413,160 @@ def get_relative_strength_by_period(ss, start_date: str = None, end_date: str = 
         records.append(row)
 
     return pd.DataFrame(records)
+
+
+def check_data_sufficiency(ss) -> dict:
+    """
+    檢查回測資料是否已經累積到足以進行AI分析的門檻
+    設計原則：寧可保守不分析，也不要對雜訊下結論——樣本不足時，
+    任何「看起來合理」的AI敘事都可能只是在幫巧合編故事（敘事謬誤）
+
+    回傳：
+        {
+            "sufficient": bool,           # 是否達標，可以進行AI分析
+            "total_records": int,         # 累積總快照筆數
+            "trading_days": int,          # 累積交易日數
+            "bucket_counts": dict,        # 各評分區間目前樣本數
+            "reasons": list[str],         # 尚未達標的具體原因（sufficient=True時為空list）
+        }
+    """
+    df = _load_backtest_sheet(ss)
+    result = {
+        "sufficient": False,
+        "total_records": 0,
+        "trading_days": 0,
+        "bucket_counts": {},
+        "reasons": [],
+    }
+    if df.empty:
+        result["reasons"].append("尚無任何回測記錄")
+        return result
+
+    result["total_records"] = len(df)
+    trading_days = df["記錄日期"].nunique()
+    result["trading_days"] = trading_days
+
+    df["綜合評分"] = pd.to_numeric(df["綜合評分"], errors="coerce")
+    df["評分區間"] = df["綜合評分"].apply(score_bucket)
+    bucket_counts = df["評分區間"].value_counts().to_dict()
+    result["bucket_counts"] = {b: int(bucket_counts.get(b, 0)) for b in ["8分以上", "6-8分", "4-6分", "4分以下"]}
+
+    if trading_days < MIN_TRADING_DAYS:
+        result["reasons"].append(
+            f"交易日數不足：目前累積 {trading_days} 個交易日，需要至少 {MIN_TRADING_DAYS} 天，"
+            f"才會有第一批完整的T20（20交易日後）最終結果"
+        )
+
+    insufficient_buckets = [
+        b for b in ["8分以上", "6-8分", "4-6分", "4分以下"]
+        if result["bucket_counts"].get(b, 0) < MIN_SAMPLES_PER_BUCKET
+    ]
+    if insufficient_buckets:
+        detail = "、".join(f"{b}（{result['bucket_counts'].get(b, 0)}筆）" for b in insufficient_buckets)
+        result["reasons"].append(
+            f"以下評分區間樣本數尚未達到 {MIN_SAMPLES_PER_BUCKET} 筆的統計門檻：{detail}"
+        )
+
+    result["sufficient"] = len(result["reasons"]) == 0
+    return result
+
+
+def generate_backtest_ai_report(ss) -> str:
+    """
+    產生回測績效的AI分析報告，採資深分析師跟主管報告的6段式架構：
+      1. 結論先行  2. 資料充足性聲明  3. 分項發現(附樣本數)
+      4. 異常與矛盾點  5. 建議行動  6. 已知限制
+
+    只有 check_data_sufficiency() 判定資料充足時才會真正呼叫AI，
+    未達標時直接回傳說明文字，不浪費API成本、也不會對雜訊下結論。
+    建議執行頻率：週報/月報，不建議每天執行
+    （回測結論不會因為多一天資料就有意義的改變，天天跑只是徒增噪音跟成本）
+    """
+    sufficiency = check_data_sufficiency(ss)
+
+    if not sufficiency["sufficient"]:
+        reasons_text = "\n".join(f"- {r}" for r in sufficiency["reasons"])
+        bucket_text = "\n".join(f"  - {b}：{c} 筆" for b, c in sufficiency["bucket_counts"].items())
+        return f"""## ⚠️ 資料量尚不足以進行AI分析
+
+**目前狀態**：累積 {sufficiency['total_records']} 筆快照、{sufficiency['trading_days']} 個交易日
+
+**各評分區間樣本數**：
+{bucket_text}
+
+**尚未達標的原因**：
+{reasons_text}
+
+**為什麼現在不分析**：在樣本不足、市場狀態涵蓋不全的情況下，任何統計結果都可能只是短期雜訊。
+AI在這種情況下容易產出「聽起來合理但缺乏統計意義」的敘事（敘事謬誤），
+反而會讓人誤以為系統已被驗證有效。建議繼續累積資料，待達標後再進行分析。"""
+
+    score_summary = get_backtest_summary(ss)
+    signal_summary = get_signal_summary(ss)
+    intensity_results = get_institutional_intensity_summary(ss)
+    relative_summary = get_relative_strength_by_period(ss)
+
+    def _df_to_text(df, title):
+        if df is None or df.empty:
+            return f"【{title}】\n（無資料）\n"
+        return f"【{title}】\n{df.to_string(index=False)}\n"
+
+    data_blocks = [
+        _df_to_text(score_summary, "綜合評分區間 vs 未來報酬率/勝率/波段最大機會"),
+        _df_to_text(signal_summary, "法人訊號類型 vs 未來報酬率/勝率"),
+    ]
+    if intensity_results.get("換手強度") is not None:
+        data_blocks.append(_df_to_text(intensity_results["換手強度"], "法人換手強度% vs 未來報酬率"))
+    if intensity_results.get("買超轉換率") is not None:
+        data_blocks.append(_df_to_text(intensity_results["買超轉換率"], "買超轉換率% vs 未來報酬率"))
+    data_blocks.append(_df_to_text(relative_summary, "相對大盤(0050)超額報酬% —— 排除大盤系統性漲跌後的真實選股能力"))
+
+    data_text = "\n".join(data_blocks)
+
+    prompt = f"""你是一位資深量化分析師，現在要針對一套自建的台股ETF籌碼評分系統的回測結果，
+向主管做一份誠實、嚴謹的績效驗證報告。這套系統用「多檔主動式ETF同時持有同一標的」加上
+三大法人買賣超、基本面成長等因子，產出0-11分的「綜合評分」，理論上分數越高代表未來報酬應該越好。
+
+以下是目前累積的回測統計資料（每組都已標示樣本數）：
+
+{data_text}
+
+累積總樣本數：{sufficiency['total_records']} 筆快照，涵蓋 {sufficiency['trading_days']} 個交易日。
+
+請用以下架構撰寫報告（繁體中文，Markdown格式，適合直接呈現給主管看）：
+
+## 結論先行
+用1-2句話講清楚：這套評分系統目前是否展現出統計上有意義的選股能力，還是證據仍不足以下定論。
+不要誇大，如果證據薄弱就明講證據薄弱。
+
+## 資料充足性聲明
+誠實說明目前的樣本數、涵蓋的市場狀態（例如是否只測到單一方向的行情、有沒有經歷完整漲跌循環）、
+時間跨度是否足夠，坦白目前分析結果的可信度邊界。
+
+## 分項發現
+針對上面每一組資料，各用1-2句話講重點發現，且必須引用具體數字和樣本數，不能只講「看起來不錯」這種空話。
+
+## 異常與矛盾點
+主動指出資料中任何違反直覺、或跟「評分應該正相關未來報酬」的假設矛盾的地方
+（例如某個高分組表現反而比低分組差），並嘗試給出可能解釋，但同時要明確標註
+「這可能只是樣本不足的雜訊，需要更多資料才能確認」，不要迴避或選擇性忽略不利的結果。
+
+## 建議行動
+給出具體、可執行的下一步建議（例如繼續觀察、調整評分權重的方向、需要補充哪類資料等）。
+
+## 已知限制
+列出這份回測方法論上的已知限制（例如存活偏差——股票掉出榜單就看不到後續表現、
+樣本可能集中在特定市場狀態、多重比較問題等），不要等被問才講。
+
+語氣要專業、誠實、避免過度推銷結論，這是要對真實決策負責的分析，不是行銷文案。"""
+
+    result = call_claude(
+        prompt,
+        system="你是嚴謹的量化分析師，重視統計證據強度，絕不誇大薄弱證據的結論，會主動揭露方法論限制。",
+        max_tokens=2500,
+    )
+
+    if not result:
+        return "⚠️ AI分析報告產生失敗（API呼叫無回應），請稍後再試。"
+
+    return result

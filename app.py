@@ -1239,7 +1239,27 @@ elif page == "回測績效":
                 "之後用「同股票、N個交易日後」的紀錄回頭查詢股價計算報酬率，因此每天上榜組成變動不影響回測有效性。")
         st.stop()
 
+    from backtest_tracker import check_data_sufficiency, generate_backtest_ai_report
+
     st.metric("累積快照筆數", f"{total_records:,} 筆")
+
+    sufficiency = check_data_sufficiency(ss)
+    with st.expander("🤖 AI 綜合分析報告", expanded=sufficiency["sufficient"]):
+        if not sufficiency["sufficient"]:
+            st.warning("資料量尚不足以進行AI分析")
+            bucket_text = "、".join(f"{b}：{c}筆" for b, c in sufficiency["bucket_counts"].items())
+            st.caption(f"目前各評分區間樣本數 — {bucket_text}（門檻：每組需≥100筆，且需累積滿20個交易日）")
+            for r in sufficiency["reasons"]:
+                st.caption(f"- {r}")
+        else:
+            st.success("資料量已達分析門檻")
+            if st.button("📝 產生AI分析報告", type="primary"):
+                with st.spinner("分析中，約需30-60秒..."):
+                    report_text = generate_backtest_ai_report(ss)
+                st.session_state["backtest_ai_report"] = report_text
+            if "backtest_ai_report" in st.session_state:
+                st.markdown(st.session_state["backtest_ai_report"])
+
     st.markdown("---")
 
     # ── ① 綜合評分 vs 未來報酬率 ──────────────────────────
