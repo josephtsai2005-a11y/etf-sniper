@@ -543,19 +543,17 @@ def main():
         except Exception as e:
             log.warning(f"差異比對失敗（不影響主流程）: {e}")
 
-    # ── core 模式到此結束，新聞/法人/AI 交給各自獨立的 job ──
+    # ── core 模式不再提早結束，直接接著跑法人階段（daily job 15:30→16:45 合併執行）──
     if RUN_MODE == "core":
-        log.info("RUN_MODE=core，核心資料完成")
-        log.info("===== 全部完成 =====")
-        return
+        log.info("RUN_MODE=core，核心資料完成，接續執行法人階段（合併執行，不再等待獨立inst job）")
 
     # ── 階段五：新聞熱度收集與題材分析 ──────────────────────────
     # inst 模式跳過新聞，直接跑法人
-    if RUN_MODE == "inst":
-        log.info("RUN_MODE=inst，跳過新聞階段，直接跑法人")
+    if RUN_MODE in ("inst", "core"):
+        log.info(f"RUN_MODE={RUN_MODE}，跳過新聞階段，直接跑法人")
     else:
         log.info("[5/5] 收集財經新聞 + 題材生命週期分析...")
-    if RUN_MODE != "inst":
+    if RUN_MODE not in ("inst", "core"):
       try:
           # 抓取最新新聞
           news_df = fetch_all_news(hours_back=26)
@@ -663,7 +661,7 @@ def main():
           log.info("===== 全部完成 =====")
           return
     else:
-        log.info("RUN_MODE=inst，跳過新聞/Trends，直接執行法人")
+        log.info(f"RUN_MODE={RUN_MODE}，跳過新聞/Trends，直接執行法人")
 
 
     # ── AI 模式：整合所有資料 + 美股 → 產生投資報告 ─────────────
