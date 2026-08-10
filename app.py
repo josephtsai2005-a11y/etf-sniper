@@ -178,7 +178,7 @@ with st.sidebar:
             st.session_state.selected_page = p
     st.markdown("---")
     st.markdown("#### 回測分析")
-    for p in ["回測績效", "關鍵字審核", "持倉監控"]:
+    for p in ["回測績效", "關鍵字審核", "母題材審核", "持倉監控"]:
         if st.button(p, key=f"btn_{p}", use_container_width=True):
             st.session_state.selected_page = p
 
@@ -650,7 +650,23 @@ elif page == "新聞×籌碼交叉":
 # 頁面：散戶情緒（Google Trends）
 # ══════════════════════════════════════════════════════════════
 elif page == "題材總覽":
-    st.title("題材總覽")
+    _client = get_client()
+    _sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
+    ss = _client.open_by_key(_sid)
+
+    from topic_analyzer import build_master_theme_overview
+
+    st.title("🗂️ 母題材總覽")
+    st.caption("依已核准母題材彙整，把散落在各股票底下、語義重疊的細關鍵字收斂到題材層級")
+
+    master_df = build_master_theme_overview(ss)
+    if master_df.empty:
+        st.info("尚無已核准的母題材對應資料（需先在「母題材審核」核准新題材、在「關鍵字審核」核准關鍵字，且該關鍵字已配對母題材）")
+    else:
+        st.dataframe(master_df, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
     st.caption("ETF布局題材 × 新聞熱度 × 散戶情緒反向指標")
     df = load_sheet("題材總覽")
     if df.empty:
@@ -1671,3 +1687,53 @@ elif page == "持倉監控":
             c1.metric("平均報酬率", f"{avg_ret:.2f}%")
             c2.metric("勝率", f"{win_rate:.1f}%")
 
+elif page == "母題材審核":
+    st.title("🗂️ 母題材審核")
+    st.caption("AI生成關鍵字時，若現有母題材清單沒有合適選項，會建議新母題材。核准後才會生效，成為之後配對的選項")
+
+    _client = get_client()
+    _sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
+    ss = _client.open_by_key(_sid)
+
+    from theme_manager import get_pending_themes, apply_theme_review_decisions, get_approved_themes
+
+    approved = get_approved_themes(ss)
+    pending_df = get_pending_themes(ss)
+
+    st.metric("目前已核准母題材數", f"{len(approved)} 個")
+
+    with st.expander("📋 查看目前已核准的母題材清單"):
+        st.write("、".join(approved) if approved else "（尚無）")
+
+    st.markdown("---")
+
+    if pending_df.empty:
+        st.success("目前沒有待審核的新母題材建議。")
+        st.stop()
+
+    st.info(f"共有 **{len(pending_df)}** 個新母題材建議待審核")
+
+    decisions = {}
+    for _, row in pending_df.iterrows():
+        theme = row["母題材"]
+        with st.container():
+            c1, c2, c3 = st.columns([2, 3, 2])
+            c1.markdown(f"**{theme}**")
+            c2.caption(f"建議來源：{row.get('來源關鍵字', '')}")
+            choice = c3.radio(
+                "決定", ["待審核", "核准", "拒絕"],
+                key=f"theme_{theme}", horizontal=True, label_visibility="collapsed",
+            )
+            if choice == "核准":
+                decisions[theme] = "已核准"
+            elif choice == "拒絕":
+                decisions[theme] = "已拒絕"
+        st.markdown("---")
+
+    if st.button("✅ 送出審核結果", type="primary", use_container_width=True):
+        if not decisions:
+            st.warning("沒有任何項目被標記為核准或拒絕，維持待審核狀態不變。")
+        else:
+            updated = apply_theme_review_decisions(ss, decisions)
+            st.success(f"已處理 {updated} 個母題材審核決定！核准的母題材下次生成關鍵字時就會加入配對選項。")
+            st.rerun()

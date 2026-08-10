@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 TW_TZ = pytz.timezone("Asia/Taipei")
 
 SHEET_KEYWORD_QUEUE = "AI關鍵字審核"
-QUEUE_COLS = ["股票代號", "股票名稱", "關鍵字", "生成日期", "狀態"]
+QUEUE_COLS = ["股票代號", "股票名稱", "關鍵字", "母題材", "生成日期", "狀態"]
 STATUS_PENDING = "待審核"
 STATUS_APPROVED = "已核准"
 STATUS_REJECTED = "已拒絕"
@@ -172,13 +172,22 @@ def _load_relevant_news_titles(ss, stock_name: str, max_titles: int = 3) -> list
 
 
 def _generate_keywords_for_stock(code: str, name: str, existing_keywords: list,
-                                   etf_names: list = None, news_titles: list = None) -> list:
+                                   etf_names: list = None, news_titles: list = None,
+                                   approved_themes: list = None) -> list:
     """
     呼叫Claude，針對單一股票生成產業/題材關鍵字候選（尚未核准，僅供審核）
     設計重點：不讓AI單憑訓練記憶憑空猜，而是餵入兩種「真實根據」讓AI延伸：
       1. 持有這檔股票的ETF名稱 —— 基金公司已經幫你做好主題分類，是最可靠的免費線索
       2. 該股近期相關新聞標題（若有）—— 即使只有1-2篇也比完全沒根據好
     生成後會自動過濾常見籠統詞（見 STOPWORDS），減少人工審核負擔
+
+    母題材配對邏輯（「AI做重活、人類做守門」）：
+      - 每個關鍵字都要求AI同時配對一個「母題材」，優先從 approved_themes 現有清單裡選
+      - 只有真的沒有合適選項，AI才能建議一個全新母題材名稱
+        （這個建議之後會被送去 theme_manager.propose_new_theme 進入待審核，不會馬上生效）
+      - 這樣散落在不同股票底下、語義重疊的關鍵字，才能被彙整到同一個母題材下
+
+    回傳：[(關鍵字, 母題材), ...] 的list
     """
     existing_text = "、".join(existing_keywords) if existing_keywords else "（無）"
 
@@ -197,6 +206,7 @@ def _generate_keywords_for_stock(code: str, name: str, existing_keywords: list,
         grounding_note = "請優先根據上述ETF持有與新聞根據來生成關鍵字，不要脫離這些線索憑空發明題材。"
 
     stopwords_text = "、".join(sorted(STOPWORDS))
+    themes_text = "、".join(approved_themes) if approved_themes else "（目前尚無現有母題材，全部都需要你建議新的）"
 
     prompt = f"""你是台股產業分析師。請針對下列個股，列出5-8個最能代表其「產業鏈定位」與「題材歸屬」的關鍵字，
 這些關鍵字將用於比對新聞熱詞與Google Trends搜尋量，藉此判斷該股是否受惠於當前市場熱門題材。
@@ -210,41 +220,67 @@ def _generate_keywords_for_stock(code: str, name: str, existing_keywords: list,
 嚴格禁止使用以下這類過於籠統、任何公司都適用、沒有鑑別度的詞（不要生成這些詞或其同義詞）：
 {stopwords_text}
 
-請只回傳關鍵字，用頓號「、」分隔，不要任何說明文字、不要編號、不要換行。
-關鍵字應盡量具體（例如「CoWoS」「散熱模組」這種供應鏈定位），避免過於籠統的產業大分類（例如單純「電子業」）。
-關鍵字範例格式（僅供參考格式，不要抄這個內容）：CoWoS、先進封裝、AI伺服器、散熱模組
+【重要】每個關鍵字都要同時配對一個「母題材」，規則如下：
+- 現有母題材清單（請優先從這裡面選一個最合適的，這樣不同公司的相關關鍵字才能被歸到同一類）：
+{themes_text}
+- 只有現有清單裡真的沒有任何一個合適，才可以建議一個全新的母題材名稱（新母題材要簡短、具通用性，
+  能同時涵蓋未來其他公司也可能用到的同類關鍵字，不要取得太窄太specific）
+- 不要為了配合清單硬套不合適的母題材，寧可建議新的
 
-現在請針對「{name}」給出關鍵字："""
+請用以下格式回傳，每行一組「關鍵字|母題材」，用直線符號分隔，不要任何說明文字、不要編號：
+關鍵字1|母題材A
+關鍵字2|母題材A
+關鍵字3|母題材B
 
-    result = call_claude(prompt, system="你是專業的台股產業分析師，回答簡潔精準，只輸出關鍵字列表，不臆測沒有根據的題材，絕不使用籠統通用詞。", max_tokens=300)
+現在請針對「{name}」給出關鍵字與母題材配對："""
+
+    result = call_claude(
+        prompt,
+        system="你是專業的台股產業分析師，回答簡潔精準，只輸出「關鍵字|母題材」格式列表，不臆測沒有根據的題材，絕不使用籠統通用詞，優先重複使用現有母題材而非發明新的。",
+        max_tokens=400,
+    )
     if not result:
         return []
 
-    raw_kws = [kw.strip() for kw in result.replace("\n", "、").replace(",", "、").split("、")]
-    raw_kws = [kw for kw in raw_kws if kw and len(kw) <= 10]
-    raw_kws = [kw for kw in raw_kws if kw not in STOPWORDS]
-    new_kws = [kw for kw in raw_kws if kw not in existing_keywords]
-    return new_kws
+    pairs = []
+    for line in result.strip().split("\n"):
+        line = line.strip()
+        if not line or "|" not in line:
+            continue
+        parts = line.split("|", 1)
+        kw = parts[0].strip()
+        theme = parts[1].strip() if len(parts) > 1 else ""
+        if not kw or len(kw) > 10 or kw in STOPWORDS or kw in existing_keywords:
+            continue
+        if not theme:
+            continue
+        pairs.append((kw, theme))
+
+    return pairs
 
 
 def get_or_generate_keyword_map(ss, stock_list: pd.DataFrame, max_new_calls: int = 50) -> dict:
     """
     主入口：
       1. 依週間分桶邏輯，為「今天輪到」且「這個月還沒生成過候選字」的股票呼叫AI生成候選關鍵字
-      2. 候選字寫入「AI關鍵字審核」分頁，狀態為「待審核」（不會馬上生效）
-      3. 回傳目前所有「已核准」的關鍵字map，供 match_keywords_to_stocks 使用
+      2. 每個關鍵字同時配對一個母題材（優先用現有已核准清單，找不到才提案新的，見 theme_manager.py）
+      3. 候選字寫入「AI關鍵字審核」分頁，狀態為「待審核」（不會馬上生效）
+      4. 回傳目前所有「已核准」的關鍵字map，供 match_keywords_to_stocks 使用
 
     stock_list: 需包含「股票代號」「股票名稱」欄位的DataFrame（例如聰明錢名單），
                 若有「持有ETF清單」欄位會一併用來當AI生成的根據
     max_new_calls: 單次執行的安全上限（正常情況下週間分桶就會把數量壓得很低，這只是防呆上限）
     回傳：{股票代號: [已核准關鍵字, ...]}（未核准的候選字不會出現在這裡）
     """
+    from theme_manager import get_approved_themes, propose_new_theme
+
     now = datetime.now(TW_TZ)
     this_month = now.strftime("%Y-%m")
     today_str = now.strftime("%Y-%m-%d")
     today_weekday = now.weekday()
 
     queue_df = _load_keyword_queue(ss)
+    approved_themes = get_approved_themes(ss)
 
     generated_this_month_codes = set()
     rejected_kws_by_code = {}
@@ -271,6 +307,7 @@ def get_or_generate_keyword_map(ss, stock_list: pd.DataFrame, max_new_calls: int
 
     calls_made = 0
     new_queue_rows = []
+    proposed_new_themes = set()  # 同一次執行內避免對同個新題材重複提案
 
     for code in codes_to_check:
         name = names_by_code.get(code, "")
@@ -292,22 +329,29 @@ def get_or_generate_keyword_map(ss, stock_list: pd.DataFrame, max_new_calls: int
         if not queue_df.empty:
             existing_all = set(queue_df[queue_df["股票代號"] == code]["關鍵字"].tolist())
 
-        new_kws = _generate_keywords_for_stock(code, name, list(existing_all), etf_names, news_titles)
+        kw_theme_pairs = _generate_keywords_for_stock(
+            code, name, list(existing_all), etf_names, news_titles, approved_themes
+        )
         calls_made += 1
 
-        new_kws = [kw for kw in new_kws if kw not in already_rejected]
+        kw_theme_pairs = [(kw, theme) for kw, theme in kw_theme_pairs if kw not in already_rejected]
 
-        for kw in new_kws:
+        for kw, theme in kw_theme_pairs:
             new_queue_rows.append({
                 "股票代號": code,
                 "股票名稱": name,
                 "關鍵字": kw,
+                "母題材": theme,
                 "生成日期": today_str,
                 "狀態": STATUS_PENDING,
             })
+            # 如果AI配對到的母題材不在現有已核准清單裡，代表是AI建議的新題材，送去審核
+            if theme not in approved_themes and theme not in proposed_new_themes:
+                propose_new_theme(ss, theme, source_keyword=f"{code} {name} - {kw}")
+                proposed_new_themes.add(theme)
 
-        if new_kws:
-            log.info(f"AI關鍵字候選：{code} {name} 新增 {len(new_kws)} 個待審核關鍵字"
+        if kw_theme_pairs:
+            log.info(f"AI關鍵字候選：{code} {name} 新增 {len(kw_theme_pairs)} 個待審核關鍵字"
                       f"（ETF根據{len(etf_names)}檔、新聞根據{len(news_titles)}篇）")
         else:
             log.info(f"AI關鍵字候選：{code} {name} 本次無新增（可能全部被停用詞/重複過濾掉）")

@@ -37,10 +37,18 @@ def build_topic_overview(ss, smart_df: pd.DataFrame, trade_date: str) -> pd.Data
     if trend_df.empty:
         return pd.DataFrame()
 
-    # 建立 ETF 題材對應表（從聰明錢名單推導）
-    # 每個股票代號對應的題材，從 DEFAULT_MAP 取得
-    from trend_analyzer import match_keywords_to_stocks
-    
+    # 建立 ETF/AI關鍵字 題材對應表
+    # 舊機制：DEFAULT_MAP_REVERSE（僅18檔手動清單）
+    # 新機制：已核准的AI關鍵字，依母題材分組（theme_manager.py），涵蓋所有追蹤股票
+    # 兩者合併使用，新機制涵蓋不到的地方由舊機制補（互為備援，不會讓資料變少）
+    from trend_analyzer import DEFAULT_MAP_REVERSE
+    try:
+        from theme_manager import get_keyword_theme_map
+        ai_theme_map = get_keyword_theme_map(ss)
+    except Exception as e:
+        log.warning(f"讀取AI母題材對照表失敗，僅使用舊版DEFAULT_MAP: {e}")
+        ai_theme_map = {}
+
     # 整合資料
     records = []
     for _, row in trend_df.iterrows():
@@ -55,15 +63,27 @@ def build_topic_overview(ss, smart_df: pd.DataFrame, trade_date: str) -> pd.Data
             if not match.empty:
                 sent_row = match.iloc[0]
 
-        # 找 ETF 持有的相關股票
+        # 找 ETF 持有的相關股票：新機制（母題材對照）+ 舊機制（DEFAULT_MAP_REVERSE）合併，去重
         etf_stocks = []
+        seen_codes = set()
+
+        # 新機制：這個新聞熱詞剛好等於某個已核准母題材時，帶入該題材下所有股票
+        if keyword in ai_theme_map:
+            for code, sname in ai_theme_map[keyword]:
+                if code not in seen_codes:
+                    etf_stocks.append(f"{code} {sname}")
+                    seen_codes.add(code)
+
+        # 舊機制：DEFAULT_MAP_REVERSE 補充（涵蓋新機制還沒歸類到的部分）
         if not smart_df.empty:
-            from trend_analyzer import DEFAULT_MAP_REVERSE
             related = DEFAULT_MAP_REVERSE.get(keyword, [])
             for code in related:
+                if code in seen_codes:
+                    continue
                 match_s = smart_df[smart_df["股票代號"].astype(str) == str(code)]
                 if not match_s.empty:
                     etf_stocks.append(f"{code} {match_s.iloc[0].get('股票名稱','')}")
+                    seen_codes.add(code)
 
         records.append({
             "題材": keyword,
@@ -136,3 +156,48 @@ def write_topic_overview_to_sheets(ss, df: pd.DataFrame, ai_insight: str, trade_
 
     ws.append_rows(all_rows, value_input_option="USER_ENTERED")
     log.info(f"題材總覽寫入完成：{len(df)} 個題材")
+
+
+def build_master_theme_overview(ss) -> pd.DataFrame:
+    """
+    母題材總覽：直接依「已核准母題材」彙整，不依賴新聞熱詞文字剛好對上母題材名稱
+    這是解決「446個細顆粒度關鍵字看不清楚」問題的核心呈現——
+    把散落在58檔股票底下、語義重疊的細關鍵字，收斂到20-30個母題材層級
+
+    回傳欄位：母題材、涵蓋股票數、相關股票、關鍵字數
+    """
+    try:
+        from theme_manager import get_keyword_theme_map
+        from keyword_generator import _load_keyword_queue
+    except Exception as e:
+        log.warning(f"母題材總覽建立失敗: {e}")
+        return pd.DataFrame()
+
+    theme_map = get_keyword_theme_map(ss)
+    if not theme_map:
+        return pd.DataFrame()
+
+    queue_df = _load_keyword_queue(ss)
+    approved_kws = queue_df[queue_df["狀態"] == "已核准"] if not queue_df.empty else pd.DataFrame()
+
+    records = []
+    for theme, stocks in theme_map.items():
+        kw_count = 0
+        if not approved_kws.empty and "母題材" in approved_kws.columns:
+            kw_count = len(approved_kws[approved_kws["母題材"] == theme])
+
+        stock_display = " / ".join(f"{code} {name}" for code, name in stocks[:6])
+        if len(stocks) > 6:
+            stock_display += f" ...等{len(stocks)}檔"
+
+        records.append({
+            "母題材": theme,
+            "涵蓋股票數": len(stocks),
+            "相關股票": stock_display,
+            "關鍵字數": kw_count,
+        })
+
+    df = pd.DataFrame(records)
+    if not df.empty:
+        df = df.sort_values("涵蓋股票數", ascending=False).reset_index(drop=True)
+    return df
