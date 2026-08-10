@@ -615,7 +615,22 @@ def main():
                       log.warning(f"AI關鍵字生成失敗，改用內建DEFAULT_MAP: {e}")
                       ai_keyword_map = None
 
+                    # 母題材維護：定期整併檢查（每週一）
+                  try:
+                      from theme_manager import suggest_theme_merges
+                      if now_tw().weekday() == 0:  # 週一才檢查，避免每天都呼叫AI浪費成本
+                          suggest_theme_merges(ss2)
+                  except Exception as e:
+                      log.warning(f"母題材整併檢查失敗（不影響主流程）: {e}")
+
                   cross_df = match_keywords_to_stocks(trend_df, smart_df, stock_keyword_map=ai_keyword_map)
+
+                  # 母題材熱度更新：今天有新聞熱度的母題材，更新最後熱度日期（供沉寂淘汰判斷用）
+                  try:
+                      from theme_manager import update_theme_freshness
+                      update_theme_freshness(ss2, trend_df)
+                  except Exception as e:
+                      log.warning(f"母題材熱度更新失敗（不影響主流程）: {e}")
 
                   # 寫入趨勢報告
                   _write_trend_to_sheets(ss2, trend_df, cross_df, TRADE_DATE)
