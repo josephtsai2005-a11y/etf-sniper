@@ -54,12 +54,28 @@ def get_client():
 
 @st.cache_data(ttl=300)
 def load_sheet(sheet_name: str) -> pd.DataFrame:
+    import time as _time
+
+    def _fetch_with_retry(retries: int = 3):
+        last_err = None
+        for attempt in range(retries + 1):
+            try:
+                client = get_client()
+                sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
+                ss = client.open_by_key(sid)
+                ws = ss.worksheet(sheet_name)
+                return ws.get_all_values()
+            except gspread.exceptions.APIError as e:
+                last_err = e
+                is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "Quota exceeded" in str(e)
+                if is_rate_limit and attempt < retries:
+                    _time.sleep(2 * (attempt + 1))
+                    continue
+                raise
+        raise last_err
+
     try:
-        client = get_client()
-        sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
-        ss = client.open_by_key(sid)
-        ws = ss.worksheet(sheet_name)
-        all_values = ws.get_all_values()
+        all_values = _fetch_with_retry()
 
         if not all_values or len(all_values) < 2:
             return pd.DataFrame()
@@ -1501,7 +1517,21 @@ elif page == "關鍵字審核":
 
     from keyword_generator import get_pending_keywords, apply_review_decisions, STATUS_APPROVED, STATUS_REJECTED
 
-    pending_df = get_pending_keywords(ss)
+    # ── 讀取一次快取起來，之後勾選互動只在記憶體操作，不重複呼叫Google Sheets ──
+    # 只有第一次進頁面、或明確按「重新整理」才會真的讀取（避免每次勾選checkbox都觸發整頁重跑+重新讀取，
+    # 446筆候選字若逐一勾選很容易撞到Google Sheets每分鐘60次請求的限制）
+    if "keyword_review_cache" not in st.session_state:
+        with st.spinner("讀取候選關鍵字..."):
+            st.session_state["keyword_review_cache"] = get_pending_keywords(ss)
+
+    col_a, col_b = st.columns([1, 5])
+    with col_a:
+        if st.button("🔄 重新整理"):
+            with st.spinner("讀取候選關鍵字..."):
+                st.session_state["keyword_review_cache"] = get_pending_keywords(ss)
+            st.rerun()
+
+    pending_df = st.session_state["keyword_review_cache"]
 
     if pending_df.empty:
         st.success("目前沒有待審核的關鍵字。AI會依股票代號固定分配到週一~週五陸續產生候選字，若當週沒有新股票需要更新，這裡就會是空的。")
@@ -1509,12 +1539,6 @@ elif page == "關鍵字審核":
 
     st.info(f"共有 **{len(pending_df)}** 筆候選關鍵字待審核，來自 **{pending_df['股票代號'].nunique()}** 檔股票。"
             f"勾選你想**刪除**的關鍵字，其餘未勾選的送出後會**全部核准**。")
-
-    # 全部展開/收合的輔助按鈕
-    col_a, col_b = st.columns([1, 5])
-    with col_a:
-        if st.button("🔄 重新整理"):
-            st.rerun()
 
     checked_keys = set()  # 存放被勾選要刪除的 (股票代號, 關鍵字)
 
@@ -1543,9 +1567,11 @@ elif page == "關鍵字審核":
             else:
                 decisions[key] = STATUS_APPROVED
 
-        updated = apply_review_decisions(ss, decisions)
+        with st.spinner("寫入中..."):
+            updated = apply_review_decisions(ss, decisions)
         st.success(f"已處理 {updated} 筆：核准 {len(pending_df) - len(checked_keys)} 個，刪除 {len(checked_keys)} 個。"
                    f"核准的關鍵字下次job執行時就會生效。")
+        del st.session_state["keyword_review_cache"]  # 清快取，下次進頁面重新讀取最新狀態
         st.rerun()
 
 elif page == "持倉監控":
@@ -1695,10 +1721,36 @@ elif page == "母題材審核":
     _sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
     ss = _client.open_by_key(_sid)
 
-    from theme_manager import get_pending_themes, apply_theme_review_decisions, get_approved_themes
+    from theme_manager import (
+        get_pending_themes, apply_theme_review_decisions, get_approved_themes,
+        get_pending_merges, apply_merge_decisions,
+    )
 
-    approved = get_approved_themes(ss)
-    pending_df = get_pending_themes(ss)
+    # ── 讀取一次快取起來，之後勾選互動只在記憶體操作，不重複呼叫Google Sheets ──
+    # 只有第一次進頁面、或明確按「重新整理」才會真的讀取
+    if "theme_review_cache" not in st.session_state:
+        with st.spinner("讀取母題材資料..."):
+            st.session_state["theme_review_cache"] = {
+                "approved": get_approved_themes(ss),
+                "pending_themes": get_pending_themes(ss),
+                "pending_merges": get_pending_merges(ss),
+            }
+
+    col_a, col_b = st.columns([1, 5])
+    with col_a:
+        if st.button("🔄 重新整理"):
+            with st.spinner("讀取母題材資料..."):
+                st.session_state["theme_review_cache"] = {
+                    "approved": get_approved_themes(ss),
+                    "pending_themes": get_pending_themes(ss),
+                    "pending_merges": get_pending_merges(ss),
+                }
+            st.rerun()
+
+    cache = st.session_state["theme_review_cache"]
+    approved = cache["approved"]
+    pending_df = cache["pending_themes"]
+    pending_merges = cache["pending_merges"]
 
     st.metric("目前已核准母題材數", f"{len(approved)} 個")
 
@@ -1709,31 +1761,67 @@ elif page == "母題材審核":
 
     if pending_df.empty:
         st.success("目前沒有待審核的新母題材建議。")
-        st.stop()
+    else:
+        st.info(f"共有 **{len(pending_df)}** 個新母題材建議待審核")
 
-    st.info(f"共有 **{len(pending_df)}** 個新母題材建議待審核")
+        decisions = {}
+        for _, row in pending_df.iterrows():
+            theme = row["母題材"]
+            with st.container():
+                c1, c2, c3 = st.columns([2, 3, 2])
+                c1.markdown(f"**{theme}**")
+                c2.caption(f"建議來源：{row.get('來源關鍵字', '')}")
+                choice = c3.radio(
+                    "決定", ["待審核", "核准", "拒絕"],
+                    key=f"theme_{theme}", horizontal=True, label_visibility="collapsed",
+                )
+                if choice == "核准":
+                    decisions[theme] = "已核准"
+                elif choice == "拒絕":
+                    decisions[theme] = "已拒絕"
+            st.markdown("---")
 
-    decisions = {}
-    for _, row in pending_df.iterrows():
-        theme = row["母題材"]
-        with st.container():
-            c1, c2, c3 = st.columns([2, 3, 2])
-            c1.markdown(f"**{theme}**")
-            c2.caption(f"建議來源：{row.get('來源關鍵字', '')}")
-            choice = c3.radio(
-                "決定", ["待審核", "核准", "拒絕"],
-                key=f"theme_{theme}", horizontal=True, label_visibility="collapsed",
-            )
-            if choice == "核准":
-                decisions[theme] = "已核准"
-            elif choice == "拒絕":
-                decisions[theme] = "已拒絕"
-        st.markdown("---")
+        if st.button("✅ 送出審核結果", type="primary", use_container_width=True, key="submit_new_theme"):
+            if not decisions:
+                st.warning("沒有任何項目被標記為核准或拒絕，維持待審核狀態不變。")
+            else:
+                with st.spinner("寫入中..."):
+                    updated = apply_theme_review_decisions(ss, decisions)
+                st.success(f"已處理 {updated} 個母題材審核決定！核准的母題材下次生成關鍵字時就會加入配對選項。")
+                del st.session_state["theme_review_cache"]  # 清快取，下次進頁面重新讀取最新狀態
+                st.rerun()
 
-    if st.button("✅ 送出審核結果", type="primary", use_container_width=True):
-        if not decisions:
-            st.warning("沒有任何項目被標記為核准或拒絕，維持待審核狀態不變。")
-        else:
-            updated = apply_theme_review_decisions(ss, decisions)
-            st.success(f"已處理 {updated} 個母題材審核決定！核准的母題材下次生成關鍵字時就會加入配對選項。")
-            st.rerun()
+    st.markdown("---")
+    st.subheader("🔀 母題材整併建議")
+    st.caption("每週一AI會檢視現有母題材清單，找出語義重複的組合建議合併。核准後，來源題材底下的關鍵字會自動改指向保留名稱")
+
+    if pending_merges.empty:
+        st.success("目前沒有待審核的整併建議。")
+    else:
+        st.info(f"共有 **{len(pending_merges)}** 組整併建議待審核")
+        merge_decisions = {}
+        for _, row in pending_merges.iterrows():
+            group_key = row["建議合併組"]
+            with st.container():
+                c1, c2, c3 = st.columns([2, 2, 2])
+                c1.markdown(f"**{group_key}**")
+                c2.markdown(f"→ 保留為「**{row['建議保留名稱']}**」")
+                choice = c3.radio(
+                    "決定", ["待審核", "核准", "拒絕"],
+                    key=f"merge_{group_key}", horizontal=True, label_visibility="collapsed",
+                )
+                if choice == "核准":
+                    merge_decisions[group_key] = "已核准"
+                elif choice == "拒絕":
+                    merge_decisions[group_key] = "已拒絕"
+            st.markdown("---")
+
+        if st.button("✅ 送出整併審核結果", type="primary", use_container_width=True, key="submit_merge"):
+            if not merge_decisions:
+                st.warning("沒有任何項目被標記為核准或拒絕，維持待審核狀態不變。")
+            else:
+                with st.spinner("寫入中..."):
+                    updated = apply_merge_decisions(ss, merge_decisions)
+                st.success(f"已處理 {updated} 組整併決定！核准的合併已立即套用到所有相關關鍵字。")
+                del st.session_state["theme_review_cache"]
+                st.rerun()
