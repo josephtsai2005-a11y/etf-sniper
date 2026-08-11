@@ -90,6 +90,8 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
         close_col  = next((c for c in df.columns if "收盤" in c), None)
+        high_col   = next((c for c in df.columns if "最高" in c), None)
+        low_col    = next((c for c in df.columns if "最低" in c), None)
         change_col = next((c for c in df.columns if "漲跌" in c and "幅" not in c), None)
         vol_col    = next((c for c in df.columns if "成交股數" in c or "成交量" in c), None)
         amt_col    = next((c for c in df.columns if "成交金額" in c), None)
@@ -134,6 +136,103 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
                 avg5_vol = sum(recent_vols[-6:-1]) / 5  # 不含今天的前5日均量
                 volume_ratio = round(today_vol / avg5_vol, 2) if avg5_vol > 0 else 0
 
+        # ── KD值（隨機指標，9,3,3）──────────────────────
+        # RSV = (收盤-N日最低) / (N日最高-N日最低) * 100，K/D皆用3日平滑
+        k_val, d_val, kd_signal = None, None, ""
+        if high_col and low_col and len(closes) >= 9:
+            n = 9
+            highs = df[high_col].tolist()
+            lows = df[low_col].tolist()
+            k_series, d_series = [], []
+            prev_k, prev_d = 50.0, 50.0  # 起始值慣例用50
+            for i in range(len(closes)):
+                if i < n - 1:
+                    k_series.append(prev_k)
+                    d_series.append(prev_d)
+                    continue
+                period_high = max(highs[i - n + 1:i + 1])
+                period_low = min(lows[i - n + 1:i + 1])
+                if period_high == period_low:
+                    rsv = 50.0
+                else:
+                    rsv = (closes[i] - period_low) / (period_high - period_low) * 100
+                cur_k = prev_k * 2 / 3 + rsv * 1 / 3
+                cur_d = prev_d * 2 / 3 + cur_k * 1 / 3
+                k_series.append(cur_k)
+                d_series.append(cur_d)
+                prev_k, prev_d = cur_k, cur_d
+
+            k_val = round(k_series[-1], 1)
+            d_val = round(d_series[-1], 1)
+
+            if len(k_series) >= 3:
+                diff_series = [k_series[i] - d_series[i] for i in range(len(k_series))]
+                prev_diff = diff_series[-2]
+                cur_diff = diff_series[-1]
+                # 差距是否連續2天在縮小（不論正負，代表兩線正在靠近，交叉在醞釀中）
+                gap_narrowing = abs(diff_series[-1]) < abs(diff_series[-2]) < abs(diff_series[-3])
+
+                if prev_diff <= 0 and cur_diff > 0:
+                    kd_signal = "🟢 黃金交叉"
+                elif prev_diff >= 0 and cur_diff < 0:
+                    kd_signal = "🔴 死亡交叉"
+                elif cur_diff < 0 and gap_narrowing and k_val < 50:
+                    kd_signal = "🌱 醞釀黃金交叉"  # 提早訊號：還沒交叉，但K正在低檔追上D
+                elif cur_diff > 0 and gap_narrowing and k_val > 50:
+                    kd_signal = "🍂 醞釀死亡交叉"  # 提早訊號：還沒交叉，但K正在高檔被D追上
+                elif cur_diff > 0:
+                    kd_signal = "K>D"
+                else:
+                    kd_signal = "K<D"
+
+        # ── MACD（12,26,9 EMA）───────────────────────────
+        dif_val, macd_signal_val, macd_hist, macd_cross = None, None, None, ""
+        if len(closes) >= 26:
+            close_series = pd.Series(closes)
+            ema12 = close_series.ewm(span=12, adjust=False).mean()
+            ema26 = close_series.ewm(span=26, adjust=False).mean()
+            dif_series = ema12 - ema26
+            signal_series = dif_series.ewm(span=9, adjust=False).mean()
+            hist_series = dif_series - signal_series
+
+            dif_val = round(dif_series.iloc[-1], 2)
+            macd_signal_val = round(signal_series.iloc[-1], 2)
+            macd_hist = round(hist_series.iloc[-1], 2)
+
+            if len(hist_series) >= 3:
+                h = hist_series.tolist()
+                prev_hist, cur_hist = h[-2], h[-1]
+                # 柱狀連續2天縮小（力道衰竭中，不論正負）
+                hist_shrinking = abs(h[-1]) < abs(h[-2]) < abs(h[-3])
+
+                if prev_hist <= 0 and cur_hist > 0:
+                    macd_cross = "🟢 黃金交叉"
+                elif prev_hist >= 0 and cur_hist < 0:
+                    macd_cross = "🔴 死亡交叉"
+                elif cur_hist < 0 and hist_shrinking:
+                    macd_cross = "🌱 空方動能趨緩"  # 提早訊號：柱狀仍是負的，但空方力道在減弱
+                elif cur_hist > 0 and hist_shrinking:
+                    macd_cross = "🍂 多方動能趨緩"  # 提早訊號：柱狀仍是正的，但多方力道在減弱
+                elif cur_hist > 0:
+                    macd_cross = "柱狀翻紅"
+                else:
+                    macd_cross = "柱狀翻綠"
+
+        # ── 背離偵測（提早出場訊號中最經典的一種）─────────────
+        # 股價創近期新高，但KD沒有跟著創新高 → 動能其實已經衰竭，價格是靠慣性衝高
+        divergence_signal = ""
+        lookback = 10
+        if len(closes) >= lookback and k_val is not None:
+            try:
+                recent_closes = closes[-lookback:]
+                recent_k = k_series[-lookback:]
+                price_making_new_high = recent_closes[-1] >= max(recent_closes)
+                kd_not_confirming = recent_k[-1] < max(recent_k[:-1]) - 5  # K值明顯低於前段高點
+                if price_making_new_high and kd_not_confirming:
+                    divergence_signal = "⚠️ 頂部背離：價格創高但KD未跟上"
+            except Exception:
+                pass
+
         change = float(df[change_col].iloc[-1]) if change_col else 0
         prev = latest_close - change
         change_pct = round(change / prev * 100, 2) if prev and prev != 0 else 0
@@ -153,6 +252,14 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
             "均線排列": ma_alignment,
             "連續站上月線天數": consecutive_above,
             "量能比":   volume_ratio,
+            "K值":      k_val,
+            "D值":      d_val,
+            "KD訊號":   kd_signal,
+            "DIF":      dif_val,
+            "MACD":     macd_signal_val,
+            "MACD柱狀": macd_hist,
+            "MACD訊號": macd_cross,
+            "背離警示": divergence_signal,
             "成交量":   volume,
             "成交金額": amount,
         }
@@ -210,7 +317,8 @@ def enrich_with_prices(df: pd.DataFrame, top_n: Optional[int] = None) -> pd.Data
 
     # 保留原本名稱欄，合併股價（不合入名稱）
     price_cols = ["股票代號", "收盤價", "漲跌", "漲跌幅%", "MA5", "MA10", "MA20", "站上MA20",
-              "均線排列", "連續站上月線天數", "量能比", "成交量", "成交金額"]
+              "均線排列", "連續站上月線天數", "量能比", "K值", "D值", "KD訊號",
+              "DIF", "MACD", "MACD柱狀", "MACD訊號", "背離警示", "成交量", "成交金額"]
     price_df = price_df[[c for c in price_cols if c in price_df.columns]]
 
     merged = df.merge(price_df, on="股票代號", how="left")
