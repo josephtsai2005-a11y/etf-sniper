@@ -29,6 +29,7 @@ from sheets_writer import get_client, get_or_create_spreadsheet
 from keyword_generator import get_or_generate_keyword_map
 from backtest_tracker import record_daily_snapshot, backfill_returns
 from analyzer import run_analysis
+from margin_fetcher import fetch_margin_for_stocks
 
 def now_tw():
     return datetime.now(pytz.timezone("Asia/Taipei"))
@@ -193,7 +194,7 @@ def _write_institutional_to_sheets(ss, inst_df, cross_df, trade_date):
     import time
     for sheet_name, df, cols in [
         ("三大法人", inst_df, ["排名","股票代號","外資買賣超","投信買賣超","自營買賣超","三大合計","買超法人數","法人訊號"]),
-        ("多方驗證名單", cross_df, ["排名","股票代號","股票名稱","持有ETF數","買超法人數","法人訊號","綜合評分","多方驗證","三大合計","買超轉換率%","法人換手強度%","KD訊號","MACD訊號","背離警示","ATR%","技術面共振","收盤價","漲跌幅%"]),
+        ("多方驗證名單", cross_df, ["排名","股票代號","股票名稱","持有ETF數","買超法人數","法人訊號","綜合評分","多方驗證","三大合計","買超轉換率%","法人換手強度%","融資增減(張)","券資比%","融資訊號","籌碼矛盾","KD訊號","MACD訊號","背離警示","ATR%","技術面共振","收盤價","漲跌幅%"]),
     ]:
         existing = [ws.title for ws in ss.worksheets()]
         if sheet_name not in existing:
@@ -731,6 +732,12 @@ def main():
         stock_codes = smart_df["股票代號"].dropna().astype(str).unique().tolist()
         inst_df = fetch_batch_institutional(stock_codes, TRADE_DATE)
 
+        margin_df = pd.DataFrame()
+        try:
+            margin_df = fetch_margin_for_stocks(stock_codes, TRADE_DATE)
+        except Exception as e:
+            log.warning(f"融資融券抓取失敗（不影響主流程）: {e}")
+
         if not inst_df.empty:
             inst_df = compute_institutional_signal(inst_df)
             try:
@@ -744,7 +751,7 @@ def main():
                 log.warning(f"讀取散戶情緒失敗（不影響主流程）: {e}")
                 retail_df = pd.DataFrame()
 
-            cross_df = cross_with_etf(inst_df, smart_df, fundamental_df, retail_df)
+            cross_df = cross_with_etf(inst_df, smart_df, fundamental_df, retail_df, margin_df)
 
             # 寫入 Sheets
             import time as _t; _t.sleep(15)

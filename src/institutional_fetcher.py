@@ -240,9 +240,10 @@ def cross_with_etf(
     smart_df: pd.DataFrame,
     fundamental_df: pd.DataFrame = None,
     retail_df: pd.DataFrame = None,
+    margin_df: pd.DataFrame = None,
 ) -> pd.DataFrame:
     """
-    三大法人 × 主動ETF持股 × 基本面 交叉驗證
+    三大法人 × 主動ETF持股 × 基本面 × 融資融券 交叉驗證
     綜合評分 0-10 分
     """
     if inst_df.empty or smart_df.empty:
@@ -287,6 +288,52 @@ def cross_with_etf(
     merged["買超轉換率%"] = (
         merged["三大合計"] / inst_volume.replace(0, pd.NA) * 100
     ).round(1).fillna(0)
+
+    # ── 融資融券整合：判斷「量多量少是換手還是誘多出貨」──────────
+    if margin_df is not None and not margin_df.empty:
+        margin_df = margin_df.copy()
+        margin_df["股票代號"] = margin_df["股票代號"].astype(str).str.strip()
+        margin_cols = ["股票代號", "融資餘額(張)", "融資增減(張)", "融券餘額(張)", "融券增減(張)", "券資比%"]
+        avail_margin = [c for c in margin_cols if c in margin_df.columns]
+        merged = merged.merge(margin_df[avail_margin], on="股票代號", how="left")
+
+        merged["融資餘額(張)"] = pd.to_numeric(merged.get("融資餘額(張)"), errors="coerce")
+        merged["融資增減(張)"] = pd.to_numeric(merged.get("融資增減(張)"), errors="coerce")
+
+        def _margin_signal(row):
+            bal, chg = row.get("融資餘額(張)"), row.get("融資增減(張)")
+            if pd.isna(bal) or pd.isna(chg) or bal == 0:
+                return ""
+            pct = chg / bal * 100
+            if pct >= 5:
+                return "🔺 融資大增"
+            elif pct <= -5:
+                return "🔻 融資大減"
+            elif pct > 0:
+                return "融資小增"
+            elif pct < 0:
+                return "融資小減"
+            return "融資持平"
+
+        merged["融資訊號"] = merged.apply(_margin_signal, axis=1)
+
+        def _chip_conflict(row):
+            """
+            籌碼矛盾偵測：融資（散戶槓桿）方向 vs 三大法人方向 是否衝突
+            這是判斷「換手還是誘多出貨」的核心線索，也是AI開盤前觀察要優先分析的對象
+            """
+            signal = row.get("融資訊號", "")
+            inst_total = row.get("三大合計", 0)
+            if signal == "🔺 融資大增" and inst_total < 0:
+                return "⚠️ 疑似誘多出貨（融資追價中，法人卻在賣）"
+            elif signal == "🔻 融資大減" and inst_total > 0:
+                return "💡 疑似法人低接（散戶停損認賠，法人卻在買）"
+            return ""
+
+        merged["籌碼矛盾"] = merged.apply(_chip_conflict, axis=1)
+    else:
+        merged["融資訊號"] = ""
+        merged["籌碼矛盾"] = ""
 
     def match_retail_sentiment(smart_df, retail_df):
         """自動比對股票名稱與散戶情緒主題，回傳 {股票代號: 散戶關注度} 字典"""
