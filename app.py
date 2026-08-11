@@ -1576,7 +1576,7 @@ elif page == "關鍵字審核":
 
 elif page == "持倉監控":
     st.title("💼 持倉監控")
-    st.caption("進出場訊號規則：進場嚴選評分/法人一致性高的標的；出場採「停損／停利／訊號轉弱」三重條件，先觸發先出")
+    st.caption("進出場訊號規則：進場嚴選評分/法人一致性高的標的；出場採「停損／停利／訊號轉弱／技術面提早轉弱」四重條件，先觸發先出")
 
     _client = get_client()
     _sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
@@ -1675,13 +1675,15 @@ elif page == "持倉監控":
         min_value=50, max_value=3000, value=int(ENTRY_MAX_PRICE), step=50,
     )
     st.caption(f"篩選條件：綜合評分 ≥ {ENTRY_MIN_SCORE}分 且 買超轉換率% ≥ {ENTRY_MIN_CONVERSION}% 且 股價 ≤ {price_limit}元，"
-               f"取評分最高前{MAX_POSITIONS}檔（因資金有限，嚴選不求多）")
+               f"取評分最高前{MAX_POSITIONS}檔（因資金有限，嚴選不求多）。"
+               f"「技術面提早轉強」欄位是額外參考資訊（KD/MACD醞釀或已黃金交叉），不是硬性篩選條件")
 
     candidates = get_entry_candidates(cross_df, MAX_POSITIONS, price_limit) if not cross_df.empty else pd.DataFrame()
     if candidates.empty:
         st.info("目前沒有符合進場條件的標的，或多方驗證名單尚無資料")
     else:
-        display_cols = ["排名", "股票代號", "股票名稱", "綜合評分", "法人訊號", "買超轉換率%", "收盤價", "漲跌幅%"]
+        display_cols = ["排名", "股票代號", "股票名稱", "綜合評分", "法人訊號", "買超轉換率%",
+                         "技術面提早轉強", "收盤價", "漲跌幅%"]
         st.dataframe(
             candidates[[c for c in display_cols if c in candidates.columns]],
             use_container_width=True, hide_index=True,
