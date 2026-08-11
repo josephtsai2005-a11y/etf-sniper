@@ -228,7 +228,76 @@ def analyze_news_impact(news_df, smart_df):
         log.debug(traceback.format_exc())
         return pd.DataFrame()
 
-def generate_investment_report(ss, trade_date, us_market_text=""):
+def generate_premarket_watch(cross_df: pd.DataFrame, us_market_text: str = "", trade_date: str = "") -> str:
+    """
+    產生「開盤前30分鐘觀察重點」段落
+    設計原則（重要）：這不是預測，是給隔天開盤時對照用的「條件式檢查清單」——
+    系統是前一晚批次產生報告，物理上不可能預知隔天盤中實際走勢，
+    所以內容格式必須是「如果...就要注意...」，不能用肯定語氣預告股價會怎麼走，
+    避免給使用者錯誤的確定感。
+
+    優先分析對象：「籌碼矛盾」欄位有標記的股票（融資與法人方向衝突，動態決定，
+    不是固定挑幾檔），這些才是真正需要提早判讀「換手還是誘多」的標的；
+    訊號單純一致的股票不需要額外解讀。
+    """
+    if cross_df is None or cross_df.empty:
+        return ""
+
+    conflict_col = "籌碼矛盾" if "籌碼矛盾" in cross_df.columns else None
+    conflicts = pd.DataFrame()
+    if conflict_col:
+        conflicts = cross_df[cross_df[conflict_col].astype(str).str.strip() != ""]
+
+    conflict_text = "（今日無明顯籌碼矛盾標的）"
+    if not conflicts.empty:
+        lines = []
+        for _, row in conflicts.head(8).iterrows():
+            code = row.get("股票代號", "")
+            name = row.get("股票名稱", "")
+            signal = row.get(conflict_col, "")
+            margin_note = row.get("融資訊號", "")
+            inst_signal = row.get("法人訊號", "")
+            lines.append(f"- {code} {name}：{signal}（融資：{margin_note}／法人：{inst_signal}）")
+        conflict_text = "\n".join(lines)
+
+    us_section = f"\n\n【美股隔夜表現參考】\n{us_market_text}" if us_market_text else "（無美股資料）"
+
+    prompt = f"""你是台股盤前分析師，要為明天開盤前30分鐘提供一份「觀察檢查清單」，
+給使用者開盤時對照當下實際狀況判讀，**不是預測明天股價會怎麼走**。
+
+嚴格規則：
+- 全部用「如果...則要注意...」這種條件式語氣，絕不能用肯定句預告股價方向
+- 你沒有明天的即時資料，只有今晚收盤後的籌碼與美股資訊，要誠實反映這個限制
+- 重點放在「籌碼矛盾」標的（融資與法人方向衝突的股票）——這些是真正需要開盤時多留意的，
+  不是隨便挑幾檔知名股
+
+今日籌碼矛盾標的（融資 vs 法人方向衝突，需要開盤驗證是換手還是誘多/低接）：
+{conflict_text}
+{us_section}
+
+請用以下格式產生內容（繁體中文）：
+
+### 🔔 明日開盤前30分鐘觀察重點
+
+**國際情勢／美股影響**：（1-2句，說明美股隔夜方向對台股開盤情緒的可能影響，用條件式語氣）
+
+**法人意圖推測**：（針對籌碼矛盾標的，各1句話推測法人可能在想什麼，例如「若開盤即賣壓湧現，可能代表法人趁散戶追高出貨」）
+
+**散戶因應策略**：（2-3點具體可執行的觀察建議，例如「開盤30分鐘內留意成交量是否放大，若價漲量縮需提高警覺」）
+
+**大盤情況提醒**：（1句，提醒需留意的大盤層級因素，如指數期貨走勢、匯率等，若無特別資料可從美股/籌碼矛盾程度推論一般性提醒）
+
+全部約200-350字，語氣專業但誠實，避免過度確定的預測語言。"""
+
+    result = call_claude(
+        prompt,
+        system="你是誠實嚴謹的台股盤前分析師，絕不用肯定語氣預測股價，只提供條件式觀察建議，明確反映資料的時效限制。",
+        max_tokens=800,
+    )
+    return result if result else ""
+
+
+def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.DataFrame = None):
     log.info("收集所有分頁資料...")
     data = collect_all_data(ss)
     data_text = format_data_for_ai(data, trade_date)
@@ -306,7 +375,24 @@ def generate_investment_report(ss, trade_date, us_market_text=""):
     trend_df = data.get("題材趨勢", pd.DataFrame())
     related = generate_related_stocks(smart_df, trend_df)
 
-    return main_report + "\n\n" + related if related else main_report
+    # 開盤前30分鐘觀察重點（籌碼矛盾標的優先分析，條件式檢查清單，非預測）
+    premarket_section = ""
+    try:
+        log.info("呼叫 Claude API 產生開盤前觀察重點...")
+        watch_df = cross_df if cross_df is not None and not cross_df.empty else data.get("多方驗證名單", pd.DataFrame())
+        premarket_text = generate_premarket_watch(watch_df, us_market_text, trade_date)
+        if premarket_text:
+            premarket_section = "\n\n" + premarket_text
+    except Exception as e:
+        log.warning(f"開盤前觀察重點生成失敗（不影響主報告）: {e}")
+
+    final_report = main_report
+    if related:
+        final_report += "\n\n" + related
+    if premarket_section:
+        final_report += premarket_section
+
+    return final_report
 
 def write_ai_report_to_sheets(ss, report, trade_date):
     import time
