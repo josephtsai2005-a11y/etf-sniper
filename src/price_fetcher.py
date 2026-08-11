@@ -233,6 +233,91 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
             except Exception:
                 pass
 
+        # ── 布林通道（20期，2倍標準差）────────────────────────
+        # 中軌沿用MA20；上下軌反映近期波動範圍，可看「是否觸及極端」跟「通道寬窄變化（噴出前兆）」
+        bb_upper, bb_lower, bb_position, bb_signal = None, None, "", ""
+        if len(closes) >= 20:
+            recent20 = closes[-20:]
+            std20 = pd.Series(recent20).std()
+            bb_mid = ma20
+            bb_upper = round(bb_mid + 2 * std20, 2)
+            bb_lower = round(bb_mid - 2 * std20, 2)
+            bb_width = round((bb_upper - bb_lower) / bb_mid * 100, 2) if bb_mid else 0  # 通道寬度%，越窄代表波動壓縮
+
+            if latest_close >= bb_upper:
+                bb_position = "🔥 觸及上軌"
+            elif latest_close <= bb_lower:
+                bb_position = "❄️ 觸及下軌"
+            elif latest_close >= bb_mid:
+                bb_position = "中軌之上"
+            else:
+                bb_position = "中軌之下"
+
+            # 通道壓縮偵測：近5天通道寬度是否持續收斂，是「即將噴出」的經典早期訊號（不分方向）
+            if len(closes) >= 25:
+                widths = []
+                for i in range(5):
+                    idx_end = len(closes) - i
+                    window = closes[idx_end - 20:idx_end]
+                    w_mid = sum(window) / 20
+                    w_std = pd.Series(window).std()
+                    w_width = (w_mid + 2 * w_std - (w_mid - 2 * w_std)) / w_mid * 100 if w_mid else 0
+                    widths.append(w_width)
+                widths = widths[::-1]  # 轉成時間正序
+                if widths[-1] < widths[-3] < widths[-5]:
+                    bb_signal = "🌊 通道壓縮中（波動率降低，可能醞釀噴出，方向未定）"
+
+        # ── ATR 真實波動幅度（14期）────────────────────────────
+        # 反映該股「正常波動的絕對金額」，可用來動態設計停損（波動大的股票給寬一點停損）
+        atr_val, atr_pct = None, None
+        if high_col and low_col and len(closes) >= 15:
+            highs_full = df[high_col].tolist()
+            lows_full = df[low_col].tolist()
+            trs = []
+            for i in range(1, len(closes)):
+                tr = max(
+                    highs_full[i] - lows_full[i],
+                    abs(highs_full[i] - closes[i - 1]),
+                    abs(lows_full[i] - closes[i - 1]),
+                )
+                trs.append(tr)
+            if len(trs) >= 14:
+                atr_val = round(sum(trs[-14:]) / 14, 2)
+                atr_pct = round(atr_val / latest_close * 100, 2) if latest_close else None
+
+        # ── 技術面共振燈號：把均線/MACD/KD三個不同週期指標的方向合成一個燈號 ──
+        # 三個都同意才是「共振」；方向不一致時明確標示「分歧」，不強行合併成單一買賣訊號
+        tech_score = 0
+        if ma_alignment == "多頭排列":
+            tech_score += 1
+        elif ma_alignment == "空頭排列":
+            tech_score -= 1
+
+        macd_bull_set = {"🟢 黃金交叉", "柱狀翻紅", "🌱 空方動能趨緩"}
+        macd_bear_set = {"🔴 死亡交叉", "柱狀翻綠", "🍂 多方動能趨緩"}
+        if macd_cross in macd_bull_set:
+            tech_score += 1
+        elif macd_cross in macd_bear_set:
+            tech_score -= 1
+
+        kd_bull_set = {"🟢 黃金交叉", "🌱 醞釀黃金交叉", "K>D"}
+        kd_bear_set = {"🔴 死亡交叉", "🍂 醞釀死亡交叉", "K<D"}
+        if kd_signal in kd_bull_set:
+            tech_score += 1
+        elif kd_signal in kd_bear_set:
+            tech_score -= 1
+
+        if tech_score == 3:
+            resonance_signal = "🟢🟢 多頭共振"
+        elif tech_score >= 1:
+            resonance_signal = "🟢 偏多"
+        elif tech_score == 0:
+            resonance_signal = "⚠️ 訊號分歧"
+        elif tech_score >= -2:
+            resonance_signal = "🔴 偏空"
+        else:
+            resonance_signal = "🔴🔴 空頭共振"
+
         change = float(df[change_col].iloc[-1]) if change_col else 0
         prev = latest_close - change
         change_pct = round(change / prev * 100, 2) if prev and prev != 0 else 0
@@ -260,6 +345,13 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
             "MACD柱狀": macd_hist,
             "MACD訊號": macd_cross,
             "背離警示": divergence_signal,
+            "布林上軌": bb_upper,
+            "布林下軌": bb_lower,
+            "布林位置": bb_position,
+            "布林壓縮": bb_signal,
+            "ATR":      atr_val,
+            "ATR%":     atr_pct,
+            "技術面共振": resonance_signal,
             "成交量":   volume,
             "成交金額": amount,
         }
@@ -318,7 +410,9 @@ def enrich_with_prices(df: pd.DataFrame, top_n: Optional[int] = None) -> pd.Data
     # 保留原本名稱欄，合併股價（不合入名稱）
     price_cols = ["股票代號", "收盤價", "漲跌", "漲跌幅%", "MA5", "MA10", "MA20", "站上MA20",
               "均線排列", "連續站上月線天數", "量能比", "K值", "D值", "KD訊號",
-              "DIF", "MACD", "MACD柱狀", "MACD訊號", "背離警示", "成交量", "成交金額"]
+              "DIF", "MACD", "MACD柱狀", "MACD訊號", "背離警示",
+              "布林上軌", "布林下軌", "布林位置", "布林壓縮", "ATR", "ATR%", "技術面共振",
+              "成交量", "成交金額"]
     price_df = price_df[[c for c in price_cols if c in price_df.columns]]
 
     merged = df.merge(price_df, on="股票代號", how="left")
