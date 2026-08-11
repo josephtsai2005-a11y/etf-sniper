@@ -695,8 +695,23 @@ def main():
             us_summary = get_market_sentiment_summary(us_data)
             log.info(f"[AI] 美股摘要：{us_summary}")
 
+            # 大盤法人氛圍需要的補充資料：全市場融資融券彙總 + 0050基準價變化
+            market_margin = {}
+            benchmark_change = None
+            try:
+                from margin_fetcher import fetch_market_margin_summary
+                market_margin = fetch_market_margin_summary(TRADE_DATE)
+                benchmark_result = get_stock_price_single("0050")
+                if benchmark_result:
+                    benchmark_change = benchmark_result.get("漲跌幅%")
+            except Exception as e:
+                log.warning(f"大盤法人氛圍補充資料抓取失敗（不影響主報告）: {e}")
+
             log.info("[AI] 產生投資報告...")
-            report = generate_investment_report(ss2, TRADE_DATE, us_text)
+            report = generate_investment_report(
+                ss2, TRADE_DATE, us_text,
+                market_margin=market_margin, benchmark_price_change=benchmark_change,
+            )
 
             if report:
                 _t.sleep(5)

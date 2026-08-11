@@ -228,6 +228,71 @@ def analyze_news_impact(news_df, smart_df):
         log.debug(traceback.format_exc())
         return pd.DataFrame()
 
+def generate_market_sentiment(inst_df: pd.DataFrame, market_margin: dict,
+                                benchmark_price_change: float = None,
+                                us_market_text: str = "", trade_date: str = "") -> str:
+    """
+    產生「大盤法人氛圍」段落——跟generate_premarket_watch是互補的兩個層級：
+      - generate_premarket_watch：個股層級，只看「籌碼矛盾」的少數標的
+      - generate_market_sentiment：大盤層級，判斷整體法人是避險還是布局心態
+
+    資料範圍誠實聲明：inst_df（三大法人加總）只涵蓋「本系統追蹤的股票池」（約66-70檔），
+    不是TWSE全市場三大法人統計（該端點尚未經測試驗證，暫不使用，避免引入未驗證資料）；
+    market_margin（融資融券）才是真正的全市場數據
+    """
+    inst_summary_text = "（無追蹤股票池法人資料）"
+    if inst_df is not None and not inst_df.empty and "三大合計" in inst_df.columns:
+        total_col = pd.to_numeric(inst_df["三大合計"], errors="coerce")
+        net_total = total_col.sum()
+        buy_count = (total_col > 0).sum()
+        sell_count = (total_col < 0).sum()
+        inst_summary_text = (
+            f"追蹤股票池（{len(inst_df)}檔）三大法人合計淨{'買超' if net_total >= 0 else '賣超'}"
+            f"約{abs(net_total):,.0f}張；{buy_count}檔買超、{sell_count}檔賣超"
+        )
+
+    margin_text = "（無全市場融資融券資料）"
+    if market_margin:
+        m_chg = market_margin.get("融資增減")
+        s_chg = market_margin.get("融券增減")
+        if m_chg is not None:
+            margin_text = f"全市場融資餘額今日{'增加' if m_chg >= 0 else '減少'}約{abs(m_chg):,.0f}張"
+            if s_chg is not None:
+                margin_text += f"，融券餘額{'增加' if s_chg >= 0 else '減少'}約{abs(s_chg):,.0f}張"
+
+    benchmark_text = ""
+    if benchmark_price_change is not None:
+        benchmark_text = f"，大盤指標ETF(0050)今日{'上漲' if benchmark_price_change >= 0 else '下跌'}{abs(benchmark_price_change):.2f}%"
+
+    us_section = f"\n【美股隔夜表現】\n{us_market_text}" if us_market_text else ""
+
+    prompt = f"""你是台股總經分析師，請根據以下資料，判斷「今天整體三大法人是避險心態還是布局心態」。
+
+【追蹤股票池法人動向】
+{inst_summary_text}
+
+【全市場散戶槓桿（融資融券）】
+{margin_text}{benchmark_text}
+{us_section}
+
+請注意：法人資料僅涵蓋本系統追蹤的股票池（非TWSE全市場統計），請在分析中誠實反映這個範圍限制，
+不要把追蹤股票池的結論當成「全市場」的定論來講。
+
+請用約100-150字，繁體中文，判斷法人今天整體偏向：
+1. 避險心態（法人賣超、融資減少、可能有國際情勢干擾）
+2. 布局心態（法人買超或分歧但融資理性增加、屬正常換手）
+3. 混合訊號（無法明確判斷，需觀察後續）
+
+用「### 🧭 大盤法人氛圍」當標題，內容誠實、避免過度確定的語氣。"""
+
+    result = call_claude(
+        prompt,
+        system="你是誠實的台股總經分析師，會清楚標註資料範圍限制，不誇大追蹤股票池資料代表全市場結論。",
+        max_tokens=500,
+    )
+    return result if result else ""
+
+
 def generate_premarket_watch(cross_df: pd.DataFrame, us_market_text: str = "", trade_date: str = "") -> str:
     """
     產生「開盤前30分鐘觀察重點」段落
@@ -297,7 +362,8 @@ def generate_premarket_watch(cross_df: pd.DataFrame, us_market_text: str = "", t
     return result if result else ""
 
 
-def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.DataFrame = None):
+def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.DataFrame = None,
+                                 market_margin: dict = None, benchmark_price_change: float = None):
     log.info("收集所有分頁資料...")
     data = collect_all_data(ss)
     data_text = format_data_for_ai(data, trade_date)
@@ -386,11 +452,26 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
     except Exception as e:
         log.warning(f"開盤前觀察重點生成失敗（不影響主報告）: {e}")
 
+    # 大盤法人氛圍（大盤層級，跟上面的開盤前觀察重點是互補的兩個顆粒度）
+    market_sentiment_section = ""
+    try:
+        log.info("呼叫 Claude API 產生大盤法人氛圍...")
+        watch_df2 = cross_df if cross_df is not None and not cross_df.empty else data.get("多方驗證名單", pd.DataFrame())
+        sentiment_text = generate_market_sentiment(
+            watch_df2, market_margin or {}, benchmark_price_change, us_market_text, trade_date
+        )
+        if sentiment_text:
+            market_sentiment_section = "\n\n" + sentiment_text
+    except Exception as e:
+        log.warning(f"大盤法人氛圍生成失敗（不影響主報告）: {e}")
+
     final_report = main_report
     if related:
         final_report += "\n\n" + related
     if premarket_section:
         final_report += premarket_section
+    if market_sentiment_section:
+        final_report += market_sentiment_section
 
     return final_report
 

@@ -138,6 +138,71 @@ def fetch_margin_all(trade_date: Optional[str] = None, retries: int = 2) -> pd.D
         return pd.DataFrame()
 
 
+def fetch_market_margin_summary(trade_date: Optional[str] = None, retries: int = 2) -> dict:
+    """
+    抓取「全市場」融資融券彙總（不分個股），來自MI_MARGN的tables[0]
+    用於判斷散戶整體槓桿情緒（大盤層級，跟fetch_margin_all的個股層級是互補的兩種顆粒度）
+    回傳：{融資買進, 融資賣出, 融資前日餘額, 融資今日餘額, 融資增減,
+           融券買進, 融券賣出, 融券前日餘額, 融券今日餘額, 融券增減}
+    """
+    if not trade_date:
+        trade_date = get_trade_date()
+
+    url = "https://www.twse.com.tw/exchangeReport/MI_MARGN"
+    params = {"response": "json", "date": trade_date, "selectType": "ALL"}
+
+    for attempt in range(retries + 1):
+        try:
+            resp = SESSION.get(url, params=params, timeout=15)
+            data = resp.json()
+            if data.get("stat") != "OK" or not data.get("tables"):
+                return {}
+            tables = data["tables"]
+            break
+        except Exception as e:
+            if attempt < retries:
+                time.sleep(2 * (attempt + 1))
+                continue
+            log.warning(f"全市場融資融券彙總抓取失敗: {e}")
+            return {}
+
+    try:
+        summary_table = tables[0]  # tables[0]固定是大盤總計（信用交易統計）
+        rows = summary_table.get("data", [])
+
+        def _num(v):
+            try:
+                return float(str(v).replace(",", "").strip())
+            except (ValueError, TypeError):
+                return None
+
+        result = {}
+        for r in rows:
+            if len(r) < 6:
+                continue
+            item = str(r[0])
+            buy, sell, prev, today = _num(r[1]), _num(r[2]), _num(r[4]), _num(r[5])
+            if "融資" in item and "金額" not in item:
+                result["融資買進"] = buy
+                result["融資賣出"] = sell
+                result["融資前日餘額"] = prev
+                result["融資今日餘額"] = today
+                result["融資增減"] = (today - prev) if today is not None and prev is not None else None
+            elif "融券" in item:
+                result["融券買進"] = buy
+                result["融券賣出"] = sell
+                result["融券前日餘額"] = prev
+                result["融券今日餘額"] = today
+                result["融券增減"] = (today - prev) if today is not None and prev is not None else None
+
+        result["抓取日期"] = trade_date
+        return result
+
+    except Exception as e:
+        log.warning(f"全市場融資融券彙總解析失敗: {e}")
+        return {}
+
+
 def fetch_margin_for_stocks(stock_codes: List[str], trade_date: Optional[str] = None) -> pd.DataFrame:
     """
     主入口：抓全市場融資融券後，篩選出你追蹤的股票清單
