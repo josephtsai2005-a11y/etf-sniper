@@ -675,11 +675,19 @@ elif page == "題材總覽":
     st.title("🗂️ 母題材總覽")
     st.caption("依已核准母題材彙整，把散落在各股票底下、語義重疊的細關鍵字收斂到題材層級")
 
-    master_df = build_master_theme_overview(ss)
-    if master_df.empty:
+    active_theme_df, dormant_theme_df = build_master_theme_overview(ss)
+    if active_theme_df.empty and dormant_theme_df.empty:
         st.info("尚無已核准的母題材對應資料（需先在「母題材審核」核准新題材、在「關鍵字審核」核准關鍵字，且該關鍵字已配對母題材）")
     else:
-        st.dataframe(master_df, use_container_width=True, hide_index=True)
+        if not active_theme_df.empty:
+            st.dataframe(active_theme_df, use_container_width=True, hide_index=True)
+        else:
+            st.caption("目前沒有活躍題材（可能全部題材都超過30天無新聞熱度）")
+
+        if not dormant_theme_df.empty:
+            with st.expander(f"😴 已沉寂題材（連續30天無新聞熱度，{len(dormant_theme_df)}個）"):
+                st.caption("熱度回升時會自動移回上方主要清單，不需要手動處理")
+                st.dataframe(dormant_theme_df, use_container_width=True, hide_index=True)
 
     st.markdown("---")
 
@@ -928,12 +936,27 @@ elif page == "每日AI總結":
                 except Exception as e:
                     st.error(f"第{i}段渲染失敗: {e}")
 
+    def _fetch_ai_report_with_retry(retries: int = 3):
+        last_err = None
+        for attempt in range(retries + 1):
+            try:
+                _client = get_client()
+                _sid = st.secrets.get("SPREADSHEET_ID","") or os.environ.get("SPREADSHEET_ID","")
+                _ss = _client.open_by_key(_sid)
+                _ws = _ss.worksheet("每日AI總結")
+                return _ws.get_all_values()
+            except gspread.exceptions.APIError as e:
+                last_err = e
+                is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "Quota exceeded" in str(e)
+                if is_rate_limit and attempt < retries:
+                    import time as _time2
+                    _time2.sleep(2 * (attempt + 1))
+                    continue
+                raise
+        raise last_err
+
     try:
-        _client = get_client()
-        _sid = st.secrets.get("SPREADSHEET_ID","") or os.environ.get("SPREADSHEET_ID","")
-        _ss = _client.open_by_key(_sid)
-        _ws = _ss.worksheet("每日AI總結")
-        _vals = _ws.get_all_values()
+        _vals = _fetch_ai_report_with_retry()
         if len(_vals) < 2:
             st.warning("尚無 AI 報告（每日 23:00 後更新）")
         else:
