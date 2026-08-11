@@ -158,29 +158,35 @@ def write_topic_overview_to_sheets(ss, df: pd.DataFrame, ai_insight: str, trade_
     log.info(f"題材總覽寫入完成：{len(df)} 個題材")
 
 
-def build_master_theme_overview(ss) -> pd.DataFrame:
+def build_master_theme_overview(ss):
     """
     母題材總覽：直接依「已核准母題材」彙整，不依賴新聞熱詞文字剛好對上母題材名稱
     這是解決「446個細顆粒度關鍵字看不清楚」問題的核心呈現——
     把散落在58檔股票底下、語義重疊的細關鍵字，收斂到20-30個母題材層級
 
-    回傳欄位：母題材、涵蓋股票數、相關股票、關鍵字數
+    第二階段新增：區分「活躍」與「已沉寂」（連續30天無新聞熱度）題材，
+    沉寂題材移到次要顯示區塊，不刪除資料，熱度回升會自動移回活躍區塊
+
+    回傳：(活躍題材df, 沉寂題材df)，欄位皆為：母題材、涵蓋股票數、相關股票、關鍵字數
     """
     try:
-        from theme_manager import get_keyword_theme_map
+        from theme_manager import get_keyword_theme_map, get_dormant_themes
         from keyword_generator import _load_keyword_queue
     except Exception as e:
         log.warning(f"母題材總覽建立失敗: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
     theme_map = get_keyword_theme_map(ss)
     if not theme_map:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
+
+    dormant_themes = set(get_dormant_themes(ss))
 
     queue_df = _load_keyword_queue(ss)
     approved_kws = queue_df[queue_df["狀態"] == "已核准"] if not queue_df.empty else pd.DataFrame()
 
-    records = []
+    active_records = []
+    dormant_records = []
     for theme, stocks in theme_map.items():
         kw_count = 0
         if not approved_kws.empty and "母題材" in approved_kws.columns:
@@ -190,14 +196,24 @@ def build_master_theme_overview(ss) -> pd.DataFrame:
         if len(stocks) > 6:
             stock_display += f" ...等{len(stocks)}檔"
 
-        records.append({
+        record = {
             "母題材": theme,
             "涵蓋股票數": len(stocks),
             "相關股票": stock_display,
             "關鍵字數": kw_count,
-        })
+        }
 
-    df = pd.DataFrame(records)
-    if not df.empty:
-        df = df.sort_values("涵蓋股票數", ascending=False).reset_index(drop=True)
-    return df
+        if theme in dormant_themes:
+            dormant_records.append(record)
+        else:
+            active_records.append(record)
+
+    active_df = pd.DataFrame(active_records)
+    if not active_df.empty:
+        active_df = active_df.sort_values("涵蓋股票數", ascending=False).reset_index(drop=True)
+
+    dormant_df = pd.DataFrame(dormant_records)
+    if not dormant_df.empty:
+        dormant_df = dormant_df.sort_values("涵蓋股票數", ascending=False).reset_index(drop=True)
+
+    return active_df, dormant_df
