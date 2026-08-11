@@ -1586,7 +1586,7 @@ elif page == "持倉監控":
         add_position, close_position, evaluate_open_positions, get_entry_candidates,
         _load_positions, STATUS_OPEN, STATUS_CLOSED,
         MAX_POSITIONS, ENTRY_MIN_SCORE, ENTRY_MIN_CONVERSION, ENTRY_MAX_PRICE,
-        DEFAULT_STOP_LOSS_PCT, DEFAULT_TAKE_PROFIT_PCT,
+        DEFAULT_STOP_LOSS_PCT, DEFAULT_TAKE_PROFIT_PCT, suggest_stop_loss_from_atr,
     )
 
     cross_df = load_sheet("多方驗證名單")
@@ -1631,12 +1631,30 @@ elif page == "持倉監控":
     st.subheader("② 新增持倉")
     st.caption("實際買進後，在這裡登記進場資訊，系統之後每天會自動幫你檢查出場條件")
 
+    # 股票代號放表單外，輸入後可即時查ATR建議停損（表單內的輸入要送出才會更新，先在外面查比較即時）
+    lookup_code = st.text_input("股票代號（輸入後查詢ATR建議停損）", key="lookup_code")
+    suggested_stop = DEFAULT_STOP_LOSS_PCT
+    atr_note = ""
+    if lookup_code:
+        match_lookup = cross_df[cross_df["股票代號"].astype(str) == lookup_code] if not cross_df.empty else pd.DataFrame()
+        if not match_lookup.empty and "ATR%" in match_lookup.columns:
+            atr_pct_val = pd.to_numeric(match_lookup.iloc[0].get("ATR%"), errors="coerce")
+            if pd.notna(atr_pct_val):
+                suggested_stop = suggest_stop_loss_from_atr(atr_pct_val)
+                atr_note = f"該股ATR%={atr_pct_val:.2f}%，依波動幅度建議停損約 **{suggested_stop}%**（可在下方自行調整）"
+        if atr_note:
+            st.info(atr_note)
+        elif not match_lookup.empty:
+            st.caption("找到該股資料，但尚無ATR%（可能是資料還沒更新到含技術指標的版本），先用預設停損")
+        else:
+            st.caption("多方驗證名單目前查無此股票代號，將使用預設停損，仍可正常新增持倉")
+
     with st.form("add_position_form"):
         col1, col2 = st.columns(2)
         with col1:
-            new_code = st.text_input("股票代號")
+            new_code = st.text_input("股票代號（正式登記，需與上方一致）", value=lookup_code)
             new_price = st.number_input("進場價", min_value=0.0, step=0.1)
-            new_stop_loss = st.slider("停損%（觸及即建議出場）", 5.0, 20.0, DEFAULT_STOP_LOSS_PCT, 0.5)
+            new_stop_loss = st.slider("停損%（觸及即建議出場）", 5.0, 25.0, float(suggested_stop), 0.5)
         with col2:
             new_date = st.date_input("進場日期", value=datetime.now())
             new_take_profit = st.slider("停利%（觸及即建議出場）", 10.0, 50.0, DEFAULT_TAKE_PROFIT_PCT, 1.0)

@@ -14,7 +14,8 @@ position_manager.py
   - 候選過多時，取評分最高的前 MAX_POSITIONS 檔
 
 出場規則（四重條件）：
-  1. 停損：報酬率 <= -停損%（每次進場可自訂，預設 DEFAULT_STOP_LOSS_PCT）
+  1. 停損：報酬率 <= -停損%（每次進場可自訂，預設 DEFAULT_STOP_LOSS_PCT，
+              也可依 ATR 動態計算建議值，見 suggest_stop_loss_from_atr()）
   2. 停利：報酬率 >= +停利%（每次進場可自訂，預設 DEFAULT_TAKE_PROFIT_PCT）
   3. 訊號轉弱：評分較進場時下降超過 SIGNAL_WEAKEN_SCORE_DROP，
               或法人由買轉賣（三大合計轉負），
@@ -51,6 +52,24 @@ SIGNAL_WEAKEN_CONVERSION_FLOOR = 40.0  # 買超轉換率%跌破此值 → 判定
 # 技術面提早轉弱訊號（來自price_fetcher.py的KD訊號/MACD訊號/背離警示欄位）
 TECH_WEAKEN_KD_SIGNALS = {"🔴 死亡交叉", "🍂 醞釀死亡交叉"}
 TECH_WEAKEN_MACD_SIGNALS = {"🔴 死亡交叉", "🍂 多方動能趨緩"}
+
+# ATR動態停損：停損% = ATR% × 倍數，波動大的股票給寬一點停損、波動小的給緊一點，
+# 比固定10%一刀切更合理；夾在[ATR_STOP_MIN, ATR_STOP_MAX]之間避免極端值
+ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MIN = 5.0
+ATR_STOP_MAX = 25.0
+
+
+def suggest_stop_loss_from_atr(atr_pct) -> float:
+    """
+    依ATR%計算建議停損百分比：ATR% × 倍數，夾在合理範圍內
+    atr_pct: 該股的ATR佔股價比例（來自price_fetcher.py的「ATR%」欄位）
+    找不到ATR資料時回傳預設值 DEFAULT_STOP_LOSS_PCT
+    """
+    if atr_pct is None or pd.isna(atr_pct) or atr_pct <= 0:
+        return DEFAULT_STOP_LOSS_PCT
+    suggested = float(atr_pct) * ATR_STOP_MULTIPLIER
+    return round(min(max(suggested, ATR_STOP_MIN), ATR_STOP_MAX), 1)
 
 STATUS_OPEN = "持有中"
 STATUS_CLOSED = "已出場"
