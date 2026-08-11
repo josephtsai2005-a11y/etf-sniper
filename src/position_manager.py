@@ -13,12 +13,14 @@ position_manager.py
   - 買超轉換率% >= ENTRY_MIN_CONVERSION（法人方向要夠一致）
   - 候選過多時，取評分最高的前 MAX_POSITIONS 檔
 
-出場規則（三重條件）：
+出場規則（四重條件）：
   1. 停損：報酬率 <= -停損%（每次進場可自訂，預設 DEFAULT_STOP_LOSS_PCT）
   2. 停利：報酬率 >= +停利%（每次進場可自訂，預設 DEFAULT_TAKE_PROFIT_PCT）
   3. 訊號轉弱：評分較進場時下降超過 SIGNAL_WEAKEN_SCORE_DROP，
               或法人由買轉賣（三大合計轉負），
               或買超轉換率%跌破 SIGNAL_WEAKEN_CONVERSION_FLOOR
+  4. 技術面提早轉弱：KD/MACD醞釀死亡交叉、或出現頂部背離、或KD/MACD已經死亡交叉
+              （這組刻意設計成「提早」偵測，不等實際死叉發生才動作，見price_fetcher.py）
 """
 import logging
 import pandas as pd
@@ -45,6 +47,10 @@ DEFAULT_STOP_LOSS_PCT = 10.0     # 預設停損 -10%（使用者可在新增持�
 DEFAULT_TAKE_PROFIT_PCT = 25.0   # 預設停利 +25%（未來可用回測「T20內平均最大報酬%」校正）
 SIGNAL_WEAKEN_SCORE_DROP = 2.0   # 評分較進場時下降超過此值 → 判定訊號轉弱
 SIGNAL_WEAKEN_CONVERSION_FLOOR = 40.0  # 買超轉換率%跌破此值 → 判定法人開始分歧
+
+# 技術面提早轉弱訊號（來自price_fetcher.py的KD訊號/MACD訊號/背離警示欄位）
+TECH_WEAKEN_KD_SIGNALS = {"🔴 死亡交叉", "🍂 醞釀死亡交叉"}
+TECH_WEAKEN_MACD_SIGNALS = {"🔴 死亡交叉", "🍂 多方動能趨緩"}
 
 STATUS_OPEN = "持有中"
 STATUS_CLOSED = "已出場"
@@ -205,6 +211,23 @@ def evaluate_open_positions(ss, latest_cross_df: pd.DataFrame) -> pd.DataFrame:
             result["建議出場"] = True
             result["觸發原因"].append(f"🟡 法人方向分歧（買超轉換率{current_conversion}% < {SIGNAL_WEAKEN_CONVERSION_FLOOR}%）")
 
+        # ④ 技術面提早轉弱：KD/MACD醞釀或已死亡交叉、頂部背離（不等確認訊號完全成形，提早示警）
+        current_kd_signal = str(latest.get("KD訊號", "")) if latest is not None else ""
+        current_macd_signal = str(latest.get("MACD訊號", "")) if latest is not None else ""
+        current_divergence = str(latest.get("背離警示", "")) if latest is not None else ""
+
+        if current_kd_signal in TECH_WEAKEN_KD_SIGNALS:
+            result["建議出場"] = True
+            result["觸發原因"].append(f"🟠 技術面轉弱（KD：{current_kd_signal}）")
+
+        if current_macd_signal in TECH_WEAKEN_MACD_SIGNALS:
+            result["建議出場"] = True
+            result["觸發原因"].append(f"🟠 技術面轉弱（MACD：{current_macd_signal}）")
+
+        if current_divergence:
+            result["建議出場"] = True
+            result["觸發原因"].append(f"🟠 {current_divergence}")
+
         results.append(result)
 
         # 更新最後檢查日期
@@ -220,6 +243,9 @@ def get_entry_candidates(latest_cross_df: pd.DataFrame, max_positions: int = MAX
     依進場規則篩選候選標的：綜合評分>=門檻 且 買超轉換率%>=門檻 且 股價<=上限，取評分最高的前N檔
     latest_cross_df: 最新的多方驗證名單
     max_price: 股價上限（資金有限時可調整，例如零股操作偏好1000元以下標的）
+
+    另外標記「技術面提早轉強」（KD醞釀/已黃金交叉 或 MACD空方動能趨緩/已黃金交叉），
+    這只是提供給你參考的加分資訊，不是硬性篩選條件（避免技術面資料缺失時，該股就整檔被排除）
     """
     if latest_cross_df.empty:
         return pd.DataFrame()
@@ -237,6 +263,20 @@ def get_entry_candidates(latest_cross_df: pd.DataFrame, max_positions: int = MAX
 
     if candidates.empty:
         return pd.DataFrame()
+
+    tech_strong_kd = {"🟢 黃金交叉", "🌱 醞釀黃金交叉"}
+    tech_strong_macd = {"🟢 黃金交叉", "🌱 空方動能趨緩"}
+
+    def _tech_note(row):
+        notes = []
+        if str(row.get("KD訊號", "")) in tech_strong_kd:
+            notes.append(f"KD:{row.get('KD訊號')}")
+        if str(row.get("MACD訊號", "")) in tech_strong_macd:
+            notes.append(f"MACD:{row.get('MACD訊號')}")
+        return "、".join(notes)
+
+    if "KD訊號" in candidates.columns or "MACD訊號" in candidates.columns:
+        candidates["技術面提早轉強"] = candidates.apply(_tech_note, axis=1)
 
     candidates = candidates.sort_values("綜合評分", ascending=False).head(max_positions)
     return candidates
