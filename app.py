@@ -227,6 +227,8 @@ if page == "多方驗證名單":
 
     multi_df = load_sheet(SHEET_MULTI)
 
+    st.write("🔧除錯：實際欄位名稱＝", list(multi_df.columns))  # 除錯用，確認完問題後記得刪掉
+
     if multi_df.empty:
         st.warning("尚無多方驗證資料（需等今日 16:30 後三大法人資料入庫）")
         st.info("💡 系統每日 15:30 自動執行，16:30 後法人資料加入，產出完整驗證名單")
