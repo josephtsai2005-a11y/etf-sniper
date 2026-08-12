@@ -550,11 +550,11 @@ def main():
 
     # ── 階段五：新聞熱度收集與題材分析 ──────────────────────────
     # inst 模式跳過新聞，直接跑法人
-    if RUN_MODE in ("inst", "core"):
-        log.info(f"RUN_MODE={RUN_MODE}，跳過新聞階段，直接跑法人")
+    if RUN_MODE in ("inst", "core", "ai"):
+        log.info(f"RUN_MODE={RUN_MODE}，跳過新聞階段（ai模式讀取21:00 news job已寫入的資料，不重複抓取）")
     else:
         log.info("[5/5] 收集財經新聞 + 題材生命週期分析...")
-    if RUN_MODE not in ("inst", "core"):
+    if RUN_MODE not in ("inst", "core", "ai"):
       try:
           # 抓取最新新聞
           news_df = fetch_all_news(hours_back=26)
@@ -646,7 +646,7 @@ def main():
       log.info("[5.5] 抓取 Google Trends 散戶情緒...")
       try:
           try:
-              extra_trend_keywords = get_dynamic_trend_keywords(ss2, max_extra=8)
+              extra_trend_keywords = get_dynamic_trend_keywords(ss2, max_extra=3)
               log.info(f"動態個股關鍵字：本次追加 {len(extra_trend_keywords)} 個（{list(extra_trend_keywords.keys())}）")
           except Exception as e:
               log.warning(f"動態關鍵字取得失敗，僅使用固定10個大盤主題: {e}")
@@ -677,7 +677,7 @@ def main():
           log.info("===== 全部完成 =====")
           return
     else:
-        log.info(f"RUN_MODE={RUN_MODE}，跳過新聞/Trends，直接執行法人")
+        log.info(f"RUN_MODE={RUN_MODE}，跳過新聞/Trends（ai模式不重複抓取，直接產生AI報告）")
 
 
     # ── AI 模式：整合所有資料 + 美股 → 產生投資報告 ─────────────
