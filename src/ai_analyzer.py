@@ -93,6 +93,49 @@ def format_data_for_ai(data, trade_date):
     return f"交易日：{trade_date}\n\n" + "\n\n".join(sections)
 
 
+def build_affordable_picks_section(cross_df: pd.DataFrame, max_price: float = 1000.0, top_n: int = 8) -> str:
+    """
+    產生「1000元以下優選股清單」段落——純資料篩選，不呼叫AI，零額外成本
+    來源：既有ETF持股（多方驗證名單），已經有完整ETF共識/法人/技術面驗證，
+    只是重新用「股價上限」篩選+排序，讓資金有限的散戶也能參考
+
+    跟 generate_related_stocks（產業輪動受惠股）的差異：
+      - 這裡的股票「有」ETF實際持股驗證（比較可靠，但受限於現有追蹤ETF覆蓋範圍）
+      - 產業輪動受惠股是AI推論的「延伸」名單，沒有ETF驗證（範圍更廣，但可靠度較低）
+      - 兩者互補，各自標明資料來源與可靠度差異，避免使用者混淆
+    """
+    if cross_df is None or cross_df.empty or "收盤價" not in cross_df.columns:
+        return ""
+
+    df = cross_df.copy()
+    df["收盤價"] = pd.to_numeric(df["收盤價"], errors="coerce")
+    df["綜合評分"] = pd.to_numeric(df.get("綜合評分"), errors="coerce")
+
+    affordable = df[(df["收盤價"] <= max_price) & (df["收盤價"] > 0)].copy()
+    if affordable.empty:
+        return f"### 💰 {max_price:.0f}元以下優選股清單（ETF實際持股驗證）\n\n（今日追蹤股票池中無{max_price:.0f}元以下標的）"
+
+    affordable = affordable.sort_values("綜合評分", ascending=False).head(top_n)
+
+    lines = [
+        f"### 💰 {max_price:.0f}元以下優選股清單（ETF實際持股驗證，非AI推論）",
+        "",
+        "| 股票代號 | 股票名稱 | 收盤價 | 綜合評分 | 持有ETF數 | 法人訊號 | 技術面共振 | 融資訊號 |",
+        "|---------|---------|--------|---------|----------|---------|-----------|---------|",
+    ]
+    for _, row in affordable.iterrows():
+        lines.append(
+            f"| {row.get('股票代號','')} | {row.get('股票名稱','')} | {row.get('收盤價','')} | "
+            f"{row.get('綜合評分','')} | {row.get('持有ETF數','')} | {row.get('法人訊號','')} | "
+            f"{row.get('技術面共振','')} | {row.get('融資訊號','') or '—'} |"
+        )
+    lines.append("")
+    lines.append("💡 這份清單直接來自你現有追蹤的主動式ETF實際持股，經過完整ETF共識+法人+技術面驗證，"
+                  "可靠度高於下方「產業輪動受惠股」（AI推論、無ETF驗證），但範圍受限於現有ETF覆蓋的股票池。")
+
+    return "\n".join(lines)
+
+
 def generate_related_stocks(smart_df: pd.DataFrame, trend_df: pd.DataFrame) -> str:
     """獨立呼叫：產生產業輪動受惠股推薦"""
     if smart_df.empty:
@@ -118,19 +161,19 @@ def generate_related_stocks(smart_df: pd.DataFrame, trend_df: pd.DataFrame) -> s
 請推薦10檔產業輪動受惠股（這些股票不在ETF持倉內，但可能因產業輪動受益）：
 
 條件：
-1. 優先選股價在500元以下的標的
+1. 優先選股價在1000元以下的標的（目標是讓資金有限的散戶也能實際參與，避免全部推薦高價股）
 2. 必須與上述強勢股的產業主題直接相關
 3. 說明與主力題材的關聯性
 
 請用以下格式回覆：
-### 🔄 產業輪動受惠股（10檔）
+### 🔄 產業輪動受惠股（10檔，1000元以下優先）
 
 | 排名 | 代號 | 名稱 | 關聯題材 | 股價區間 | 受益原因 |
 |------|------|------|----------|----------|----------|
 | 1 | XXXX | XXX | XXX | XXX元以下 | XXX |
 ...
 
-注意：以上僅供參考，非買賣建議。"""
+注意：以上為AI依產業關聯推論，非ETF實際持股驗證過的標的，僅供參考，非買賣建議。"""
 
     return call_claude(prompt, max_tokens=1500)
 
@@ -441,6 +484,16 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
     trend_df = data.get("題材趨勢", pd.DataFrame())
     related = generate_related_stocks(smart_df, trend_df)
 
+    # 1000元以下優選股清單（純資料篩選，不呼叫AI，零額外成本）
+    affordable_section = ""
+    try:
+        watch_df0 = cross_df if cross_df is not None and not cross_df.empty else data.get("多方驗證名單", pd.DataFrame())
+        affordable_text = build_affordable_picks_section(watch_df0, max_price=1000.0, top_n=8)
+        if affordable_text:
+            affordable_section = "\n\n" + affordable_text
+    except Exception as e:
+        log.warning(f"1000元以下優選股清單生成失敗（不影響主報告）: {e}")
+
     # 開盤前30分鐘觀察重點（籌碼矛盾標的優先分析，條件式檢查清單，非預測）
     premarket_section = ""
     try:
@@ -466,6 +519,8 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
         log.warning(f"大盤法人氛圍生成失敗（不影響主報告）: {e}")
 
     final_report = main_report
+    if affordable_section:
+        final_report += affordable_section
     if related:
         final_report += "\n\n" + related
     if premarket_section:

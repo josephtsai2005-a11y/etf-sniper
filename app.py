@@ -1060,6 +1060,11 @@ elif page == "ETF 覆蓋分析":
 elif page == "個股查詢":
     st.title("📈 個股查詢")
 
+    #開放非ETF個股查詢
+    for p in ["自選股查詢"]:
+        if st.button(p, key=f"btn_{p}", use_container_width=True):
+            st.session_state.selected_page = p
+
     df = load_sheet(SHEET_SMART)
     raw_df = load_sheet(SHEET_RAW)
 
@@ -1868,3 +1873,111 @@ elif page == "母題材審核":
                 st.success(f"已處理 {updated} 組整併決定！核准的合併已立即套用到所有相關關鍵字。")
                 del st.session_state["theme_review_cache"]
                 st.rerun()
+
+elif page == "自選股查詢":
+    st.title("🔍 自選股即時查詢")
+    st.caption("輸入任意股票代號即時查詢（不限ETF持股股票），適合了解低價/中價股，不套用ETF共識評分——"
+               "這裡只呈現原始資料（股價/技術指標/法人/融資融券/基本面），由你自己判斷，不是系統推薦")
+
+    st.warning("⚠️ 這是即時查詢（現場連線TWSE/FinMind抓資料），最多同時查10檔，每檔約需5-10秒，請耐心等待")
+
+    codes_input = st.text_input(
+        "輸入股票代號，多檔用逗號分隔（例如：2603,1101,2609）",
+        placeholder="2603,1101,2609",
+    )
+    max_query = 10
+
+    if st.button("🔎 查詢", type="primary"):
+        if not codes_input.strip():
+            st.error("請輸入至少一個股票代號")
+            st.stop()
+
+        codes = [c.strip() for c in codes_input.split(",") if c.strip()][:max_query]
+        if len(codes_input.split(",")) > max_query:
+            st.info(f"最多同時查詢{max_query}檔，已自動取前{max_query}個代號")
+
+        with st.spinner(f"查詢中（{len(codes)}檔）..."):
+            from price_fetcher import get_stock_price_single
+            from institutional_fetcher import fetch_batch_institutional, compute_institutional_signal
+            from margin_fetcher import fetch_margin_for_stocks, compute_margin_signal
+            from fundamental_fetcher import fetch_batch_fundamental
+
+            price_results = {c: get_stock_price_single(c) for c in codes}
+
+            try:
+                inst_df = fetch_batch_institutional(codes)
+                inst_df = compute_institutional_signal(inst_df) if not inst_df.empty else inst_df
+            except Exception:
+                inst_df = pd.DataFrame()
+
+            try:
+                margin_df = fetch_margin_for_stocks(codes)
+            except Exception:
+                margin_df = pd.DataFrame()
+
+            try:
+                fund_df = fetch_batch_fundamental(codes, delay=0.3)
+            except Exception:
+                fund_df = pd.DataFrame()
+
+        st.session_state["adhoc_query_results"] = {
+            "codes": codes, "price": price_results, "inst": inst_df,
+            "margin": margin_df, "fund": fund_df,
+        }
+
+    if "adhoc_query_results" in st.session_state:
+        res = st.session_state["adhoc_query_results"]
+        for code in res["codes"]:
+            price_info = res["price"].get(code, {})
+            if not price_info:
+                st.error(f"❌ {code}：查無資料（可能代號錯誤、興櫃/未上市、或今日尚無交易）")
+                st.markdown("---")
+                continue
+
+            name = price_info.get("股票名稱", "")
+            close = price_info.get("收盤價", "")
+            change_pct = price_info.get("漲跌幅%", "")
+
+            st.subheader(f"{code} {name}　收盤 {close}（{change_pct:+.2f}%）" if isinstance(change_pct, (int, float)) else f"{code} {name}")
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("技術面共振", price_info.get("技術面共振", "N/A"))
+            c2.metric("KD訊號", price_info.get("KD訊號", "N/A"))
+            c3.metric("MACD訊號", price_info.get("MACD訊號", "N/A"))
+            c4.metric("背離警示", price_info.get("背離警示", "") or "無")
+
+            c5, c6, c7, c8 = st.columns(4)
+            c5.metric("布林位置", price_info.get("布林位置", "N/A"))
+            c6.metric("ATR%", f"{price_info.get('ATR%', 'N/A')}")
+            c7.metric("均線排列", price_info.get("均線排列", "N/A"))
+            c8.metric("量能比", f"{price_info.get('量能比', 'N/A')}")
+
+            # 法人
+            inst_row = res["inst"][res["inst"]["股票代號"].astype(str) == code] if not res["inst"].empty else pd.DataFrame()
+            if not inst_row.empty:
+                r = inst_row.iloc[0]
+                st.caption(f"**三大法人**：{r.get('法人訊號','')}（合計 {r.get('三大合計','')} 張）")
+            else:
+                st.caption("**三大法人**：今日無資料")
+
+            # 融資融券
+            margin_row = res["margin"][res["margin"]["股票代號"].astype(str) == code] if not res["margin"].empty else pd.DataFrame()
+            if not margin_row.empty:
+                r = margin_row.iloc[0]
+                m_signal = compute_margin_signal(r)
+                st.caption(f"**融資融券**：{m_signal}（融資餘額 {r.get('融資餘額(張)','')} 張／券資比 {r.get('券資比%','')}%）")
+            else:
+                st.caption("**融資融券**：今日無資料")
+
+            # 基本面
+            fund_row = res["fund"][res["fund"]["股票代號"].astype(str) == code] if not res["fund"].empty else pd.DataFrame()
+            if not fund_row.empty:
+                r = fund_row.iloc[0]
+                st.caption(f"**基本面**：月營收年增率 {r.get('年增率%','N/A')}%／本益比 {r.get('本益比','N/A')}（{r.get('本益比訊號','')}）")
+            else:
+                st.caption("**基本面**：查無資料")
+
+            st.markdown("---")
+
+        st.caption("💡 這裡的資料是即時抓取的原始事實，沒有經過ETF共識驗證（因為這些股票不一定被追蹤的主動式ETF持有），"
+                   "判斷時建議自行綜合考量，不是系統推薦標的。")
