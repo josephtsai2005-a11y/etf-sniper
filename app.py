@@ -1081,7 +1081,8 @@ elif page == "個股查詢":
         )
         result = df[mask]
     else:
-        result = df.head(20)
+        result = df
+        st.caption(f"目前顯示全部 {len(df)} 檔追蹤股票（可在上方輸入關鍵字篩選）")
 
     if result.empty:
         st.info("找不到符合的股票")
@@ -1604,7 +1605,8 @@ elif page == "關鍵字審核":
 
 elif page == "持倉監控":
     st.title("💼 持倉監控")
-    st.caption("進出場訊號規則：進場嚴選評分/法人一致性高的標的；出場採「停損／停利／訊號轉弱／技術面提早轉弱」四重條件，先觸發先出")
+    st.caption("進出場訊號規則：進場嚴選評分/法人一致性高的標的；出場採「停損／停利／訊號轉弱／技術面提早轉弱」四重條件，先觸發先出。"
+               "支援自選股（不在ETF追蹤範圍的股票）追蹤，同股票分批買進會自動合併為加權平均價")
 
     _client = get_client()
     _sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
@@ -1612,7 +1614,7 @@ elif page == "持倉監控":
 
     from position_manager import (
         add_position, close_position, evaluate_open_positions, get_entry_candidates,
-        _load_positions, STATUS_OPEN, STATUS_CLOSED,
+        _load_positions, STATUS_OPEN, STATUS_CLOSED, DATA_SOURCE_ETF, DATA_SOURCE_ADHOC,
         MAX_POSITIONS, ENTRY_MIN_SCORE, ENTRY_MIN_CONVERSION, ENTRY_MAX_PRICE,
         DEFAULT_STOP_LOSS_PCT, DEFAULT_TAKE_PROFIT_PCT, suggest_stop_loss_from_atr,
     )
@@ -1630,12 +1632,22 @@ elif page == "持倉監控":
         for _, row in eval_df.iterrows():
             ret = row["目前報酬率%"]
             ret_display = f"{ret:+.2f}%" if ret is not None else "N/A"
-            header = f"{row['股票代號']} {row['股票名稱']} ｜ 進場價{row['進場價']} → 目前{row['目前收盤價']}（{ret_display}）"
+            pnl = row.get("損益金額")
+            pnl_display = f"（損益 {pnl:+,.0f} 元）" if pnl is not None else ""
+            source_tag = "🔍自選" if row.get("資料來源") == "即時查詢備援" else "📊ETF"
+            header = (f"{source_tag} {row['股票代號']} {row['股票名稱']}｜"
+                      f"進場價{row['進場價']}（{row.get('累計股數','')}股）→ 目前{row['目前收盤價']}"
+                      f"（{ret_display}{pnl_display}）")
 
             if row["建議出場"]:
                 with st.expander(f"🔴 建議出場：{header}", expanded=True):
                     for reason in row["觸發原因"]:
                         st.markdown(f"- {reason}")
+                    st.caption(
+                        f"目前評分：{row.get('目前評分','N/A')}｜法人訊號：{row.get('法人訊號') or 'N/A'}｜"
+                        f"KD：{row.get('KD訊號') or 'N/A'}｜MACD：{row.get('MACD訊號') or 'N/A'}｜"
+                        f"技術面共振：{row.get('技術面共振') or 'N/A'}"
+                    )
                     c1, c2 = st.columns(2)
                     with c1:
                         exit_price = st.number_input(
@@ -1651,64 +1663,102 @@ elif page == "持倉監控":
                             st.rerun()
             else:
                 with st.expander(f"🟢 持有中：{header}", expanded=False):
-                    st.caption("目前未觸發任何出場條件")
+                    if row["觸發原因"]:  # 有警告但未達出場門檻，或找不到資料的提示
+                        for reason in row["觸發原因"]:
+                            st.caption(reason)
+                    st.caption(
+                        f"目前評分：{row.get('目前評分','N/A')}｜法人訊號：{row.get('法人訊號') or 'N/A'}｜"
+                        f"KD：{row.get('KD訊號') or 'N/A'}｜MACD：{row.get('MACD訊號') or 'N/A'}｜"
+                        f"技術面共振：{row.get('技術面共振') or 'N/A'}"
+                    )
+                    if row.get("資料來源") == "即時查詢備援":
+                        st.caption("ℹ️ 此股不在ETF追蹤範圍，法人/評分相關的出場條件不適用，僅監控停損/停利/技術面")
 
     st.markdown("---")
 
     # ── ② 新增持倉 ──────────────────────────
     st.subheader("② 新增持倉")
-    st.caption("實際買進後，在這裡登記進場資訊，系統之後每天會自動幫你檢查出場條件")
+    st.caption("實際買進後在這裡登記。同一檔股票若已有「持有中」的紀錄，這次會自動合併（加權平均價+加總股數），"
+               "不會產生重複持倉。也可以查詢非ETF追蹤範圍的自選股（股票名稱需手動輸入）")
 
-    # 股票代號放表單外，輸入後可即時查ATR建議停損（表單內的輸入要送出才會更新，先在外面查比較即時）
-    lookup_code = st.text_input("股票代號（輸入後查詢ATR建議停損）", key="lookup_code")
+    lookup_code = st.text_input("股票代號（輸入後查詢ATR建議停損＋自動帶入名稱/評分）", key="lookup_code")
     suggested_stop = DEFAULT_STOP_LOSS_PCT
-    atr_note = ""
+    lookup_name = ""
+    lookup_score, lookup_signal, lookup_conversion = None, "", None
+    is_adhoc = True
+
     if lookup_code:
         match_lookup = cross_df[cross_df["股票代號"].astype(str) == lookup_code] if not cross_df.empty else pd.DataFrame()
-        if not match_lookup.empty and "ATR%" in match_lookup.columns:
+        if not match_lookup.empty:
+            is_adhoc = False
+            lookup_name = match_lookup.iloc[0].get("股票名稱", "")
+            lookup_score = pd.to_numeric(match_lookup.iloc[0].get("綜合評分"), errors="coerce")
+            lookup_signal = match_lookup.iloc[0].get("法人訊號", "")
+            lookup_conversion = pd.to_numeric(match_lookup.iloc[0].get("買超轉換率%"), errors="coerce")
             atr_pct_val = pd.to_numeric(match_lookup.iloc[0].get("ATR%"), errors="coerce")
             if pd.notna(atr_pct_val):
                 suggested_stop = suggest_stop_loss_from_atr(atr_pct_val)
-                atr_note = f"該股ATR%={atr_pct_val:.2f}%，依波動幅度建議停損約 **{suggested_stop}%**（可在下方自行調整）"
-        if atr_note:
-            st.info(atr_note)
-        elif not match_lookup.empty:
-            st.caption("找到該股資料，但尚無ATR%（可能是資料還沒更新到含技術指標的版本），先用預設停損")
+            st.success(f"✅ ETF追蹤範圍內：{lookup_code} {lookup_name}（評分{lookup_score}｜建議停損{suggested_stop}%）")
         else:
-            st.caption("多方驗證名單目前查無此股票代號，將使用預設停損，仍可正常新增持倉")
+            # 不在ETF追蹤範圍，嘗試即時抓股價當備援，順便查ATR
+            with st.spinner("查無ETF追蹤資料，嘗試即時查詢..."):
+                try:
+                    from price_fetcher import get_stock_price_single
+                    live = get_stock_price_single(lookup_code)
+                except Exception:
+                    live = None
+            if live:
+                lookup_name = live.get("股票名稱", "")
+                atr_pct_val = live.get("ATR%")
+                if atr_pct_val:
+                    suggested_stop = suggest_stop_loss_from_atr(atr_pct_val)
+                st.info(f"🔍 自選股（不在ETF追蹤範圍）：{lookup_code} {lookup_name or '（查無名稱，請手動輸入）'}"
+                        f"，建議停損{suggested_stop}%。此股後續只會監控停損/停利/技術面，無法人/評分類條件")
+            else:
+                st.warning("查無此股票代號的即時資料，請確認代號正確，或稍後在下方手動輸入資訊新增")
 
     with st.form("add_position_form"):
         col1, col2 = st.columns(2)
         with col1:
             new_code = st.text_input("股票代號（正式登記，需與上方一致）", value=lookup_code)
+            new_name = st.text_input("股票名稱（自選股請手動輸入，ETF追蹤股會自動帶入）", value=lookup_name)
             new_price = st.number_input("進場價", min_value=0.0, step=0.1)
-            new_stop_loss = st.slider("停損%（觸及即建議出場）", 5.0, 25.0, float(suggested_stop), 0.5)
+            new_shares = st.number_input("買進股數", min_value=1, step=1, value=1000,
+                                          help="零股請直接輸入實際股數，例如買100股就輸入100")
         with col2:
             new_date = st.date_input("進場日期", value=datetime.now())
+            new_stop_loss = st.slider("停損%（觸及即建議出場）", 5.0, 25.0, float(suggested_stop), 0.5)
             new_take_profit = st.slider("停利%（觸及即建議出場）", 10.0, 50.0, DEFAULT_TAKE_PROFIT_PCT, 1.0)
 
-        submitted = st.form_submit_button("新增持倉", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("新增／合併持倉", type="primary", use_container_width=True)
         if submitted:
-            if not new_code or new_price <= 0:
-                st.error("請填寫股票代號與進場價")
+            if not new_code or new_price <= 0 or new_shares <= 0:
+                st.error("請填寫股票代號、進場價、買進股數")
             else:
                 match = cross_df[cross_df["股票代號"].astype(str) == new_code] if not cross_df.empty else pd.DataFrame()
                 if not match.empty:
-                    name = match.iloc[0].get("股票名稱", "")
+                    final_name = match.iloc[0].get("股票名稱", "") or new_name
                     score = pd.to_numeric(match.iloc[0].get("綜合評分"), errors="coerce")
                     signal = match.iloc[0].get("法人訊號", "")
                     conversion = pd.to_numeric(match.iloc[0].get("買超轉換率%"), errors="coerce")
+                    source = DATA_SOURCE_ETF
                 else:
-                    name, score, signal, conversion = "", None, "", None
-                    st.warning("在多方驗證名單找不到這檔股票的最新資料，仍會新增紀錄但缺少進場評分/訊號基準")
+                    final_name = new_name
+                    score, signal, conversion = None, "", None
+                    source = DATA_SOURCE_ADHOC
+                    if not final_name:
+                        st.warning("找不到股票名稱資料，建議填寫股票名稱方便日後辨識，仍會繼續新增")
 
-                add_position(
-                    ss, new_code, name, str(new_date), new_price,
-                    score if pd.notna(score) else 0, signal,
-                    conversion if pd.notna(conversion) else 0,
-                    new_stop_loss, new_take_profit,
+                action = add_position(
+                    ss, new_code, final_name, str(new_date), new_price, new_shares,
+                    score if pd.notna(score) else None, signal,
+                    conversion if pd.notna(conversion) else None,
+                    new_stop_loss, new_take_profit, source,
                 )
-                st.success(f"已新增持倉：{new_code} {name}")
+                if action == "合併":
+                    st.success(f"已合併進既有持倉：{new_code} {final_name}（自動計算加權平均價）")
+                else:
+                    st.success(f"已新增持倉：{new_code} {final_name}")
                 st.rerun()
 
     st.markdown("---")
@@ -1722,11 +1772,18 @@ elif page == "持倉監控":
     )
     st.caption(f"篩選條件：綜合評分 ≥ {ENTRY_MIN_SCORE}分 且 買超轉換率% ≥ {ENTRY_MIN_CONVERSION}% 且 股價 ≤ {price_limit}元，"
                f"取評分最高前{MAX_POSITIONS}檔（因資金有限，嚴選不求多）。"
-               f"「技術面提早轉強」欄位是額外參考資訊（KD/MACD醞釀或已黃金交叉），不是硬性篩選條件")
+               f"「技術面提早轉強」欄位是額外參考資訊（KD/MACD醞釀或已黃金交叉），不是硬性篩選條件。"
+               f"僅適用ETF追蹤範圍股票，自選股不會出現在這裡（沒有評分/法人資料可篩選）")
 
     candidates = get_entry_candidates(cross_df, MAX_POSITIONS, price_limit) if not cross_df.empty else pd.DataFrame()
     if candidates.empty:
-        st.info("目前沒有符合進場條件的標的，或多方驗證名單尚無資料")
+        if cross_df.empty:
+            st.warning("多方驗證名單目前無資料，請確認 etf-sniper-daily job 是否已執行完成")
+        else:
+            max_score_today = pd.to_numeric(cross_df.get("綜合評分"), errors="coerce").max()
+            st.info(f"目前沒有符合進場條件的標的（今日追蹤股票池最高評分為 {max_score_today:.1f} 分，"
+                    f"未達{ENTRY_MIN_SCORE}分門檻，或買超轉換率/股價條件不符）。"
+                    f"這是正常情況，不代表資料異常，可以調整下方股價上限或等待市況變化")
     else:
         display_cols = ["排名", "股票代號", "股票名稱", "綜合評分", "法人訊號", "買超轉換率%",
                          "技術面提早轉強", "收盤價", "漲跌幅%"]
@@ -1747,19 +1804,26 @@ elif page == "持倉監控":
             closed_display = closed.copy()
             closed_display["進場價"] = pd.to_numeric(closed_display["進場價"], errors="coerce")
             closed_display["出場價"] = pd.to_numeric(closed_display["出場價"], errors="coerce")
+            closed_display["累計股數"] = pd.to_numeric(closed_display.get("累計股數"), errors="coerce")
             closed_display["實際報酬率%"] = (
                 (closed_display["出場價"] - closed_display["進場價"]) / closed_display["進場價"] * 100
             ).round(2)
+            closed_display["損益金額"] = (
+                (closed_display["出場價"] - closed_display["進場價"]) * closed_display["累計股數"]
+            ).round(0)
+            display_close_cols = ["股票代號", "股票名稱", "進場日期", "進場價", "累計股數",
+                                   "出場日期", "出場價", "實際報酬率%", "損益金額", "出場原因"]
             st.dataframe(
-                closed_display[["股票代號", "股票名稱", "進場日期", "進場價", "出場日期", "出場價",
-                                "實際報酬率%", "出場原因"]],
+                closed_display[[c for c in display_close_cols if c in closed_display.columns]],
                 use_container_width=True, hide_index=True,
             )
             avg_ret = closed_display["實際報酬率%"].mean()
             win_rate = (closed_display["實際報酬率%"] > 0).sum() / len(closed_display) * 100
-            c1, c2 = st.columns(2)
+            total_pnl = closed_display["損益金額"].sum()
+            c1, c2, c3 = st.columns(3)
             c1.metric("平均報酬率", f"{avg_ret:.2f}%")
             c2.metric("勝率", f"{win_rate:.1f}%")
+            c3.metric("累計損益", f"{total_pnl:+,.0f} 元")
 
 elif page == "母題材審核":
     st.title("🗂️ 母題材審核")

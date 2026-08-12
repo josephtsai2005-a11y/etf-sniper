@@ -6,9 +6,12 @@ position_manager.py
   - 使用者資金有限，同時只操作1-3檔零股，屬於「積極輪動、追求每月都有收入」的策略
   - 這不是自動交易系統，是「決策輔助」：使用者手動記錄自己的進場，
     系統每天比對最新資料，用規則判斷是否該出場，在Streamlit顯示提醒
-  - 出場採「三重條件，先觸發先出」：停損 / 停利 / 訊號轉弱，任一觸發就建議出場
+  - 出場採「四重條件，先觸發先出」：停損 / 停利 / 訊號轉弱 / 技術面提早轉弱，任一觸發就建議出場
+  - 支援「自選股」（不在ETF追蹤範圍內的股票）：找不到ETF/法人資料時，
+    改用即時抓股價/技術指標當備援，仍可追蹤出場條件（只是少了法人/ETF相關的判斷依據）
+  - 同一檔股票分批買進會自動合併成加權平均價格與加總股數，不會產生重複的持倉紀錄
 
-進場規則（給候選名單參考，非強制）：
+進場規則（給候選名單參考，非強制，僅適用ETF追蹤範圍內的股票）：
   - 綜合評分 >= ENTRY_MIN_SCORE
   - 買超轉換率% >= ENTRY_MIN_CONVERSION（法人方向要夠一致）
   - 候選過多時，取評分最高的前 MAX_POSITIONS 檔
@@ -20,8 +23,10 @@ position_manager.py
   3. 訊號轉弱：評分較進場時下降超過 SIGNAL_WEAKEN_SCORE_DROP，
               或法人由買轉賣（三大合計轉負），
               或買超轉換率%跌破 SIGNAL_WEAKEN_CONVERSION_FLOOR
+              （僅ETF追蹤範圍內股票適用，自選股沒有這些資料，此類條件會略過）
   4. 技術面提早轉弱：KD/MACD醞釀死亡交叉、或出現頂部背離、或KD/MACD已經死亡交叉
-              （這組刻意設計成「提早」偵測，不等實際死叉發生才動作，見price_fetcher.py）
+              （這組刻意設計成「提早」偵測，不等實際死叉發生才動作，見price_fetcher.py；
+              自選股也適用，因為技術指標是即時抓取，不依賴ETF追蹤範圍）
 """
 import logging
 import pandas as pd
@@ -33,21 +38,25 @@ TW_TZ = pytz.timezone("Asia/Taipei")
 
 SHEET_POSITIONS = "我的持倉"
 POSITION_COLS = [
-    "股票代號", "股票名稱", "進場日期", "進場價", "進場評分", "進場法人訊號", "進場買超轉換率%",
+    "股票代號", "股票名稱", "進場日期", "最後加碼日期", "進場價", "累計股數",
+    "進場評分", "進場法人訊號", "進場買超轉換率%", "資料來源",
     "自訂停損%", "自訂停利%", "狀態", "出場日期", "出場價", "出場原因", "最後檢查日期",
 ]
 
+DATA_SOURCE_ETF = "ETF追蹤"
+DATA_SOURCE_ADHOC = "自選股(即時查詢)"
+
 # ── 進場規則預設參數（可依回測資料校正）──────────────────────
 MAX_POSITIONS = 3
-ENTRY_MIN_SCORE = 7.0
-ENTRY_MIN_CONVERSION = 60.0
+ENTRY_MIN_SCORE = 4.0
+ENTRY_MIN_CONVERSION = 20.0
 ENTRY_MAX_PRICE = 1000.0  # 資金有限，優先篩選股價1000元以下的標的（零股操作，股價太高單股成本負擔重）
 
 # ── 出場規則預設參數 ──────────────────────────────────────
 DEFAULT_STOP_LOSS_PCT = 10.0     # 預設停損 -10%（使用者可在新增持倉時自訂到8~20%）
 DEFAULT_TAKE_PROFIT_PCT = 25.0   # 預設停利 +25%（未來可用回測「T20內平均最大報酬%」校正）
 SIGNAL_WEAKEN_SCORE_DROP = 2.0   # 評分較進場時下降超過此值 → 判定訊號轉弱
-SIGNAL_WEAKEN_CONVERSION_FLOOR = 40.0  # 買超轉換率%跌破此值 → 判定法人開始分歧
+SIGNAL_WEAKEN_CONVERSION_FLOOR = 10.0  # 買超轉換率%跌破此值 → 判定法人開始分歧
 
 # 技術面提早轉弱訊號（來自price_fetcher.py的KD訊號/MACD訊號/背離警示欄位）
 TECH_WEAKEN_KD_SIGNALS = {"🔴 死亡交叉", "🍂 醞釀死亡交叉"}
@@ -104,20 +113,61 @@ def _write_positions(ss, df: pd.DataFrame):
         ws.append_rows(df.fillna("").values.tolist(), value_input_option="USER_ENTERED")
 
 
-def add_position(ss, code: str, name: str, entry_date: str, entry_price: float,
-                  entry_score: float, entry_signal: str, entry_conversion: float,
+def add_position(ss, code: str, name: str, entry_date: str, entry_price: float, shares: float,
+                  entry_score, entry_signal: str, entry_conversion,
                   stop_loss_pct: float = DEFAULT_STOP_LOSS_PCT,
-                  take_profit_pct: float = DEFAULT_TAKE_PROFIT_PCT):
-    """新增一筆持倉紀錄（使用者實際買進時手動呼叫/在Streamlit表單填寫）"""
+                  take_profit_pct: float = DEFAULT_TAKE_PROFIT_PCT,
+                  data_source: str = DATA_SOURCE_ETF) -> str:
+    """
+    新增一筆持倉紀錄（使用者實際買進時手動呼叫/在Streamlit表單填寫）
+    shares: 這次買進的股數
+    自動合併規則：如果同一檔股票代號已經有「持有中」的紀錄，不會新增一列，
+    而是把新買進的股數併入既有紀錄，用加權平均重新計算進場價，
+    避免同一檔股票分批買進卻在畫面上變成好幾筆各自獨立的持倉
+
+    回傳："新增" 或 "合併"，方便呼叫端顯示對應訊息
+    """
     df = _load_positions(ss)
+
+    existing_open = pd.DataFrame()
+    if not df.empty:
+        existing_open = df[(df["股票代號"] == str(code)) & (df["狀態"] == STATUS_OPEN)]
+
+    if not existing_open.empty:
+        idx = existing_open.index[0]
+        old_shares = float(df.at[idx, "累計股數"] or 0)
+        old_price = float(df.at[idx, "進場價"] or 0)
+        new_total_shares = old_shares + shares
+        new_avg_price = (
+            (old_shares * old_price + shares * entry_price) / new_total_shares
+            if new_total_shares > 0 else entry_price
+        )
+        df.at[idx, "累計股數"] = new_total_shares
+        df.at[idx, "進場價"] = round(new_avg_price, 2)
+        df.at[idx, "最後加碼日期"] = entry_date
+        # 評分/法人訊號用最新一次加碼時的資料更新，反映目前狀態
+        if entry_score is not None:
+            df.at[idx, "進場評分"] = entry_score
+        if entry_signal:
+            df.at[idx, "進場法人訊號"] = entry_signal
+        if entry_conversion is not None:
+            df.at[idx, "進場買超轉換率%"] = entry_conversion
+        _write_positions(ss, df)
+        log.info(f"持倉合併：{code} 加碼{shares}股，加權平均價更新為{round(new_avg_price,2)}"
+                  f"（原{old_shares}股@{old_price} + 新{shares}股@{entry_price}）")
+        return "合併"
+
     new_row = {
         "股票代號": str(code),
         "股票名稱": name,
         "進場日期": entry_date,
+        "最後加碼日期": entry_date,
         "進場價": entry_price,
-        "進場評分": entry_score,
+        "累計股數": shares,
+        "進場評分": entry_score if entry_score is not None else "",
         "進場法人訊號": entry_signal,
-        "進場買超轉換率%": entry_conversion,
+        "進場買超轉換率%": entry_conversion if entry_conversion is not None else "",
+        "資料來源": data_source,
         "自訂停損%": stop_loss_pct,
         "自訂停利%": take_profit_pct,
         "狀態": STATUS_OPEN,
@@ -128,7 +178,8 @@ def add_position(ss, code: str, name: str, entry_date: str, entry_price: float,
     }
     combined = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True) if not df.empty else pd.DataFrame([new_row])
     _write_positions(ss, combined)
-    log.info(f"新增持倉：{code} {name} 進場價{entry_price}，停損{stop_loss_pct}%/停利{take_profit_pct}%")
+    log.info(f"新增持倉：{code} {name} {shares}股 進場價{entry_price}，停損{stop_loss_pct}%/停利{take_profit_pct}%（{data_source}）")
+    return "新增"
 
 
 def close_position(ss, row_index: int, exit_date: str, exit_price: float, exit_reason: str):
@@ -148,7 +199,13 @@ def evaluate_open_positions(ss, latest_cross_df: pd.DataFrame) -> pd.DataFrame:
     """
     每天比對最新資料，評估所有「持有中」的部位是否觸發出場條件
     latest_cross_df: 最新的多方驗證名單（含股票代號、收盤價、綜合評分、三大合計、買超轉換率%）
-    回傳：每筆持倉的評估結果（含是否建議出場、觸發原因、目前報酬率）
+
+    自選股（不在latest_cross_df裡的股票）備援機制：
+      改用 price_fetcher.get_stock_price_single() 即時抓股價/技術指標，
+      這樣即使不是ETF追蹤範圍內的股票，也能持續追蹤停損/停利/技術面轉弱這幾類條件
+      （法人相關的③訊號轉弱條件因為沒有資料，會自動略過，不會誤判）
+
+    回傳：每筆持倉的評估結果（含是否建議出場、觸發原因、目前報酬率，以及完整參考資訊供畫面顯示）
     """
     df = _load_positions(ss)
     if df.empty:
@@ -169,11 +226,24 @@ def evaluate_open_positions(ss, latest_cross_df: pd.DataFrame) -> pd.DataFrame:
     for idx, pos in open_positions.iterrows():
         code = pos["股票代號"]
         entry_price = float(pos["進場價"]) if pos["進場價"] else None
-        entry_score = float(pos["進場評分"]) if pos["進場評分"] else None
+        entry_score = float(pos["進場評分"]) if pos["進場評分"] not in ("", None) else None
+        shares = float(pos.get("累計股數") or 0)
         stop_loss_pct = float(pos["自訂停損%"]) if pos["自訂停損%"] else DEFAULT_STOP_LOSS_PCT
         take_profit_pct = float(pos["自訂停利%"]) if pos["自訂停利%"] else DEFAULT_TAKE_PROFIT_PCT
 
         latest = latest_by_code.get(code)
+        used_fallback = False
+
+        # 自選股備援：ETF追蹤範圍內找不到，改即時抓股價/技術指標
+        if latest is None:
+            try:
+                from price_fetcher import get_stock_price_single
+                live = get_stock_price_single(code)
+                if live:
+                    latest = pd.Series(live)
+                    used_fallback = True
+            except Exception as e:
+                log.warning(f"{code} 即時股價備援抓取失敗: {e}")
 
         result = {
             "row_index": idx,
@@ -181,15 +251,22 @@ def evaluate_open_positions(ss, latest_cross_df: pd.DataFrame) -> pd.DataFrame:
             "股票名稱": pos["股票名稱"],
             "進場日期": pos["進場日期"],
             "進場價": entry_price,
+            "累計股數": shares,
             "建議出場": False,
             "觸發原因": [],
             "目前報酬率%": None,
             "目前評分": None,
             "目前收盤價": None,
+            "損益金額": None,
+            "資料來源": "即時查詢備援" if used_fallback else "ETF追蹤資料",
+            "法人訊號": None,
+            "KD訊號": None,
+            "MACD訊號": None,
+            "技術面共振": None,
         }
 
         if latest is None or entry_price is None:
-            result["觸發原因"].append("⚠️ 找不到今日最新資料（該股可能已跌出追蹤名單，建議人工確認）")
+            result["觸發原因"].append("⚠️ 找不到今日最新資料（TWSE查無此代號，或今日尚無交易，建議人工確認）")
             results.append(result)
             continue
 
@@ -198,10 +275,17 @@ def evaluate_open_positions(ss, latest_cross_df: pd.DataFrame) -> pd.DataFrame:
         current_total = pd.to_numeric(latest.get("三大合計"), errors="coerce")
         current_conversion = pd.to_numeric(latest.get("買超轉換率%"), errors="coerce")
 
+        result["法人訊號"] = latest.get("法人訊號")
+        result["KD訊號"] = latest.get("KD訊號")
+        result["MACD訊號"] = latest.get("MACD訊號")
+        result["技術面共振"] = latest.get("技術面共振")
+
         if pd.notna(current_price) and entry_price:
             ret_pct = round((current_price - entry_price) / entry_price * 100, 2)
             result["目前報酬率%"] = ret_pct
             result["目前收盤價"] = current_price
+            if shares:
+                result["損益金額"] = round((current_price - entry_price) * shares, 0)
 
             # ① 停損
             if ret_pct <= -stop_loss_pct:
@@ -220,7 +304,7 @@ def evaluate_open_positions(ss, latest_cross_df: pd.DataFrame) -> pd.DataFrame:
                 result["建議出場"] = True
                 result["觸發原因"].append(f"🟡 評分轉弱（{entry_score}分→{current_score}分）")
 
-        # ③ 訊號轉弱：法人由買轉賣
+        # ③ 訊號轉弱：法人由買轉賣（自選股沒有法人資料，current_total是NaN，自動略過不誤判）
         if pd.notna(current_total) and current_total < 0:
             result["建議出場"] = True
             result["觸發原因"].append(f"🟡 法人轉為淨賣超（三大合計{current_total}張）")
