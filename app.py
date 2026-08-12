@@ -1613,7 +1613,8 @@ elif page == "持倉監控":
     ss = _client.open_by_key(_sid)
 
     from position_manager import (
-        add_position, close_position, evaluate_open_positions, get_entry_candidates,
+        add_position, close_position, delete_position, update_position,
+        evaluate_open_positions, get_entry_candidates,
         _load_positions, STATUS_OPEN, STATUS_CLOSED, DATA_SOURCE_ETF, DATA_SOURCE_ADHOC,
         MAX_POSITIONS, ENTRY_MIN_SCORE, ENTRY_MIN_CONVERSION, ENTRY_MAX_PRICE,
         DEFAULT_STOP_LOSS_PCT, DEFAULT_TAKE_PROFIT_PCT, suggest_stop_loss_from_atr,
@@ -1631,48 +1632,68 @@ elif page == "持倉監控":
     else:
         for _, row in eval_df.iterrows():
             ret = row["目前報酬率%"]
-            ret_display = f"{ret:+.2f}%" if ret is not None else "N/A"
+            ret_display = f"{ret:+.2f}%" if ret is not None and pd.notna(ret) else "N/A"
             pnl = row.get("損益金額")
-            pnl_display = f"（損益 {pnl:+,.0f} 元）" if pnl is not None else ""
+            pnl_display = f"（損益 {pnl:+,.0f} 元）" if pnl is not None and pd.notna(pnl) else ""
             source_tag = "🔍自選" if row.get("資料來源") == "即時查詢備援" else "📊ETF"
+            shares_val = row.get("累計股數", 0)
+            shares_display = f"{shares_val:.0f}股" if shares_val and shares_val > 0 else "股數未登記"
+            current_price_display = row['目前收盤價'] if row['目前收盤價'] is not None and pd.notna(row['目前收盤價']) else "N/A"
             header = (f"{source_tag} {row['股票代號']} {row['股票名稱']}｜"
-                      f"進場價{row['進場價']}（{row.get('累計股數','')}股）→ 目前{row['目前收盤價']}"
+                      f"進場價{row['進場價']}（{shares_display}）→ 目前{current_price_display}"
                       f"（{ret_display}{pnl_display}）")
 
-            if row["建議出場"]:
-                with st.expander(f"🔴 建議出場：{header}", expanded=True):
-                    for reason in row["觸發原因"]:
-                        st.markdown(f"- {reason}")
-                    st.caption(
-                        f"目前評分：{row.get('目前評分','N/A')}｜法人訊號：{row.get('法人訊號') or 'N/A'}｜"
-                        f"KD：{row.get('KD訊號') or 'N/A'}｜MACD：{row.get('MACD訊號') or 'N/A'}｜"
-                        f"技術面共振：{row.get('技術面共振') or 'N/A'}"
-                    )
+            box_icon = "🔴 建議出場" if row["建議出場"] else "🟢 持有中"
+            with st.expander(f"{box_icon}：{header}", expanded=row["建議出場"]):
+                for reason in row["觸發原因"]:
+                    st.markdown(f"- {reason}")
+                st.caption(
+                    f"目前評分：{row.get('目前評分','N/A')}｜法人訊號：{row.get('法人訊號') or 'N/A'}｜"
+                    f"KD：{row.get('KD訊號') or 'N/A'}｜MACD：{row.get('MACD訊號') or 'N/A'}｜"
+                    f"技術面共振：{row.get('技術面共振') or 'N/A'}"
+                )
+                if row.get("資料來源") == "即時查詢備援":
+                    st.caption("ℹ️ 此股不在ETF追蹤範圍，法人/評分相關的出場條件不適用，僅監控停損/停利/技術面")
+
+                ridx = int(row["row_index"])
+
+                if row["建議出場"]:
                     c1, c2 = st.columns(2)
                     with c1:
                         exit_price = st.number_input(
-                            "出場價", value=float(row["目前收盤價"]) if row["目前收盤價"] else 0.0,
-                            key=f"exit_price_{row['row_index']}"
+                            "出場價",
+                            value=float(row["目前收盤價"]) if row["目前收盤價"] and pd.notna(row["目前收盤價"]) else 0.0,
+                            key=f"exit_price_{ridx}"
                         )
                     with c2:
-                        if st.button("確認出場", key=f"close_{row['row_index']}", type="primary"):
+                        if st.button("✅ 確認出場", key=f"close_{ridx}", type="primary"):
                             today_str = datetime.now().strftime("%Y-%m-%d")
-                            close_position(ss, int(row["row_index"]), today_str, exit_price,
-                                          "; ".join(row["觸發原因"]))
+                            close_position(ss, ridx, today_str, exit_price, "; ".join(row["觸發原因"]))
                             st.success("已記錄出場！")
                             st.rerun()
-            else:
-                with st.expander(f"🟢 持有中：{header}", expanded=False):
-                    if row["觸發原因"]:  # 有警告但未達出場門檻，或找不到資料的提示
-                        for reason in row["觸發原因"]:
-                            st.caption(reason)
-                    st.caption(
-                        f"目前評分：{row.get('目前評分','N/A')}｜法人訊號：{row.get('法人訊號') or 'N/A'}｜"
-                        f"KD：{row.get('KD訊號') or 'N/A'}｜MACD：{row.get('MACD訊號') or 'N/A'}｜"
-                        f"技術面共振：{row.get('技術面共振') or 'N/A'}"
-                    )
-                    if row.get("資料來源") == "即時查詢備援":
-                        st.caption("ℹ️ 此股不在ETF追蹤範圍，法人/評分相關的出場條件不適用，僅監控停損/停利/技術面")
+
+                st.markdown("---")
+                st.caption("✏️ 修改或刪除這筆持倉")
+                with st.form(f"edit_form_{ridx}"):
+                    ec1, ec2, ec3 = st.columns(3)
+                    with ec1:
+                        edit_price = st.number_input("進場價", value=float(row["進場價"]) if row["進場價"] else 0.0, key=f"edit_price_{ridx}")
+                    with ec2:
+                        edit_shares = st.number_input("累計股數", value=float(shares_val) if shares_val else 0.0, step=1.0, key=f"edit_shares_{ridx}")
+                    with ec3:
+                        edit_stop = st.number_input("停損%", value=10.0, step=0.5, key=f"edit_stop_{ridx}")
+
+                    ec4, ec5 = st.columns(2)
+                    with ec4:
+                        if st.form_submit_button("💾 儲存修改", use_container_width=True):
+                            update_position(ss, ridx, 進場價=edit_price, 累計股數=edit_shares, **{"自訂停損%": edit_stop})
+                            st.success("已更新！")
+                            st.rerun()
+                    with ec5:
+                        if st.form_submit_button("🗑️ 刪除此筆持倉", use_container_width=True):
+                            delete_position(ss, ridx)
+                            st.warning("已刪除該筆持倉紀錄")
+                            st.rerun()
 
     st.markdown("---")
 
@@ -1943,13 +1964,13 @@ elif page == "自選股查詢":
     st.caption("輸入任意股票代號即時查詢（不限ETF持股股票），適合了解低價/中價股，不套用ETF共識評分——"
                "這裡只呈現原始資料（股價/技術指標/法人/融資融券/基本面），由你自己判斷，不是系統推薦")
 
-    st.warning("⚠️ 這是即時查詢（現場連線TWSE/FinMind抓資料），最多同時查10檔，每檔約需5-10秒，請耐心等待")
+    st.warning("⚠️ 這是即時查詢（現場連線TWSE/FinMind抓資料），最多同時查5檔，每檔約需5-10秒，請耐心等待")
 
     codes_input = st.text_input(
         "輸入股票代號，多檔用逗號分隔（例如：2603,1101,2609）",
         placeholder="2603,1101,2609",
     )
-    max_query = 10
+    max_query = 5
 
     if st.button("🔎 查詢", type="primary"):
         if not codes_input.strip():
@@ -1994,11 +2015,18 @@ elif page == "自選股查詢":
         for code in res["codes"]:
             price_info = res["price"].get(code, {})
             if not price_info:
-                st.error(f"❌ {code}：查無資料（可能代號錯誤、興櫃/未上市、或今日尚無交易）")
+                st.error(f"❌ {code}：查無股價資料（可能代號錯誤、今日尚無交易，或此股為**上櫃股**——"
+                        f"目前僅支援TWSE上市股票股價，上櫃股需要另外串接TPEx資料源，尚未支援）")
                 st.markdown("---")
                 continue
 
             name = price_info.get("股票名稱", "")
+            # get_stock_price_single(TWSE股價)本身不回傳公司名稱，優先用融資融券資料補上
+            # （MI_MARGN涵蓋約1292檔，範圍比股價API廣，較容易查到名稱）
+            if not name:
+                margin_row_for_name = res["margin"][res["margin"]["股票代號"].astype(str) == code] if not res["margin"].empty else pd.DataFrame()
+                if not margin_row_for_name.empty:
+                    name = margin_row_for_name.iloc[0].get("股票名稱", "")
             close = price_info.get("收盤價", "")
             change_pct = price_info.get("漲跌幅%", "")
 

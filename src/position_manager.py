@@ -48,15 +48,15 @@ DATA_SOURCE_ADHOC = "自選股(即時查詢)"
 
 # ── 進場規則預設參數（可依回測資料校正）──────────────────────
 MAX_POSITIONS = 3
-ENTRY_MIN_SCORE = 4.0
-ENTRY_MIN_CONVERSION = 20.0
+ENTRY_MIN_SCORE = 7.0
+ENTRY_MIN_CONVERSION = 60.0
 ENTRY_MAX_PRICE = 1000.0  # 資金有限，優先篩選股價1000元以下的標的（零股操作，股價太高單股成本負擔重）
 
 # ── 出場規則預設參數 ──────────────────────────────────────
 DEFAULT_STOP_LOSS_PCT = 10.0     # 預設停損 -10%（使用者可在新增持倉時自訂到8~20%）
 DEFAULT_TAKE_PROFIT_PCT = 25.0   # 預設停利 +25%（未來可用回測「T20內平均最大報酬%」校正）
 SIGNAL_WEAKEN_SCORE_DROP = 2.0   # 評分較進場時下降超過此值 → 判定訊號轉弱
-SIGNAL_WEAKEN_CONVERSION_FLOOR = 10.0  # 買超轉換率%跌破此值 → 判定法人開始分歧
+SIGNAL_WEAKEN_CONVERSION_FLOOR = 40.0  # 買超轉換率%跌破此值 → 判定法人開始分歧
 
 # 技術面提早轉弱訊號（來自price_fetcher.py的KD訊號/MACD訊號/背離警示欄位）
 TECH_WEAKEN_KD_SIGNALS = {"🔴 死亡交叉", "🍂 醞釀死亡交叉"}
@@ -183,7 +183,7 @@ def add_position(ss, code: str, name: str, entry_date: str, entry_price: float, 
 
 
 def close_position(ss, row_index: int, exit_date: str, exit_price: float, exit_reason: str):
-    """手動關閉一筆持倉（使用者實際賣出時呼叫）"""
+    """手動關閉一筆持倉（使用者實際賣出時呼叫，會保留歷史紀錄，狀態改為已出場）"""
     df = _load_positions(ss)
     if row_index >= len(df):
         return False
@@ -191,6 +191,35 @@ def close_position(ss, row_index: int, exit_date: str, exit_price: float, exit_r
     df.at[row_index, "出場日期"] = exit_date
     df.at[row_index, "出場價"] = exit_price
     df.at[row_index, "出場原因"] = exit_reason
+    _write_positions(ss, df)
+    return True
+
+
+def delete_position(ss, row_index: int) -> bool:
+    """
+    完全刪除一筆持倉紀錄（不留痕跡）
+    跟 close_position 不同：close_position是「正常賣出」，會保留歷史供之後統計勝率；
+    delete_position是「這筆紀錄本身是錯的」（例如測試資料、輸入錯誤），直接移除，不計入任何統計
+    """
+    df = _load_positions(ss)
+    if row_index >= len(df):
+        return False
+    df = df.drop(index=row_index).reset_index(drop=True)
+    _write_positions(ss, df)
+    return True
+
+
+def update_position(ss, row_index: int, **fields) -> bool:
+    """
+    修改一筆持倉紀錄的欄位（例如訂正輸入錯誤的進場價/股數/停損停利%）
+    fields: 要更新的欄位=新值，例如 update_position(ss, 0, 進場價=150.5, 累計股數=1000)
+    """
+    df = _load_positions(ss)
+    if row_index >= len(df):
+        return False
+    for key, val in fields.items():
+        if key in df.columns:
+            df.at[row_index, key] = val
     _write_positions(ss, df)
     return True
 
