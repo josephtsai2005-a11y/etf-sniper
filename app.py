@@ -83,21 +83,24 @@ def load_sheet(sheet_name: str) -> pd.DataFrame:
         # 找欄位標題行：擴充關鍵字 + 排除空白列 + 排除過長內容(AI分析文字)
         header_idx = None
         header_keywords = ["排名", "股票代號", "股票名稱", "代號", "題材", "主題", "關鍵字"]
+        fallback_idx = None
         for i, row in enumerate(all_values[:8]):
             row_text = " ".join(str(c) for c in row)
             if not row_text.strip():
                 continue
-            if len(row_text) > 100:
+            if len(row_text) > 300:
                 continue
             non_empty_cols = sum(1 for c in row if str(c).strip())
-            if non_empty_cols < 2:  # 標題列通常只有1個非空欄位
+            if non_empty_cols < 2:  # 標題列通常只有1個非空欄位（例如"XXX 20260812 更新：16:50"這種title列）
                 continue
             if any(k in row_text for k in header_keywords):
                 header_idx = i
                 break
+            if fallback_idx is None:
+                fallback_idx = i  # 記住第一個「看起來像正常欄位列」的位置，避免關鍵字沒命中時誤判成title列
 
         if header_idx is None:
-            header_idx = 0
+            header_idx = fallback_idx if fallback_idx is not None else 0
 
         headers = all_values[header_idx]
         data_rows = all_values[header_idx + 1:]
@@ -226,8 +229,6 @@ if page == "多方驗證名單":
     st.caption("ETF持股 × 三大法人 × 新聞題材 × 技術面 — 多重確認的高機率標的")
 
     multi_df = load_sheet(SHEET_MULTI)
-
-    st.write("🔧除錯：實際欄位名稱＝", list(multi_df.columns))  # 除錯用，確認完問題後記得刪掉
 
     if multi_df.empty:
         st.warning("尚無多方驗證資料（需等今日 16:30 後三大法人資料入庫）")
