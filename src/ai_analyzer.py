@@ -137,7 +137,13 @@ def build_affordable_picks_section(cross_df: pd.DataFrame, max_price: float = 10
 
 
 def generate_related_stocks(smart_df: pd.DataFrame, trend_df: pd.DataFrame) -> str:
-    """獨立呼叫：產生產業輪動受惠股推薦"""
+    """
+    獨立呼叫：產生產業輪動受惠股推薦
+    設計重點：AI只負責「找出哪些股票、為什麼相關」這種需要推理的部分；
+    股價是客觀事實，不讓AI憑訓練記憶猜（AI訓練資料有時間差，猜的股價常常跟現在差很多，
+    容易誤導使用者），改成AI生成完候選股票代號後，用price_fetcher即時查真實股價替換，
+    不花額外AI成本（只是多幾次TWSE查詢）
+    """
     if smart_df.empty:
         return ""
 
@@ -161,21 +167,70 @@ def generate_related_stocks(smart_df: pd.DataFrame, trend_df: pd.DataFrame) -> s
 請推薦10檔產業輪動受惠股（這些股票不在ETF持倉內，但可能因產業輪動受益）：
 
 條件：
-1. 優先選股價在1000元以下的標的（目標是讓資金有限的散戶也能實際參與，避免全部推薦高價股）
+1. 優先選你認知中股價落在1000元以下區間的標的（目標是讓資金有限的散戶也能實際參與，避免全部推薦高價股；
+   但這只是初步篩選方向，不需要在回覆裡標注確切股價，股價欄位會由系統另外即時查詢補上，不用你猜）
 2. 必須與上述強勢股的產業主題直接相關
 3. 說明與主力題材的關聯性
 
-請用以下格式回覆：
+請用以下格式回覆，股價欄位留空或填「查詢中」即可，不要自己猜測數字：
 ### 🔄 產業輪動受惠股（10檔，1000元以下優先）
 
 | 排名 | 代號 | 名稱 | 關聯題材 | 股價區間 | 受益原因 |
 |------|------|------|----------|----------|----------|
-| 1 | XXXX | XXX | XXX | XXX元以下 | XXX |
+| 1 | XXXX | XXX | XXX | 查詢中 | XXX |
 ...
 
 注意：以上為AI依產業關聯推論，非ETF實際持股驗證過的標的，僅供參考，非買賣建議。"""
 
-    return call_claude(prompt, max_tokens=1500)
+    raw_result = call_claude(prompt, max_tokens=1500)
+    if not raw_result:
+        return raw_result
+
+    return _replace_prices_with_live_data(raw_result)
+
+
+def _replace_prices_with_live_data(markdown_table: str) -> str:
+    """
+    把AI生成表格裡的股票代號抓出來，逐一用price_fetcher即時查真實股價，
+    取代AI自己猜（或留空）的股價欄位，避免顯示過期/幻覺出來的錯誤數字
+    """
+    import re
+    try:
+        from price_fetcher import get_stock_price_single
+    except Exception as e:
+        log.warning(f"股價即時替換功能無法載入price_fetcher: {e}")
+        return markdown_table
+
+    lines = markdown_table.split("\n")
+    new_lines = []
+    for line in lines:
+        # 比對表格資料列格式： | 排名 | 代號 | 名稱 | 關聯題材 | 股價區間 | 受益原因 |
+        cells = [c.strip() for c in line.split("|")]
+        if len(cells) < 7:
+            new_lines.append(line)
+            continue
+        code_candidate = cells[2]
+        if not re.fullmatch(r"\d{4,6}[A-Z]?", code_candidate):
+            new_lines.append(line)  # 不是資料列（可能是標題列或分隔線），原樣保留
+            continue
+
+        try:
+            live = get_stock_price_single(code_candidate)
+        except Exception:
+            live = None
+
+        if live and live.get("收盤價"):
+            close = live["收盤價"]
+            change_pct = live.get("漲跌幅%", 0)
+            cells[5] = f"{close}元（{change_pct:+.2f}%）"
+        else:
+            cells[5] = "查無即時股價"
+
+        new_lines.append(" | ".join([""] + cells[1:-1] + [""]))
+
+    result = "\n".join(new_lines)
+    result += "\n\n💡 股價欄位為即時查詢的真實收盤價（非AI推測），但股票篩選本身仍是AI依產業關聯推論，非ETF實際持股驗證過的標的。"
+    return result
 
 
 def analyze_news_impact(news_df, smart_df):
