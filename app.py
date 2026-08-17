@@ -282,6 +282,10 @@ if page == "多方驗證名單":
             "收盤價":     st.column_config.NumberColumn("收盤價", format="%.1f"),
             "漲跌幅%":    st.column_config.NumberColumn("漲跌幅%", format="%.2f%%"),
             "年增率%":    st.column_config.NumberColumn("月營收年增率", format="%.1f%%"),
+            "買超轉換率%": st.column_config.NumberColumn("買超轉換率%", format="%.1f%%"),
+            "法人換手強度%": st.column_config.NumberColumn("法人換手強度%", format="%.1f%%"),
+            "券資比%":    st.column_config.NumberColumn("券資比%", format="%.2f%%"),
+            "ATR%":       st.column_config.NumberColumn("ATR%", format="%.2f%%"),
         }
     )
 
@@ -1923,8 +1927,10 @@ elif page == "持倉監控":
                     f"未達{ENTRY_MIN_SCORE}分門檻，或買超轉換率/股價條件不符）。"
                     f"這是正常情況，不代表資料異常，可以調整下方股價上限或等待市況變化")
     else:
-        display_cols = ["排名", "股票代號", "股票名稱", "綜合評分", "法人訊號", "買超轉換率%",
-                         "技術面提早轉強", "收盤價", "漲跌幅%"]
+        display_cols = ["排名","股票代號","股票名稱","持有ETF數","買超法人數",
+                    "法人訊號","綜合評分","多方驗證","年增率%","營收訊號","三大合計",
+                    "買超轉換率%","法人換手強度%","融資訊號","券資比%","籌碼矛盾",
+                    "KD訊號","MACD訊號","背離警示","技術面共振","ATR%","收盤價","漲跌幅%"]
         st.dataframe(
             candidates[[c for c in display_cols if c in candidates.columns]],
             use_container_width=True, hide_index=True,
