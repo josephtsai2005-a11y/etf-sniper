@@ -41,7 +41,8 @@ MIN_TRADING_DAYS = 20         # 至少要走滿一次完整的T20觀察窗口，
 def _load_backtest_sheet(ss) -> pd.DataFrame:
     """讀取回測記錄分頁，不存在則回傳空表（含正確欄位結構）"""
     base_cols = ["記錄日期", "股票代號", "股票名稱", "進場收盤價", "綜合評分", "法人訊號",
-                 "持有ETF數", "成交量", "法人換手強度%", "買超轉換率%", BENCHMARK_COL]
+                 "持有ETF數", "成交量", "法人換手強度%", "買超轉換率%",
+                 "KD訊號", "MACD訊號", "背離警示", "技術面共振", "ATR%", BENCHMARK_COL]
     return_cols = [f"T{n}報酬率%" for n in HORIZONS]
     excess_cols = [f"T{n}超額報酬%" for n in HORIZONS]
     extra_cols = [f"T{MAX_WINDOW}內最大報酬%", f"T{MAX_WINDOW}內最大報酬發生日"]
@@ -109,6 +110,11 @@ def record_daily_snapshot(ss, smart_df: pd.DataFrame, trade_date: str, benchmark
             "成交量": row.get("成交量", ""),
             "法人換手強度%": row.get("法人換手強度%", ""),
             "買超轉換率%": row.get("買超轉換率%", ""),
+            "KD訊號": row.get("KD訊號", ""),
+            "MACD訊號": row.get("MACD訊號", ""),
+            "背離警示": row.get("背離警示", ""),
+            "技術面共振": row.get("技術面共振", ""),
+            "ATR%": row.get("ATR%", ""),
             BENCHMARK_COL: benchmark_price if benchmark_price else "",
             **{f"T{n}報酬率%": "" for n in HORIZONS},
             **{f"T{n}超額報酬%": "" for n in HORIZONS},
@@ -402,6 +408,41 @@ def get_etf_holding_group_summary(ss, min_score: float = None) -> pd.DataFrame:
         records.append(row)
 
     return pd.DataFrame(records)
+
+
+def get_technical_signal_summary(ss, signal_col: str = "技術面共振") -> pd.DataFrame:
+    """
+    依技術面訊號分組統計未來報酬——用來驗證KD/MACD/技術面共振這些「提早偵測」訊號是否真的有效
+    signal_col: 要分析哪個技術欄位，可選 "技術面共振"、"KD訊號"、"MACD訊號"
+    """
+    df = _load_backtest_sheet(ss)
+    if df.empty or signal_col not in df.columns:
+        return pd.DataFrame()
+
+    records = []
+    for signal in df[signal_col].dropna().unique().tolist():
+        signal = str(signal).strip()
+        if not signal:
+            continue
+        sub = df[df[signal_col] == signal]
+        if len(sub) < 5:
+            continue
+        row = {signal_col: signal, "樣本數": len(sub)}
+        for n in HORIZONS:
+            col = f"T{n}報酬率%"
+            vals = pd.to_numeric(sub[col], errors="coerce").dropna()
+            if len(vals) > 0:
+                row[f"T{n}平均報酬%"] = round(vals.mean(), 2)
+                row[f"T{n}勝率%"] = round((vals > 0).sum() / len(vals) * 100, 1)
+            else:
+                row[f"T{n}平均報酬%"] = None
+                row[f"T{n}勝率%"] = None
+        records.append(row)
+
+    result = pd.DataFrame(records)
+    if not result.empty and "T5平均報酬%" in result.columns:
+        result = result.sort_values("T5平均報酬%", ascending=False).reset_index(drop=True)
+    return result
 
 
 def score_bucket(s):

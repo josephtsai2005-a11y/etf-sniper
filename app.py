@@ -1292,6 +1292,7 @@ elif page == "回測績效":
     from backtest_tracker import (
         get_backtest_summary, get_signal_summary, get_institutional_intensity_summary,
         get_relative_strength_by_period, get_etf_holding_group_summary, get_etf_trend_group_summary,
+        get_technical_signal_summary,
         _load_backtest_sheet, MAX_WINDOW, score_bucket,
     )
 
@@ -1626,6 +1627,28 @@ elif page == "回測績效":
                    "可能代表這些股票只是短期被個別ETF調節部位，不代表基本面轉弱，需要更細緻的判讀。")
 
     st.markdown("---")
+
+    # ── ⑦ 技術面訊號 vs 未來報酬率 ──────────────────────────
+    st.subheader("⑦ 技術面共振/KD/MACD訊號 → 未來報酬率")
+    st.caption("驗證提早預警訊號（醞釀交叉/動能趨緩/共振燈號）是否真的能提早抓到機會")
+
+    tech_tab = st.radio("選擇要分析的技術指標", ["技術面共振", "KD訊號", "MACD訊號"], horizontal=True)
+    tech_summary = get_technical_signal_summary(ss, signal_col=tech_tab)
+    if tech_summary.empty:
+        st.info("尚無足夠資料統計（每種訊號需累積至少5筆樣本才會顯示）")
+    else:
+        display_cols7 = [tech_tab, "樣本數"]
+        for n in [1, 3, 5, 10, 20]:
+            for suffix in [f"T{n}平均報酬%", f"T{n}勝率%"]:
+                if suffix in tech_summary.columns:
+                    display_cols7.append(suffix)
+        st.dataframe(
+            tech_summary[[c for c in display_cols7 if c in tech_summary.columns]],
+            use_container_width=True, hide_index=True,
+        )
+
+    st.markdown("---")
+
     with st.expander("🔍 查看原始回測記錄（除錯用）"):
         st.dataframe(raw_backtest.tail(200), use_container_width=True, hide_index=True)
 
