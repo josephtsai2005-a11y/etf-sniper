@@ -1291,7 +1291,8 @@ elif page == "回測績效":
 
     from backtest_tracker import (
         get_backtest_summary, get_signal_summary, get_institutional_intensity_summary,
-        get_relative_strength_by_period, _load_backtest_sheet, MAX_WINDOW, score_bucket,
+        get_relative_strength_by_period, get_etf_holding_group_summary, get_etf_trend_group_summary,
+        _load_backtest_sheet, MAX_WINDOW, score_bucket,
     )
 
     raw_backtest = _load_backtest_sheet(ss)
@@ -1533,6 +1534,96 @@ elif page == "回測績效":
                 st.caption("💡 正的超額報酬代表跑贏大盤（大盤跌時代表相對抗跌，大盤漲時代表領漲）。"
                            "如果評分越高的組別超額報酬越明顯為正，就是「評分真的有選股能力」的證據，"
                            "不會被大盤系統性漲跌淹沒判讀。")
+
+    # ── ⑤ ETF共識階段分析 ──────────────────────────
+    st.subheader("⑤ ETF共識階段 → 未來報酬率（早期未獲共識 vs 高度共識）")
+    st.caption("驗證假設：ETF持有數少（可能還沒被多數經理人認可）是否代表早期機會？"
+               "持有數多（高度共識）是否代表股價已被推升、剩餘空間較小？")
+
+    etf_group_all = get_etf_holding_group_summary(ss)
+    if etf_group_all.empty:
+        st.info("尚無足夠資料統計（每組需累積至少5筆樣本才會顯示）")
+    else:
+        st.markdown("**全部樣本（不分評分高低）**")
+        display_cols5 = ["ETF共識分組", "樣本數"]
+        for n in [1, 3, 5, 10, 20]:
+            for suffix in [f"T{n}平均報酬%", f"T{n}勝率%"]:
+                if suffix in etf_group_all.columns:
+                    display_cols5.append(suffix)
+        max_col5 = f"T{MAX_WINDOW}內平均最大報酬%"
+        if max_col5 in etf_group_all.columns:
+            display_cols5.append(max_col5)
+        st.dataframe(
+            etf_group_all[[c for c in display_cols5 if c in etf_group_all.columns]],
+            use_container_width=True, hide_index=True,
+        )
+
+        if "T5平均報酬%" in etf_group_all.columns:
+            plot_df5 = etf_group_all.dropna(subset=["T5平均報酬%"])
+            if not plot_df5.empty:
+                fig5 = px.bar(
+                    plot_df5, x="ETF共識分組", y="T5平均報酬%",
+                    color="T5平均報酬%",
+                    color_continuous_scale=["#E85D5D", "#E6F1FB", "#1D9E75"],
+                    text="T5平均報酬%",
+                )
+                fig5.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
+                fig5.update_layout(
+                    title="各ETF共識分組 T+5交易日 平均報酬率比較",
+                    plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                    showlegend=False,
+                )
+                st.plotly_chart(fig5, use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("**只看高分股（綜合評分≥7分）——精準回答「同樣是高分股，ETF共識階段不同，報酬有沒有差異」**")
+    etf_group_highscore = get_etf_holding_group_summary(ss, min_score=7.0)
+    if etf_group_highscore.empty:
+        st.info("尚無足夠資料統計（評分≥7分且每組需累積至少5筆樣本才會顯示）")
+    else:
+        st.dataframe(
+            etf_group_highscore[[c for c in display_cols5 if c in etf_group_highscore.columns]],
+            use_container_width=True, hide_index=True,
+        )
+        st.caption("💡 如果「≤3檔」這組報酬率明顯優於「≥9檔」，代表在共識形成早期進場確實有優勢，"
+                   "股價還沒完全反映利多；如果「≥9檔」報酬反而更好或差不多，代表高度共識帶來的動能"
+                   "可能比「早期卡位」更重要，或者早期階段的訊號本身可靠度較低（畢竟還沒被多數ETF驗證過）。")
+
+    st.markdown("---")
+
+    # ── ⑥ ETF持有趨勢分析（解決「低持有數=早期機會 or 正在流失」的疑慮）──
+    st.subheader("⑥ ETF持有趨勢 → 未來報酬率（上升 vs 持平 vs 下降）")
+    st.caption("關鍵疑慮：「持有ETF數少」可能是①正在被更多ETF發現的早期階段，也可能是②原本很多、後來被減碼/清倉的衰退階段——"
+               "這兩種完全相反，只看當下水位分不出來，這裡改看「10個交易日前 vs 現在」的變化方向")
+
+    etf_trend_all = get_etf_trend_group_summary(ss, lookback_days=10)
+    if etf_trend_all.empty:
+        st.info("尚無足夠資料統計（需要累積至少10個交易日以上才能算出趨勢方向，每組需至少5筆樣本）")
+    else:
+        st.markdown("**全部樣本**")
+        display_cols6 = ["ETF趨勢", "樣本數"]
+        for n in [1, 3, 5, 10, 20]:
+            for suffix in [f"T{n}平均報酬%", f"T{n}勝率%"]:
+                if suffix in etf_trend_all.columns:
+                    display_cols6.append(suffix)
+        st.dataframe(
+            etf_trend_all[[c for c in display_cols6 if c in etf_trend_all.columns]],
+            use_container_width=True, hide_index=True,
+        )
+
+    st.markdown("---")
+    st.markdown("**只看「≤3檔」這組——精準驗證：同樣是低持有數，上升趨勢 vs 下降趨勢，報酬差多少？**")
+    etf_trend_low = get_etf_trend_group_summary(ss, lookback_days=10, level_filter="≤3檔")
+    if etf_trend_low.empty:
+        st.info("尚無足夠資料統計")
+    else:
+        st.dataframe(
+            etf_trend_low[[c for c in display_cols6 if c in etf_trend_low.columns]],
+            use_container_width=True, hide_index=True,
+        )
+        st.caption("💡 如果「上升趨勢」明顯優於「下降趨勢」，代表你的假設成立——低持有數要搭配「正在被發現」"
+                   "的動能才是真機會，單純持有數低本身不夠，還要看方向；如果「下降趨勢」的股票報酬也不差，"
+                   "可能代表這些股票只是短期被個別ETF調節部位，不代表基本面轉弱，需要更細緻的判讀。")
 
     st.markdown("---")
     with st.expander("🔍 查看原始回測記錄（除錯用）"):

@@ -236,6 +236,174 @@ def backfill_returns(ss):
         log.info("回測回填：本次無新資料可回填")
 
 
+def get_etf_trend_group_summary(ss, lookback_days: int = 10, level_filter: str = None) -> pd.DataFrame:
+    """
+    依「ETF持有數的變化趨勢」分組（不是只看當下水位），解決一個重要盲點：
+    「持有ETF數低」可能是①正在被市場慢慢發現、往上爬的早期階段，
+    也可能是②原本很多ETF持有、後來慢慢被減碼／清倉，正在往下掉的衰退階段——
+    這兩種是完全相反的情境，只看「當下有幾檔」看不出來，必須看「趨勢方向」才能分辨
+
+    做法：往回查同一檔股票 lookback_days 個交易日前的「持有ETF數」，跟現在比較：
+      - 上升趨勢：現在比過去多（正在被更多ETF發現/加碼）
+      - 下降趨勢：現在比過去少（正在被ETF減碼/清倉）
+      - 持平：差異在1檔以內
+
+    level_filter: 可選，只看特定水位分組（例如只看"≤3檔"的股票，比較同樣是≤3檔，
+                  上升趨勢跟下降趨勢的未來報酬有沒有差異——這是驗證「早期機會 vs 正在流失」的關鍵比較）
+                  可選值："≤3檔"、"4-8檔"、"≥9檔"、None（不篩選水位，全部一起看趨勢）
+    """
+    df = _load_backtest_sheet(ss)
+    if df.empty:
+        return pd.DataFrame()
+
+    df["持有ETF數"] = pd.to_numeric(df["持有ETF數"], errors="coerce")
+
+    trading_days = sorted(df["記錄日期"].dropna().unique().tolist())
+    day_index = {d: i for i, d in enumerate(trading_days)}
+
+    etf_lookup = {}
+    for _, r in df.iterrows():
+        if pd.notna(r["持有ETF數"]):
+            etf_lookup[(r["股票代號"], r["記錄日期"])] = r["持有ETF數"]
+
+    def _level_group(n):
+        if pd.isna(n):
+            return None
+        if n <= 3:
+            return "≤3檔"
+        elif n <= 8:
+            return "4-8檔"
+        else:
+            return "≥9檔"
+
+    trends = []
+    for idx, row in df.iterrows():
+        code = row["股票代號"]
+        rec_date = row["記錄日期"]
+        current_val = row["持有ETF數"]
+
+        if pd.isna(current_val) or rec_date not in day_index:
+            trends.append(None)
+            continue
+
+        rec_idx = day_index[rec_date]
+        past_idx = rec_idx - lookback_days
+        if past_idx < 0:
+            trends.append(None)  # 資料還沒累積到足夠天數往回比較
+            continue
+
+        # 找最近的過去交易日資料（該股當天不一定有紀錄，往前後3天找最近的）
+        past_val = None
+        for offset in range(0, 4):
+            probe_idx = past_idx - offset
+            if probe_idx < 0:
+                break
+            probe_date = trading_days[probe_idx]
+            if (code, probe_date) in etf_lookup:
+                past_val = etf_lookup[(code, probe_date)]
+                break
+
+        if past_val is None:
+            trends.append(None)
+            continue
+
+        delta = current_val - past_val
+        if delta >= 1:
+            trends.append("📈 上升趨勢")
+        elif delta <= -1:
+            trends.append("📉 下降趨勢")
+        else:
+            trends.append("➡️ 持平")
+
+    df["ETF趨勢"] = trends
+    df["ETF水位分組"] = df["持有ETF數"].apply(_level_group)
+
+    if level_filter:
+        df = df[df["ETF水位分組"] == level_filter]
+
+    records = []
+    for trend_label in ["📈 上升趨勢", "➡️ 持平", "📉 下降趨勢"]:
+        sub = df[df["ETF趨勢"] == trend_label]
+        if len(sub) < 5:
+            continue
+        row = {"ETF趨勢": trend_label, "樣本數": len(sub)}
+        for n in HORIZONS:
+            col = f"T{n}報酬率%"
+            vals = pd.to_numeric(sub[col], errors="coerce").dropna()
+            if len(vals) > 0:
+                row[f"T{n}平均報酬%"] = round(vals.mean(), 2)
+                row[f"T{n}勝率%"] = round((vals > 0).sum() / len(vals) * 100, 1)
+            else:
+                row[f"T{n}平均報酬%"] = None
+                row[f"T{n}勝率%"] = None
+        records.append(row)
+
+    return pd.DataFrame(records)
+
+
+def get_etf_holding_group_summary(ss, min_score: float = None) -> pd.DataFrame:
+    """
+    依「持有ETF數」分成三組，統計各組未來報酬率——驗證「共識形成中 vs 共識已飽和」的假設：
+      - ≤3檔：可能還沒被多數基金經理人認可，若之後陸續被更多ETF加碼，可能是早期機會
+      - 4-8檔：共識正在形成中
+      - ≥9檔：高度共識，但也可能股價已經被推升、反映了大部分利多，剩餘空間較小
+
+    min_score: 若指定，只統計「綜合評分>=min_score」的樣本（例如只看7分以上的股票，
+               排除掉低分股的干擾，更精確回答「同樣是高分股，ETF持有數不同，未來報酬有沒有差異」）
+    """
+    df = _load_backtest_sheet(ss)
+    if df.empty:
+        return pd.DataFrame()
+
+    df["持有ETF數"] = pd.to_numeric(df["持有ETF數"], errors="coerce")
+    df["綜合評分"] = pd.to_numeric(df["綜合評分"], errors="coerce")
+
+    if min_score is not None:
+        df = df[df["綜合評分"] >= min_score]
+        if df.empty:
+            return pd.DataFrame()
+
+    def etf_group(n):
+        if pd.isna(n):
+            return None
+        if n <= 3:
+            return "≤3檔（早期未獲共識）"
+        elif n <= 8:
+            return "4-8檔（共識形成中）"
+        else:
+            return "≥9檔（高度共識）"
+
+    df["ETF共識分組"] = df["持有ETF數"].apply(etf_group)
+
+    group_order = ["≤3檔（早期未獲共識）", "4-8檔（共識形成中）", "≥9檔（高度共識）"]
+    records = []
+    for grp in group_order:
+        sub = df[df["ETF共識分組"] == grp]
+        if len(sub) < 5:
+            continue
+        row = {"ETF共識分組": grp, "樣本數": len(sub)}
+        for n in HORIZONS:
+            col = f"T{n}報酬率%"
+            vals = pd.to_numeric(sub[col], errors="coerce").dropna()
+            if len(vals) > 0:
+                row[f"T{n}平均報酬%"] = round(vals.mean(), 2)
+                row[f"T{n}勝率%"] = round((vals > 0).sum() / len(vals) * 100, 1)
+            else:
+                row[f"T{n}平均報酬%"] = None
+                row[f"T{n}勝率%"] = None
+
+        max_col = f"T{MAX_WINDOW}內最大報酬%"
+        max_vals = pd.to_numeric(sub[max_col], errors="coerce").dropna()
+        if len(max_vals) > 0:
+            row[f"T{MAX_WINDOW}內平均最大報酬%"] = round(max_vals.mean(), 2)
+        else:
+            row[f"T{MAX_WINDOW}內平均最大報酬%"] = None
+
+        records.append(row)
+
+    return pd.DataFrame(records)
+
+
 def score_bucket(s):
     """評分區間分類（模組層級函式，供 get_backtest_summary 與 Streamlit 頁面明細鑽取共用）"""
     if pd.isna(s):
