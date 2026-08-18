@@ -29,9 +29,11 @@ position_manager.py
               自選股也適用，因為技術指標是即時抓取，不依賴ETF追蹤範圍）
 """
 import logging
+import time
 import pandas as pd
 from datetime import datetime
 import pytz
+import gspread
 
 log = logging.getLogger(__name__)
 TW_TZ = pytz.timezone("Asia/Taipei")
@@ -84,11 +86,32 @@ STATUS_OPEN = "持有中"
 STATUS_CLOSED = "已出場"
 
 
+def _with_retry(func, retries: int = 3, base_delay: float = 2.0):
+    """
+    Google Sheets API 429（頻率限制）重試包裝器
+    遇到429時等待後自動重試，避免直接讓整個頁面crash
+    """
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            return func()
+        except gspread.exceptions.APIError as e:
+            last_error = e
+            is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "Quota exceeded" in str(e)
+            if is_rate_limit and attempt < retries:
+                wait = base_delay * (attempt + 1)
+                log.warning(f"Google Sheets API頻率限制，{wait}秒後重試（第{attempt+1}次）: {e}")
+                time.sleep(wait)
+                continue
+            raise
+    raise last_error
+
+
 def _load_positions(ss) -> pd.DataFrame:
     """讀取持倉紀錄，不存在則回傳空表"""
     try:
-        ws = ss.worksheet(SHEET_POSITIONS)
-        vals = ws.get_all_values()
+        ws = _with_retry(lambda: ss.worksheet(SHEET_POSITIONS))
+        vals = _with_retry(lambda: ws.get_all_values())
         if len(vals) < 2:
             return pd.DataFrame(columns=POSITION_COLS)
         df = pd.DataFrame(vals[1:], columns=vals[0])
@@ -96,21 +119,30 @@ def _load_positions(ss) -> pd.DataFrame:
             if c not in df.columns:
                 df[c] = ""
         return df
-    except Exception:
+    except gspread.exceptions.WorksheetNotFound:
+        return pd.DataFrame(columns=POSITION_COLS)
+    except Exception as e:
+        log.warning(f"讀取持倉紀錄失敗: {e}")
         return pd.DataFrame(columns=POSITION_COLS)
 
 
 def _write_positions(ss, df: pd.DataFrame):
     """整表覆寫回Sheets"""
-    existing = [ws.title for ws in ss.worksheets()]
-    if SHEET_POSITIONS not in existing:
-        ws = ss.add_worksheet(title=SHEET_POSITIONS, rows=500, cols=15)
-    else:
-        ws = ss.worksheet(SHEET_POSITIONS)
-    ws.clear()
-    ws.append_row(df.columns.tolist())
-    if not df.empty:
-        ws.append_rows(df.fillna("").values.tolist(), value_input_option="USER_ENTERED")
+    def _do_write():
+        existing = [ws.title for ws in ss.worksheets()]
+        if SHEET_POSITIONS not in existing:
+            ws = ss.add_worksheet(title=SHEET_POSITIONS, rows=500, cols=15)
+        else:
+            ws = ss.worksheet(SHEET_POSITIONS)
+        ws.clear()
+        ws.append_row(df.columns.tolist())
+        if not df.empty:
+            ws.append_rows(df.fillna("").values.tolist(), value_input_option="USER_ENTERED")
+
+    try:
+        _with_retry(_do_write)
+    except Exception as e:
+        log.warning(f"寫入持倉紀錄失敗: {e}")
 
 
 def add_position(ss, code: str, name: str, entry_date: str, entry_price: float, shares: float,
