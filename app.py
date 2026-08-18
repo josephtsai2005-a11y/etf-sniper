@@ -246,6 +246,8 @@ if page == "多方驗證名單":
 
     num_cols(multi_df, ["持有ETF數","買超法人數","綜合評分","三大合計","收盤價","漲跌幅%"])
 
+    st.write("🔧除錯：Streamlit實際讀到的欄位＝", list(multi_df.columns))  # 除錯用，確認完記得刪掉
+
     # 摘要
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("總標的", f"{len(multi_df)} 檔")
