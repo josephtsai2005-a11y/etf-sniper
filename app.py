@@ -270,7 +270,9 @@ if page == "多方驗證名單":
         filtered = filtered[pd.to_numeric(filtered["買超法人數"],errors="coerce").fillna(0) >= min_inst]
 
     display_cols = ["排名","股票代號","股票名稱","持有ETF數","買超法人數",
-                    "法人訊號","綜合評分","多方驗證","年增率%","營收訊號","三大合計","收盤價","漲跌幅%"]
+                    "法人訊號","綜合評分","多方驗證","年增率%","營收訊號","三大合計",
+                    "買超轉換率%","法人換手強度%","融資訊號","券資比%","籌碼矛盾",
+                    "KD訊號","MACD訊號","背離警示","技術面共振","ATR%","收盤價","漲跌幅%"]
     avail = [c for c in display_cols if c in filtered.columns]
 
     st.dataframe(
@@ -290,7 +292,6 @@ if page == "多方驗證名單":
             "ATR%":       st.column_config.NumberColumn("ATR%", format="%.2f%%"),
         }
     )
-
     # 綜合評分散點圖
     if "綜合評分" in filtered.columns and "持有ETF數" in filtered.columns:
         plot_df = filtered[filtered["綜合評分"].notna() & filtered["持有ETF數"].notna()].copy()
