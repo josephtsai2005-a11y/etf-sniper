@@ -695,6 +695,17 @@ def main():
             us_summary = get_market_sentiment_summary(us_data)
             log.info(f"[AI] 美股摘要：{us_summary}")
 
+            # 回填融資融券：TWSE融資融券日報約晚上9:30才公布，比16:45的daily job時間晚，
+            # 16:45當下抓到的一定是空的，這裡（23:00，確定已過公布時間）重新抓一次真正的資料，
+            # 回頭把「多方驗證名單」的融資融券相關欄位補上
+            try:
+                from margin_fetcher import backfill_margin_signals_to_multi_sheet
+                log.info("[AI] 回填融資融券資料到多方驗證名單...")
+                backfilled = backfill_margin_signals_to_multi_sheet(ss2, TRADE_DATE)
+                log.info(f"[AI] 融資融券回填：{backfilled} 檔已更新")
+            except Exception as e:
+                log.warning(f"融資融券回填失敗（不影響主報告）: {e}")
+
             # 大盤法人氛圍需要的補充資料：全市場融資融券彙總 + 0050基準價變化
             market_margin = {}
             benchmark_change = None

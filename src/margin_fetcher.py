@@ -240,3 +240,99 @@ def compute_margin_signal(row) -> str:
     elif change_pct < 0:
         return "融資小減"
     return "融資持平"
+
+def backfill_margin_signals_to_multi_sheet(ss, trade_date: str) -> int:
+    """
+    融資融券回填機制：TWSE融資融券日報公布時間約晚上9:30（比三大法人的下午5:00晚很多），
+    daily job在16:45執行時，當天的融資融券資料根本還沒公布，抓到的一定是空的——
+    這不是門檻設太嚴，是抓取時間點抓早了。
+
+    這個函式設計成在較晚的時段（例如23:00的ai job，確定晚於21:30公布時間）呼叫，
+    重新抓一次當天真正的融資融券資料，回頭把「多方驗證名單」分頁裡的
+    「融資增減(張)」「券資比%」「融資訊號」「籌碼矛盾」這幾欄用新資料覆蓋更新，
+    其他欄位（法人/技術面/評分等）維持16:45寫入的原值不動。
+
+    回傳：成功回填的股票筆數（0代表融資融券資料這次依然抓不到，可能TWSE還沒公布或延遲更久）
+    """
+    import time as _t
+
+    SHEET_MULTI = "多方驗證名單"
+    try:
+        ws = ss.worksheet(SHEET_MULTI)
+        all_values = ws.get_all_values()
+    except Exception as e:
+        log.warning(f"回填融資融券失敗，讀取「{SHEET_MULTI}」失敗: {e}")
+        return 0
+
+    if len(all_values) < 3:
+        log.warning(f"回填融資融券失敗：「{SHEET_MULTI}」目前沒有足夠資料")
+        return 0
+
+    header = all_values[1]  # 第1列是title、第2列(index=1)才是真正欄位標題
+    data_rows = all_values[2:]
+
+    if "股票代號" not in header:
+        log.warning(f"回填融資融券失敗：「{SHEET_MULTI}」找不到「股票代號」欄位")
+        return 0
+
+    df = pd.DataFrame(data_rows, columns=header)
+
+    stock_codes = df["股票代號"].dropna().astype(str).unique().tolist()
+    if not stock_codes:
+        return 0
+
+    margin_df = fetch_margin_for_stocks(stock_codes, trade_date)
+    if margin_df.empty:
+        log.warning(f"回填融資融券：{trade_date} 這次重新抓取依然沒有資料"
+                     f"（可能TWSE還沒公布，或今天休市），暫不更新")
+        return 0
+
+    margin_df["股票代號"] = margin_df["股票代號"].astype(str).str.strip()
+    margin_lookup = margin_df.set_index("股票代號").to_dict(orient="index")
+
+    for col in ["融資增減(張)", "券資比%", "融資訊號", "籌碼矛盾"]:
+        if col not in df.columns:
+            df[col] = ""
+
+    df["三大合計_num"] = pd.to_numeric(df.get("三大合計"), errors="coerce")
+
+    updated = 0
+    for idx, row in df.iterrows():
+        code = str(row["股票代號"]).strip()
+        m = margin_lookup.get(code)
+        if not m:
+            continue
+
+        bal = m.get("融資餘額(張)")
+        chg = m.get("融資增減(張)")
+        df.at[idx, "融資增減(張)"] = chg if chg is not None else ""
+        df.at[idx, "券資比%"] = m.get("券資比%", "")
+
+        signal = compute_margin_signal({"融資餘額(張)": bal, "融資增減(張)": chg})
+        df.at[idx, "融資訊號"] = signal
+
+        inst_total = row["三大合計_num"]
+        conflict = ""
+        if signal == "🔺 融資大增（散戶槓桿追價中）" and pd.notna(inst_total) and inst_total < 0:
+            conflict = "⚠️ 疑似誘多出貨（融資追價中，法人卻在賣）"
+        elif signal == "🔻 融資大減（散戶停損/獲利了結中）" and pd.notna(inst_total) and inst_total > 0:
+            conflict = "💡 疑似法人低接（散戶停損認賠，法人卻在買）"
+        df.at[idx, "籌碼矛盾"] = conflict
+
+        updated += 1
+
+    df = df.drop(columns=["三大合計_num"])
+
+    if updated > 0:
+        try:
+            ws.clear()
+            ws.append_row([all_values[0][0] if all_values[0] else f"{SHEET_MULTI} {trade_date}"])
+            _t.sleep(2)
+            ws.append_row(df.columns.tolist())
+            ws.append_rows(df.fillna("").values.tolist(), value_input_option="USER_ENTERED")
+            log.info(f"融資融券回填完成：{updated}/{len(df)} 檔已更新（資料日期：{trade_date}）")
+        except Exception as e:
+            log.warning(f"融資融券回填寫入失敗: {e}")
+            return 0
+
+    return updated
