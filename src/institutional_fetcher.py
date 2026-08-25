@@ -284,6 +284,21 @@ def cross_with_etf(
         inst_volume / merged["成交量"].replace(0, pd.NA) * 100
     ).round(1).fillna(0)
 
+    # 診斷：法人交易量理論上不該超過當日總成交量，超過100%代表資料有異常
+    # （可能是成交量沒對齊到同一天、或合併時股票代號對應錯位）
+    # 先只記錄log、不動顯示值，保留原始數字方便下次比對log找出真正根因，
+    # 確認根因後再決定是否要對顯示值加上限（例如設為NaN避免誤導）
+    over_100_mask = merged["法人換手強度%"] > 100
+    if over_100_mask.any():
+        abnormal_rows = merged.loc[over_100_mask, ["股票代號", "股票名稱", "三大合計買進", "三大合計賣出", "成交量", "法人換手強度%"]]
+        for _, r in abnormal_rows.head(10).iterrows():
+            log.warning(
+                f"法人換手強度異常：{r['股票代號']} {r['股票名稱']} "
+                f"三大合計買進={r['三大合計買進']:.0f} 三大合計賣出={r['三大合計賣出']:.0f} "
+                f"成交量={r['成交量']:.0f} → 換手強度={r['法人換手強度%']:.1f}%（理論上不應超過100%）"
+            )
+        log.warning(f"法人換手強度異常筆數：{over_100_mask.sum()}/{len(merged)}")
+
     # 買超轉換率%：淨買超佔法人總交易量比例，越接近100%代表訊號一致性越高
     merged["買超轉換率%"] = (
         merged["三大合計"] / inst_volume.replace(0, pd.NA) * 100
