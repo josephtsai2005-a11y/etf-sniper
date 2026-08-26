@@ -72,6 +72,45 @@ SEED_THEMES = [
     "被動元件", "IC設計", "封裝測試", "電源供應器", "資料中心",
 ]
 
+# 庫存循環相關母題材（2026-08-24新增，用於捕捉「產業轉折訊號」——
+# 庫存去化/回補循環通常領先股價反轉，透過新聞關鍵字追蹤這類主題）
+INVENTORY_CYCLE_THEMES = [
+    "庫存去化", "庫存回補", "稼動率", "拉貨動能", "砍單", "旺季效應", "淡季效應",
+]
+
+
+def add_seed_themes(ss, new_themes: list) -> int:
+    """
+    事後補充已核准母題材（不是走AI提案審核流程，是管理者直接指定要新增的種子題材）
+    用於SEED_THEMES清單擴充後，把新項目補進「已經初始化過」的既有母題材清單裡——
+    SEED_THEMES只在系統第一次啟用時生效，之後擴充清單需要透過這個函式手動補上，
+    不會自動反映到已經存在的Sheets資料
+
+    new_themes: 要新增的母題材名稱清單，已存在的（不論任何狀態）會被跳過，不重複新增
+    回傳：實際新增的筆數
+    """
+    df = _load_theme_list(ss)
+    existing_names = set(df["母題材"].tolist()) if not df.empty else set()
+
+    today_str = datetime.now(TW_TZ).strftime("%Y-%m-%d")
+    new_rows = []
+    for t in new_themes:
+        if t in existing_names:
+            continue
+        new_rows.append({
+            "母題材": t, "建立日期": today_str, "狀態": THEME_STATUS_APPROVED,
+            "來源關鍵字": "(手動補充種子清單)", "最後熱度日期": "",
+        })
+
+    if not new_rows:
+        log.info("add_seed_themes：所有指定題材皆已存在，無新增")
+        return 0
+
+    combined = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True) if not df.empty else pd.DataFrame(new_rows)
+    _write_theme_list(ss, combined)
+    log.info(f"add_seed_themes：新增 {len(new_rows)} 個母題材（{[r['母題材'] for r in new_rows]}）")
+    return len(new_rows)
+
 
 def _load_theme_list(ss) -> pd.DataFrame:
     """讀取母題材清單，不存在則建立並灌入種子清單"""
