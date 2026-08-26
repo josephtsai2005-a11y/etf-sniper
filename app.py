@@ -182,7 +182,7 @@ with st.sidebar:
 
     st.markdown("#### 15:30 核心資料")
     for p in ["多方驗證名單","今日訊號","聰明錢名單","持股異動明細",
-              "三大法人","基本面資料","ETF 覆蓋分析","個股查詢","原始持股庫"]:
+              "ETF連續加碼追蹤","三大法人","基本面資料","ETF 覆蓋分析","個股查詢","原始持股庫"]:
         if st.button(p, key=f"btn_{p}", use_container_width=True):
             st.session_state.selected_page = p
     st.markdown("---")
@@ -2197,3 +2197,57 @@ elif page == "自選股查詢":
 
         st.caption("💡 這裡的資料是即時抓取的原始事實，沒有經過ETF共識驗證（因為這些股票不一定被追蹤的主動式ETF持有），"
                    "判斷時建議自行綜合考量，不是系統推薦標的。")
+
+
+elif page == "ETF連續加碼追蹤":
+    st.title("📈 ETF連續加碼追蹤")
+    st.caption("哪一檔ETF連續好幾個交易日持續加碼同一檔股票——比單看「今天vs昨天」更有說服力，"
+               "代表這是有意識的、持續性的布局動作，不是單日的正常調節")
+
+    streak_df = load_sheet("ETF連續加碼追蹤")
+
+    if streak_df.empty:
+        st.info("目前尚無資料，可能原因：①歷史資料還在累積中（需要至少4個交易日才能判斷連續趨勢）"
+                "②目前沒有任何(股票,ETF)組合連續加碼達3天以上——這是正常情況，不代表資料異常")
+    else:
+        num_cols(streak_df, ["連續加碼交易日數", "累計加碼張數", "最新持股數(張)"])
+
+        min_days = st.slider("最少連續加碼交易日數", 3, 15, 3)
+        filtered = streak_df[streak_df["連續加碼交易日數"] >= min_days].copy()
+
+        st.metric("符合條件組合數", f"{len(filtered)} 組")
+
+        if filtered.empty:
+            st.info(f"目前沒有連續加碼達{min_days}天以上的組合，可調低門檻或稍後再查看")
+        else:
+            filtered = filtered.sort_values("連續加碼交易日數", ascending=False)
+            st.dataframe(
+                filtered, use_container_width=True, hide_index=True,
+                column_config={
+                    "連續加碼交易日數": st.column_config.NumberColumn("連續加碼天數", format="%d 天"),
+                    "累計加碼張數":     st.column_config.NumberColumn("累計加碼(張)", format="%.1f"),
+                    "最新持股數(張)":   st.column_config.NumberColumn("最新持股(張)", format="%.1f"),
+                }
+            )
+
+            # 同一檔股票被多檔ETF同時持續加碼，是更強的訊號——額外標示出來
+            multi_etf = filtered.groupby("股票代號").filter(lambda g: len(g) >= 2)
+            if not multi_etf.empty:
+                st.markdown("---")
+                st.subheader("🔥 多檔ETF同時持續加碼同一股票（更強訊號）")
+                st.caption("不只一檔ETF在連續加碼，代表這不是單一基金經理人的個別判斷，"
+                           "是跨機構的共同動作，訊號強度更高")
+                multi_stocks = multi_etf["股票代號"].unique().tolist()
+                for code in multi_stocks:
+                    sub = multi_etf[multi_etf["股票代號"] == code]
+                    name = sub["股票名稱"].iloc[0]
+                    st.markdown(f"**{code} {name}** — 被 {len(sub)} 檔ETF同時連續加碼")
+                    st.dataframe(
+                        sub[["ETF代碼", "連續加碼交易日數", "累計加碼張數", "最新持股數(張)"]],
+                        use_container_width=True, hide_index=True,
+                    )
+
+    st.markdown("---")
+    st.caption("💡 這是籌碼面「持續性」訊號，跟「多方驗證名單」的當日評分是互補角度："
+               "評分反映「今天綜合表現如何」，這裡反映「過去這段期間有沒有被持續性布局」，"
+               "兩者一起看更完整。")

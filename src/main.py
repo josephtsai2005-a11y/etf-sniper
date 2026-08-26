@@ -539,6 +539,27 @@ def main():
 
                     _write_diff_to_sheets(ss2, stock_diff, diff_detail, TRADE_DATE)
                     log.info(f"差異比對完成：{len(stock_diff)} 檔有變動")
+
+                    # 個別ETF連續加碼追蹤（比上面的股票整體加總更細，能看出是哪一檔ETF在持續買、
+                    # 或有沒有多檔ETF同時持續加碼同一股票）
+                    try:
+                        from diff_analyzer import compute_consecutive_accumulation
+                        streak_df = compute_consecutive_accumulation(ss2, lookback_days=15, min_streak=3)
+                        if not streak_df.empty:
+                            existing_sheets = [w.title for w in ss2.worksheets()]
+                            if "ETF連續加碼追蹤" not in existing_sheets:
+                                ws_streak = ss2.add_worksheet(title="ETF連續加碼追蹤", rows=200, cols=10)
+                            else:
+                                ws_streak = ss2.worksheet("ETF連續加碼追蹤")
+                            ws_streak.clear()
+                            ws_streak.append_row([f"ETF連續加碼追蹤 {TRADE_DATE}"])
+                            ws_streak.append_row(streak_df.columns.tolist())
+                            ws_streak.append_rows(streak_df.fillna("").values.tolist(), value_input_option="USER_ENTERED")
+                            log.info(f"ETF連續加碼追蹤（個別ETF層級）：{len(streak_df)} 組已寫入")
+                        else:
+                            log.info("ETF連續加碼追蹤：本次無符合條件的組合")
+                    except Exception as e:
+                        log.warning(f"ETF連續加碼追蹤失敗（不影響主流程）: {e}")
                 else:
                     log.warning("差異比對無結果")
         except Exception as e:

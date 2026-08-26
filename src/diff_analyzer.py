@@ -254,3 +254,79 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     log.info("diff_analyzer 模組載入成功，等待資料...")
     log.info("使用方式：從 main.py 呼叫，需要今日 + 昨日兩天資料")
+
+
+def compute_consecutive_accumulation(ss, lookback_days: int = 15, min_streak: int = 3) -> pd.DataFrame:
+    """
+    籌碼面轉折訊號：追蹤「哪一檔ETF」連續好幾個交易日持續加碼「同一檔股票」
+    比單看「今天vs昨天」更有說服力——單日加碼可能只是正常調節，
+    但同一家ETF連續3天以上都在加碼同一檔股票，代表這是有意識的、持續性的布局動作
+
+    資料來源：「盤後原始數據庫」逐日逐ETF持股紀錄（跟compute_daily_diff同一份資料，
+    只是這裡多抓lookback_days天、逐日比對，而不是只比對最近一天）
+
+    lookback_days: 往回看幾個交易日（預設15天，足夠抓到2-3週的連續趨勢）
+    min_streak: 至少要連續加碼幾天才算數（預設3天，避免把偶發的1-2天波動也算進來）
+
+    回傳：股票代號、股票名稱、ETF代碼、目前連續加碼天數、累計加碼張數、最新持股數
+    """
+    history_df = load_history_from_sheets(ss, days=lookback_days)
+    if history_df.empty:
+        log.warning("連續加碼追蹤：無歷史資料可分析")
+        return pd.DataFrame()
+
+    code_col, name_col, etf_col, share_col = "股票代號", "股票名稱", "ETF代碼", "持股數"
+    date_col = next((c for c in history_df.columns if "日期" in c or "抓取" in c), None)
+    if not date_col:
+        log.warning("連續加碼追蹤：找不到日期欄")
+        return pd.DataFrame()
+
+    df = history_df.copy()
+    df[code_col] = df[code_col].astype(str).str.strip()
+    df[share_col] = pd.to_numeric(df[share_col].astype(str).str.replace(",", ""), errors="coerce").fillna(0)
+    df[date_col] = df[date_col].astype(str).str.replace("-", "")
+
+    # 每個(股票,ETF)組合，依日期排序後的持股數序列
+    df = df.sort_values(date_col)
+    dates_available = sorted(df[date_col].unique())
+    if len(dates_available) < min_streak + 1:
+        log.info(f"連續加碼追蹤：目前只累積{len(dates_available)}個交易日資料，"
+                  f"需要至少{min_streak + 1}天才能判斷連續趨勢，暫無結果")
+        return pd.DataFrame()
+
+    records = []
+    for (code, etf), grp in df.groupby([code_col, etf_col]):
+        grp = grp.sort_values(date_col)
+        if len(grp) < min_streak + 1:
+            continue
+
+        shares_series = grp[share_col].tolist()
+        name = grp[name_col].iloc[-1] if name_col in grp.columns else ""
+
+        # 從最新一天往回數，計算連續加碼的天數（只要有一天沒加碼就中斷計算）
+        streak = 0
+        for i in range(len(shares_series) - 1, 0, -1):
+            if shares_series[i] > shares_series[i - 1]:
+                streak += 1
+            else:
+                break
+
+        if streak >= min_streak:
+            total_increase = shares_series[-1] - shares_series[-1 - streak]
+            records.append({
+                "股票代號": code,
+                "股票名稱": name,
+                "ETF代碼": etf,
+                "連續加碼交易日數": streak,
+                "累計加碼張數": round(total_increase / 1000, 1),
+                "最新持股數(張)": round(shares_series[-1] / 1000, 1),
+            })
+
+    result = pd.DataFrame(records)
+    if not result.empty:
+        result = result.sort_values("連續加碼交易日數", ascending=False).reset_index(drop=True)
+        log.info(f"連續加碼追蹤：找到 {len(result)} 組(股票,ETF)持續加碼{min_streak}天以上")
+    else:
+        log.info(f"連續加碼追蹤：目前沒有任何組合連續加碼達{min_streak}天以上")
+
+    return result
