@@ -7,7 +7,14 @@ TW_TZ = pytz.timezone("Asia/Taipei")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 MODEL = "claude-sonnet-4-6"
 
-def call_claude(prompt, system="", max_tokens=2000):
+def call_claude(prompt, system="", max_tokens=2000, retries=2):
+    """
+    呼叫Claude API，含重試機制。
+    2026-08-26曾發生RemoteDisconnected(連線被對方中斷)導致整份AI報告失敗、
+    Sheets/Streamlit都完全沒有當天資料的事故——這是偶發性網路問題，不是邏輯錯誤，
+    原本完全沒有重試，一次連線失敗就整份報告放棄，改成失敗後間隔等待再試，
+    大幅降低單次網路不穩定就導致整份報告消失的機率。
+    """
     api_key = os.environ.get("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY).strip()
     if not api_key:
         log.warning("缺少 ANTHROPIC_API_KEY")
@@ -20,16 +27,37 @@ def call_claude(prompt, system="", max_tokens=2000):
     body = {"model": MODEL, "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]}
     if system:
         body["system"] = system
-    try:
-        resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=body, timeout=120)
-        data = resp.json()
-        if resp.status_code != 200:
-            log.error(f"Claude API 失敗 (status={resp.status_code}): {data}")
+
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=body, timeout=120)
+            data = resp.json()
+            if resp.status_code != 200:
+                log.error(f"Claude API 失敗 (status={resp.status_code}): {data}")
+                # 額度不足(400)、認證錯誤等重試也沒用，直接放棄；其他狀態碼才重試
+                if resp.status_code in (400, 401, 403):
+                    return ""
+                last_error = f"status={resp.status_code}"
+                if attempt < retries:
+                    import time as _time
+                    wait = 5 * (attempt + 1)
+                    log.warning(f"Claude API重試中（第{attempt+1}次，{wait}秒後）...")
+                    _time.sleep(wait)
+                    continue
+                return ""
+            return data["content"][0]["text"]
+        except Exception as e:
+            last_error = e
+            if attempt < retries:
+                import time as _time
+                wait = 5 * (attempt + 1)
+                log.warning(f"Claude API呼叫異常，{wait}秒後重試（第{attempt+1}次）: {e}")
+                _time.sleep(wait)
+                continue
+            log.error(f"Claude API 呼叫異常（已重試{retries}次，放棄）: {e}")
             return ""
-        return data["content"][0]["text"]
-    except Exception as e:
-        log.error(f"Claude API 呼叫異常: {e}")
-        return ""
+    return ""
 
 def collect_all_data(ss):
     data = {}
@@ -585,35 +613,61 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
 
     return final_report
 
-def write_ai_report_to_sheets(ss, report, trade_date):
+def write_ai_report_to_sheets(ss, report, trade_date, retries=2):
+    """
+    寫入AI報告到Sheets，含重試機制。
+    2026-08-26事故：Claude API呼叫全數成功、報告內容都生成好了，
+    但寫入這一步遇到網路瞬斷（RemoteDisconnected），整份報告因此遺失，
+    Sheets跟Streamlit都完全看不到當天報告——原本這裡完全沒有重試，
+    一次連線失敗就前功盡棄，改成失敗後等待重試，避免「生成成功但寫入失敗」的狀況。
+    """
     import time
+    import gspread
+
     SHEET = "每日AI總結"
-    existing = [ws.title for ws in ss.worksheets()]
-    if SHEET not in existing:
-        ws = ss.add_worksheet(title=SHEET, rows=1000, cols=4)
-        ws.append_row(["日期", "更新時間", "AI分析報告（上）", "AI分析報告（下）"])
-    else:
-        ws = ss.worksheet(SHEET)
 
-    # 強制確保表頭正確，避免舊分頁殘留過期表頭導致欄位對不上
-    header = ["日期", "更新時間", "AI分析報告（上）", "AI分析報告（下）"]
-    current_header = ws.row_values(1)
-    if current_header != header:
-        ws.update('A1:D1', [header])
-        log.info(f"表頭已修正：{current_header} → {header}")
+    def _do_write():
+        existing = [ws.title for ws in ss.worksheets()]
+        if SHEET not in existing:
+            ws = ss.add_worksheet(title=SHEET, rows=1000, cols=4)
+            ws.append_row(["日期", "更新時間", "AI分析報告（上）", "AI分析報告（下）"])
+        else:
+            ws = ss.worksheet(SHEET)
 
-    now = datetime.now(TW_TZ).strftime("%H:%M")
-    time.sleep(3)
-    # 拆成兩半避免 Sheets 單格字數限制（50000字）
-    mid = len(report) // 2
-    # 找最近的換行點
-    split_pos = report.rfind("\n\n", 0, mid + 500)
-    if split_pos == -1:
-        split_pos = mid
-    part1 = report[:split_pos]
-    part2 = report[split_pos:]
-    ws.append_row([trade_date, now, part1, part2])
-    log.info(f"AI 報告寫入完成 ({trade_date})")
+        # 強制確保表頭正確，避免舊分頁殘留過期表頭導致欄位對不上
+        header = ["日期", "更新時間", "AI分析報告（上）", "AI分析報告（下）"]
+        current_header = ws.row_values(1)
+        if current_header != header:
+            ws.update('A1:D1', [header])
+            log.info(f"表頭已修正：{current_header} → {header}")
+
+        now = datetime.now(TW_TZ).strftime("%H:%M")
+        # 拆成兩半避免 Sheets 單格字數限制（50000字）
+        mid = len(report) // 2
+        split_pos = report.rfind("\n\n", 0, mid + 500)
+        if split_pos == -1:
+            split_pos = mid
+        part1 = report[:split_pos]
+        part2 = report[split_pos:]
+        ws.append_row([trade_date, now, part1, part2])
+
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            time.sleep(3)
+            _do_write()
+            log.info(f"AI 報告寫入完成 ({trade_date})")
+            return True
+        except Exception as e:
+            last_error = e
+            if attempt < retries:
+                wait = 10 * (attempt + 1)
+                log.warning(f"AI報告寫入失敗，{wait}秒後重試（第{attempt+1}次）: {e}")
+                time.sleep(wait)
+                continue
+            log.error(f"AI報告寫入失敗（已重試{retries}次，放棄，報告內容遺失）: {e}")
+            return False
+    return False
 
 def generate_stock_keywords(smart_df, news_df):
     if smart_df.empty or news_df.empty:

@@ -747,9 +747,12 @@ def main():
 
             if report:
                 _t.sleep(5)
-                write_ai_report_to_sheets(ss2, report, TRADE_DATE)
-                send_line_notify(f"\n📊 {TRADE_DATE} AI投資報告\n\n{report[:300]}...\n\n完整報告請看 Sheets")
-                log.info("[AI] 報告完成！")
+                write_success = write_ai_report_to_sheets(ss2, report, TRADE_DATE)
+                if write_success:
+                    send_line_notify(f"\n📊 {TRADE_DATE} AI投資報告\n\n{report[:300]}...\n\n完整報告請看 Sheets")
+                    log.info("[AI] 報告完成！")
+                else:
+                    log.error("[AI] 報告已生成但寫入Sheets失敗（已重試仍失敗），本次報告內容遺失")
             else:
                 log.warning("[AI] 報告產生失敗")
         except Exception as e:
