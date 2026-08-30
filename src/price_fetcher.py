@@ -448,7 +448,90 @@ def enrich_with_prices(df: pd.DataFrame, top_n: Optional[int] = None) -> pd.Data
     return merged
 
 
-if __name__ == "__main__":
+def backfill_prices_to_multi_sheet(ss, trade_date: str, delay: float = 0.3) -> int:
+    """
+    股價回填機制：2026-08-28發現TWSE股價資料當天公布得比平常晚，16:45的daily job
+    抓到的整批股票都停留在「前一交易日」的舊資料（收盤價、漲跌幅、KD、MACD等全部過期），
+    卻沒有任何錯誤訊息，因為抓取邏輯只是「拿最後一筆」，沒有檢查那筆資料的日期是否真的是今天。
+
+    這個函式設計成在較晚時段（23:00 ai job，比16:45多爭取6小時公布時間）呼叫，
+    對「多方驗證名單」裡的每檔股票重新呼叫一次get_stock_price_single()，
+    只有新抓到的「資料日期」確認等於trade_date，才會覆蓋更新該列的股價/技術指標欄位，
+    避免用另一批依然過期的資料去覆蓋，白忙一場。
+
+    回傳：成功回填的股票筆數（0代表這次重抓依然拿不到當天資料，可能TWSE延遲更嚴重）
+    """
+    SHEET_MULTI = "多方驗證名單"
+    try:
+        ws = ss.worksheet(SHEET_MULTI)
+        all_values = ws.get_all_values()
+    except Exception as e:
+        log.warning(f"股價回填失敗，讀取「{SHEET_MULTI}」失敗: {e}")
+        return 0
+
+    if len(all_values) < 3:
+        log.warning(f"股價回填失敗：「{SHEET_MULTI}」目前沒有足夠資料")
+        return 0
+
+    header = all_values[1]
+    data_rows = all_values[2:]
+    if "股票代號" not in header:
+        log.warning(f"股價回填失敗：「{SHEET_MULTI}」找不到「股票代號」欄位")
+        return 0
+
+    df = pd.DataFrame(data_rows, columns=header)
+    stock_codes = df["股票代號"].dropna().astype(str).unique().tolist()
+    if not stock_codes:
+        return 0
+
+    # 這批欄位是股價/技術指標相關，過期時需要一併回填更新
+    backfill_cols = ["收盤價", "漲跌", "漲跌幅%", "KD訊號", "MACD訊號", "背離警示", "ATR%", "技術面共振"]
+    for col in backfill_cols:
+        if col not in df.columns:
+            df[col] = ""
+
+    updated = 0
+    stale_still = 0
+    for idx, row in df.iterrows():
+        code = str(row["股票代號"]).strip()
+        try:
+            live = get_stock_price_single(code)
+        except Exception:
+            live = None
+        time.sleep(delay)
+
+        if not live:
+            continue
+
+        fetched_date = str(live.get("資料日期", "")).replace("-", "").strip()
+        if fetched_date and fetched_date != trade_date:
+            stale_still += 1
+            continue  # 這次重抓依然是舊資料，不覆蓋，維持原值
+
+        for col in backfill_cols:
+            if col in live:
+                df.at[idx, col] = live[col]
+        updated += 1
+
+    if updated > 0:
+        try:
+            ws.clear()
+            ws.append_row([all_values[0][0] if all_values[0] else f"{SHEET_MULTI} {trade_date}"])
+            time.sleep(2)
+            ws.append_row(df.columns.tolist())
+            ws.append_rows(df.fillna("").values.tolist(), value_input_option="USER_ENTERED")
+            log.info(f"股價回填完成：{updated}/{len(df)} 檔已更新（資料日期：{trade_date}）"
+                      f"，仍有{stale_still}檔重抓後依然是舊資料")
+        except Exception as e:
+            log.warning(f"股價回填寫入失敗: {e}")
+            return 0
+    else:
+        log.warning(f"股價回填：本次重抓{len(stock_codes)}檔全部依然是舊資料（TWSE延遲比預期更嚴重）")
+
+    return updated
+
+
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
     # 測試

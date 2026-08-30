@@ -739,6 +739,15 @@ def main():
             except Exception as e:
                 log.warning(f"融資融券回填失敗（不影響主報告）: {e}")
 
+            # 股價回填（新增）：TWSE股價偶爾公布得比16:45晚，這裡重新確認一次
+            try:
+                from price_fetcher import backfill_prices_to_multi_sheet
+                log.info("[AI] 回填股價/技術指標到多方驗證名單...")
+                price_backfilled = backfill_prices_to_multi_sheet(ss2, TRADE_DATE)
+                log.info(f"[AI] 股價回填：{price_backfilled} 檔已更新")
+            except Exception as e:
+                log.warning(f"股價回填失敗（不影響主報告）: {e}")
+
             # 大盤法人氛圍需要的補充資料：全市場融資融券彙總 + 0050基準價變化
             market_margin = {}
             benchmark_change = None
