@@ -459,6 +459,18 @@ def main():
         smart_df = enrich_with_prices(smart_df)
         got = smart_df['收盤價'].notna().sum() if '收盤價' in smart_df.columns else 0
         log.info(f"股價合併完成，有收盤價：{got} 檔")
+
+        # 過期資料偵測：比對每檔股票實際抓到的「資料日期」是否等於今天的TRADE_DATE，
+        # 不等於代表TWSE當天可能還沒更新該股資料、或資料源本身延遲，日誌明確標示出來，
+        # 避免像2026-08-28聯茂那次一樣，資料整天停留在前一天卻沒人發現
+        if "資料日期" in smart_df.columns:
+            stale = smart_df[
+                smart_df["資料日期"].notna() & (smart_df["資料日期"].astype(str).str.strip() != "") &
+                (smart_df["資料日期"].astype(str).str.replace("-", "") != TRADE_DATE)
+            ]
+            if not stale.empty:
+                stale_list = stale[["股票代號", "股票名稱", "資料日期"]].values.tolist()
+                log.warning(f"⚠️ 發現 {len(stale)} 檔股票資料日期與今日({TRADE_DATE})不符，可能是過期資料：{stale_list}")
     except Exception as e:
         log.warning(f"股價串接失敗（不影響主流程）: {e}")
 

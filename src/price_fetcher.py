@@ -185,6 +185,12 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
                 else:
                     kd_signal = "K<D"
 
+                # 高檔過熱：K、D兩者都卡在80以上，不論有沒有交叉都值得留意——
+                # 這種情況常常是「持續噴出、指標鈍化」，可能還沒死叉但風險已經在累積
+                # （2026-08-28使用者比對真實券商資料後提出的需求：K/D高檔糾結，比單純等死叉更早示警）
+                if k_val >= 80 and d_val >= 80:
+                    kd_signal = f"🌡️ 高檔過熱（{kd_signal}）"
+
         # ── MACD（12,26,9 EMA）───────────────────────────
         dif_val, macd_signal_val, macd_hist, macd_cross = None, None, None, ""
         if len(closes) >= 26:
@@ -318,9 +324,21 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
         else:
             resonance_signal = "🔴🔴 空頭共振"
 
-        change = float(df[change_col].iloc[-1]) if change_col else 0
-        prev = latest_close - change
-        change_pct = round(change / prev * 100, 2) if prev and prev != 0 else 0
+        # 漲跌/漲跌幅：改用收盤價序列自己算（今日收盤 - 昨日收盤），
+        # 不再直接信任TWSE原始「漲跌價差」欄位的文字格式——
+        # 該欄位的正負號編碼在TWSE不同回應裡不一定一致，直接float()轉換曾經出現正負號顛倒的案例
+        # （2026-08-28發現：某股實際上漲+3.43%，此欄位算出來卻是-3.43%，數值大小對但方向錯）
+        if len(closes) >= 2:
+            change = round(closes[-1] - closes[-2], 2)
+            change_pct = round(change / closes[-2] * 100, 2) if closes[-2] else 0
+        else:
+            change = float(df[change_col].iloc[-1]) if change_col else 0
+            change_pct = round(change / (latest_close - change) * 100, 2) if (latest_close - change) else 0
+
+        # 資料日期：回傳實際抓到的最新一筆日期，供上層比對是否跟預期交易日一致，
+        # 偵測「資料整天沒更新、停留在前一天」這種過期狀況（不會自動修正，只是讓過期狀況可被看見）
+        date_col_name = next((c for c in df.columns if "日期" in c), None)
+        latest_data_date = str(df[date_col_name].iloc[-1]).strip() if date_col_name else ""
 
         volume = float(df[vol_col].iloc[-1]) if vol_col else 0
         amount = float(df[amt_col].iloc[-1]) if amt_col else 0
@@ -330,6 +348,7 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
             "收盤價":   latest_close,
             "漲跌":     change,
             "漲跌幅%":  change_pct,
+            "資料日期": latest_data_date,
             "MA5":      ma5,
             "MA10":     ma10,
             "MA20":     ma20,
@@ -408,7 +427,7 @@ def enrich_with_prices(df: pd.DataFrame, top_n: Optional[int] = None) -> pd.Data
     df["股票代號"] = df["股票代號"].astype(str).str.strip()
 
     # 保留原本名稱欄，合併股價（不合入名稱）
-    price_cols = ["股票代號", "收盤價", "漲跌", "漲跌幅%", "MA5", "MA10", "MA20", "站上MA20",
+    price_cols = ["股票代號", "收盤價", "漲跌", "漲跌幅%", "資料日期", "MA5", "MA10", "MA20", "站上MA20",
               "均線排列", "連續站上月線天數", "量能比", "K值", "D值", "KD訊號",
               "DIF", "MACD", "MACD柱狀", "MACD訊號", "背離警示",
               "布林上軌", "布林下軌", "布林位置", "布林壓縮", "ATR", "ATR%", "技術面共振",
