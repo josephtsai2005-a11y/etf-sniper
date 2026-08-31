@@ -24,6 +24,7 @@ from datetime import datetime
 import pytz
 
 from ai_analyzer import call_claude
+from retry_utils import retry_sheets_write
 
 log = logging.getLogger(__name__)
 TW_TZ = pytz.timezone("Asia/Taipei")
@@ -63,19 +64,64 @@ def _load_backtest_sheet(ss) -> pd.DataFrame:
 
 
 def _write_backtest_sheet(ss, df: pd.DataFrame):
-    """整表覆寫回Sheets"""
+    """
+    整表覆寫回Sheets，含重試保護 + 安全寫入順序。
+
+    這是全系統風險最高的一個寫入點：「回測記錄」是累積好幾週/好幾個月的歷史資料，
+    原本的寫法是「先clear()清空整張表，再把記憶體裡的完整資料寫回去」——如果clear()
+    成功但寫入時遇到8/26那種RemoteDisconnected網路瞬斷，整個回測歷史會被清空後卻寫不回去，
+    直接歸零、無法復原，比AI報告遺失事故嚴重得多（那次只損失一天，這裡損失的是整個資料庫）。
+
+    改成「先把新資料完整寫進一個暫存分頁，確認整批都寫入成功後，才刪掉舊分頁、
+    把暫存分頁改名頂替」的順序：只要暫存分頁還沒完整寫完，正式的「回測記錄」分頁
+    完全不會被動到，把「清空舊資料」跟「新資料寫入失敗」這兩件事拆開，避免同時發生
+    導致資料真的憑空消失。
+    """
     existing = [ws.title for ws in ss.worksheets()]
-    if SHEET_BACKTEST not in existing:
-        ws = ss.add_worksheet(title=SHEET_BACKTEST, rows=20000, cols=25)
-    else:
-        ws = ss.worksheet(SHEET_BACKTEST)
-    ws.clear()
-    ws.append_row(df.columns.tolist())
-    if not df.empty:
-        rows = df.fillna("").values.tolist()
+    TEMP_SHEET = f"{SHEET_BACKTEST}_temp"
+
+    # 若上次「刪舊表+改名」中途失敗，殘留了temp分頁，先清掉重新開始，避免累積垃圾分頁
+    if TEMP_SHEET in existing:
+        try:
+            ss.del_worksheet(ss.worksheet(TEMP_SHEET))
+        except Exception:
+            pass
+
+    cols = df.columns.tolist()
+    rows = df.fillna("").values.tolist() if not df.empty else []
+
+    def _write_to_temp():
+        ws_temp = ss.add_worksheet(title=TEMP_SHEET, rows=max(len(rows) + 10, 100), cols=max(len(cols) + 5, 10))
+        ws_temp.append_row(cols)
         chunk = 5000
         for i in range(0, len(rows), chunk):
-            ws.append_rows(rows[i:i + chunk], value_input_option="USER_ENTERED")
+            ws_temp.append_rows(rows[i:i + chunk], value_input_option="USER_ENTERED")
+        return ws_temp
+
+    try:
+        ws_temp = retry_sheets_write(_write_to_temp, retries=3, base_wait=8, label="回測記錄寫入暫存分頁")
+    except Exception as e:
+        log.error(f"回測記錄寫入暫存分頁失敗（已重試仍失敗），原本的「{SHEET_BACKTEST}」完全未受影響、資料安全: {e}")
+        try:
+            if TEMP_SHEET in [w.title for w in ss.worksheets()]:
+                ss.del_worksheet(ss.worksheet(TEMP_SHEET))
+        except Exception:
+            pass
+        raise
+
+    # 暫存分頁已確認完整寫入，接下來刪舊表+改名頂替——這一步風險窗口只剩兩個API呼叫，
+    # 且即使這步失敗，新資料已經安全存在temp分頁裡不會遺失，頂多需要手動去Sheets改名
+    def _swap():
+        if SHEET_BACKTEST in [w.title for w in ss.worksheets()]:
+            ss.del_worksheet(ss.worksheet(SHEET_BACKTEST))
+        ws_temp.update_title(SHEET_BACKTEST)
+
+    try:
+        retry_sheets_write(_swap, retries=2, base_wait=5, label="回測記錄分頁改名頂替")
+    except Exception as e:
+        log.error(f"回測記錄新資料已安全寫入「{TEMP_SHEET}」分頁，但改名頂替正式分頁失敗，"
+                  f"資料沒有遺失，但需要手動去Google Sheets把「{TEMP_SHEET}」分頁改名成「{SHEET_BACKTEST}」: {e}")
+        raise
 
 
 def record_daily_snapshot(ss, smart_df: pd.DataFrame, trade_date: str, benchmark_price: float = None):

@@ -6,6 +6,7 @@ import os
 import json
 import logging
 import pandas as pd
+from retry_utils import retry_sheets_write
 
 log = logging.getLogger(__name__)
 
@@ -138,13 +139,13 @@ def ai_analyze_topic_overview(overview_df: pd.DataFrame, trade_date: str) -> str
 
 
 def write_topic_overview_to_sheets(ss, df: pd.DataFrame, ai_insight: str, trade_date: str):
-    """寫入題材總覽到 Sheets"""
+    """寫入題材總覽到 Sheets（含重試保護——這裡整合了AI分析結果，重跑一次要重新呼叫Claude API，
+    成本比純資料寫入高，值得多花點時間重試）"""
     SHEET = "題材總覽"
     existing = [ws.title for ws in ss.worksheets()]
     if SHEET not in existing:
         ss.add_worksheet(title=SHEET, rows=500, cols=15)
     ws = ss.worksheet(SHEET)
-    ws.clear()
 
     all_rows = [[f"題材總覽 {trade_date}　AI洞察已整合"]]
     if ai_insight:
@@ -154,7 +155,11 @@ def write_topic_overview_to_sheets(ss, df: pd.DataFrame, ai_insight: str, trade_
         all_rows.append(df.columns.tolist())
         all_rows.extend(df.fillna("").values.tolist())
 
-    ws.append_rows(all_rows, value_input_option="USER_ENTERED")
+    def _do_write():
+        ws.clear()
+        ws.append_rows(all_rows, value_input_option="USER_ENTERED")
+
+    retry_sheets_write(_do_write, retries=2, label="題材總覽寫入")
     log.info(f"題材總覽寫入完成：{len(df)} 個題材")
 
 

@@ -10,6 +10,7 @@ import time
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, List
+from retry_utils import retry_sheets_write
 
 log = logging.getLogger(__name__)
 
@@ -514,16 +515,25 @@ def backfill_prices_to_multi_sheet(ss, trade_date: str, delay: float = 0.3) -> i
         updated += 1
 
     if updated > 0:
-        try:
+        title_row = [all_values[0][0] if all_values[0] else f"{SHEET_MULTI} {trade_date}"]
+        cols = df.columns.tolist()
+        rows = df.fillna("").values.tolist()
+
+        def _do_write():
             ws.clear()
-            ws.append_row([all_values[0][0] if all_values[0] else f"{SHEET_MULTI} {trade_date}"])
+            ws.append_row(title_row)
             time.sleep(2)
-            ws.append_row(df.columns.tolist())
-            ws.append_rows(df.fillna("").values.tolist(), value_input_option="USER_ENTERED")
+            ws.append_row(cols)
+            ws.append_rows(rows, value_input_option="USER_ENTERED")
+
+        try:
+            # 這裡是clear()+整表重寫「多方驗證名單」，不是只回填的幾個欄位——寫入失敗時
+            # 值得多重試幾次，因為失敗代表整張表被清空後沒寫回去，不只是回填的部分沒生效
+            retry_sheets_write(_do_write, retries=3, base_wait=8, label="股價回填寫入")
             log.info(f"股價回填完成：{updated}/{len(df)} 檔已更新（資料日期：{trade_date}）"
                       f"，仍有{stale_still}檔重抓後依然是舊資料")
         except Exception as e:
-            log.warning(f"股價回填寫入失敗: {e}")
+            log.error(f"股價回填寫入失敗（已重試仍失敗）：「{SHEET_MULTI}」可能已被清空但寫入未完成，請檢查Sheets: {e}")
             return 0
     else:
         log.warning(f"股價回填：本次重抓{len(stock_codes)}檔全部依然是舊資料（TWSE延遲比預期更嚴重）")

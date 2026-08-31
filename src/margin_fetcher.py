@@ -16,6 +16,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional, List
 import pytz
+from retry_utils import retry_sheets_write
 
 log = logging.getLogger(__name__)
 TW_TZ = pytz.timezone("Asia/Taipei")
@@ -324,15 +325,24 @@ def backfill_margin_signals_to_multi_sheet(ss, trade_date: str) -> int:
     df = df.drop(columns=["三大合計_num"])
 
     if updated > 0:
-        try:
+        title_row = [all_values[0][0] if all_values[0] else f"{SHEET_MULTI} {trade_date}"]
+        cols = df.columns.tolist()
+        rows = df.fillna("").values.tolist()
+
+        def _do_write():
             ws.clear()
-            ws.append_row([all_values[0][0] if all_values[0] else f"{SHEET_MULTI} {trade_date}"])
+            ws.append_row(title_row)
             _t.sleep(2)
-            ws.append_row(df.columns.tolist())
-            ws.append_rows(df.fillna("").values.tolist(), value_input_option="USER_ENTERED")
+            ws.append_row(cols)
+            ws.append_rows(rows, value_input_option="USER_ENTERED")
+
+        try:
+            # 跟股價回填一樣，這裡是clear()+整表重寫「多方驗證名單」，失敗代表整張表被清空
+            # 卻沒寫回去，值得多重試幾次
+            retry_sheets_write(_do_write, retries=3, base_wait=8, label="融資融券回填寫入")
             log.info(f"融資融券回填完成：{updated}/{len(df)} 檔已更新（資料日期：{trade_date}）")
         except Exception as e:
-            log.warning(f"融資融券回填寫入失敗: {e}")
+            log.error(f"融資融券回填寫入失敗（已重試仍失敗）：「{SHEET_MULTI}」可能已被清空但寫入未完成，請檢查Sheets: {e}")
             return 0
 
     return updated

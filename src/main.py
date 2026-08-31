@@ -30,6 +30,7 @@ from keyword_generator import get_or_generate_keyword_map
 from backtest_tracker import record_daily_snapshot, backfill_returns
 from analyzer import run_analysis
 from margin_fetcher import fetch_margin_for_stocks
+from retry_utils import retry_sheets_write
 
 def now_tw():
     return datetime.now(pytz.timezone("Asia/Taipei"))
@@ -80,7 +81,12 @@ def send_line_notify(message: str):
 
 
 def write_smart_money_to_sheets(ss, smart_df, trade_date: str):
-    """將聰明錢名單寫入 Google Sheets 專用分頁"""
+    """
+    將聰明錢名單寫入 Google Sheets 專用分頁（含重試保護）。
+    這是每日核心輸出，前面已經花時間抓34檔ETF+聰明錢聚合+股價才算出這份清單，
+    如果只因為一次網路瞬斷就整份放棄重跑，成本很高，所以clear()+寫入整段包進重試裡，
+    只有判斷為暫時性錯誤（連線中斷等）才重試，認證/權限這類重試也沒用的錯誤直接放棄。
+    """
     import gspread
 
     SHEET_SMART = "聰明錢名單"
@@ -94,21 +100,22 @@ def write_smart_money_to_sheets(ss, smart_df, trade_date: str):
             ss.add_worksheet(title=name, rows=3000, cols=20)
             log.info(f"建立分頁：{name}")
 
-    # ── 寫入聰明錢名單（每日覆寫）──
     ws_smart = ss.worksheet(SHEET_SMART)
-    ws_smart.clear()
 
     header_row = [f"⚡ 聰明錢名單 {trade_date}　更新：{now_tw().strftime('%H:%M')}"]
-    ws_smart.append_row(header_row)
-
     cols = ["排名", "股票代號", "股票名稱", "持有ETF數", "平均權重%", "訊號", "收盤價", "漲跌幅%",
         "MA5", "MA10", "MA20", "站上MA20", "均線排列", "連續站上月線天數", "量能比",
         "成交量", "持股市值(萬)", "持有ETF清單"]
     available = [c for c in cols if c in smart_df.columns]
-    ws_smart.append_row(available)
-
     rows = smart_df[available].fillna("").values.tolist()
-    ws_smart.append_rows(rows, value_input_option="USER_ENTERED")
+
+    def _do_write():
+        ws_smart.clear()
+        ws_smart.append_row(header_row)
+        ws_smart.append_row(available)
+        ws_smart.append_rows(rows, value_input_option="USER_ENTERED")
+
+    retry_sheets_write(_do_write, retries=2, label="聰明錢名單寫入")
 
     # 高分行標記顏色
     try:
@@ -170,27 +177,38 @@ def _write_fundamental_to_sheets(ss, fund_df, trade_date, retries: int = 2):
 
 
 def _write_trends_to_sheets(ss, trends_df, cross_df, trade_date):
-    """寫入 Google Trends 資料到 Sheets"""
+    """寫入 Google Trends 資料到 Sheets（含重試保護——SerpAPI是付費額度，寫入失敗等於白花一次額度）"""
     import time
     for sheet_name, df in [("散戶情緒", trends_df), ("題材位置", cross_df)]:
         existing = [ws.title for ws in ss.worksheets()]
         if sheet_name not in existing:
             ss.add_worksheet(title=sheet_name, rows=500, cols=15)
         ws = ss.worksheet(sheet_name)
-        ws.clear()
-        ws.append_row([f"{sheet_name} {trade_date}　更新：{now_tw().strftime('%H:%M')}"])
-        if not df.empty:
-            time.sleep(5)
-            ws.append_row(df.columns.tolist())
-            time.sleep(3)
-            rows = df.fillna("").values.tolist()
-            ws.append_rows(rows, value_input_option="USER_ENTERED")
-        log.info(f"{sheet_name} 寫入完成")
+
+        title_row = [f"{sheet_name} {trade_date}　更新：{now_tw().strftime('%H:%M')}"]
+        cols = df.columns.tolist() if not df.empty else []
+        rows = df.fillna("").values.tolist() if not df.empty else []
+
+        def _do_write(ws=ws, title_row=title_row, cols=cols, rows=rows, df=df):
+            ws.clear()
+            ws.append_row(title_row)
+            if not df.empty:
+                time.sleep(5)
+                ws.append_row(cols)
+                time.sleep(3)
+                ws.append_rows(rows, value_input_option="USER_ENTERED")
+
+        try:
+            retry_sheets_write(_do_write, retries=2, label=f"{sheet_name}寫入")
+            log.info(f"{sheet_name} 寫入完成")
+        except Exception as e:
+            log.warning(f"{sheet_name} 寫入失敗（不影響主流程，但今天這張表資料遺失）: {e}")
         time.sleep(10)
 
 
 def _write_institutional_to_sheets(ss, inst_df, cross_df, trade_date):
-    """寫入三大法人資料到 Sheets"""
+    """寫入三大法人資料到 Sheets（含重試保護，上游是逐檔股票分別抓取的批次法人/融資資料，耗時較高，
+    不希望最後寫入這一步因為偶發網路問題就讓整批白抓）"""
     import time
     for sheet_name, df, cols in [
         ("三大法人", inst_df, ["排名","股票代號","外資買賣超","投信買賣超","自營買賣超","三大合計","買超法人數","法人訊號"]),
@@ -200,20 +218,33 @@ def _write_institutional_to_sheets(ss, inst_df, cross_df, trade_date):
         if sheet_name not in existing:
             ss.add_worksheet(title=sheet_name, rows=1000, cols=20)
         ws = ss.worksheet(sheet_name)
-        ws.clear()
-        ws.append_row([f"{sheet_name} {trade_date}　更新：{now_tw().strftime('%H:%M')}"])
-        if not df.empty:
-            avail = [c for c in cols if c in df.columns]
-            time.sleep(2)
-            ws.append_row(avail)
-            rows = df[avail].fillna("").values.tolist()
-            ws.append_rows(rows, value_input_option="USER_ENTERED")
-        log.info(f"{sheet_name} 寫入完成")
+
+        avail = [c for c in cols if c in df.columns] if not df.empty else []
+        title_row = [f"{sheet_name} {trade_date}　更新：{now_tw().strftime('%H:%M')}"]
+        rows = df[avail].fillna("").values.tolist() if not df.empty else []
+
+        def _do_write(ws=ws, title_row=title_row, avail=avail, rows=rows, df=df):
+            ws.clear()
+            ws.append_row(title_row)
+            if not df.empty:
+                time.sleep(2)
+                ws.append_row(avail)
+                ws.append_rows(rows, value_input_option="USER_ENTERED")
+
+        try:
+            retry_sheets_write(_do_write, retries=2, label=f"{sheet_name}寫入")
+            log.info(f"{sheet_name} 寫入完成")
+        except Exception as e:
+            log.warning(f"{sheet_name} 寫入失敗（不影響主流程，但今天這張表資料遺失）: {e}")
         time.sleep(5)
 
 
 def _write_news_to_sheets(ss, news_df, trade_date):
-    """寫入新聞歷史庫（每日追加）"""
+    """
+    寫入新聞歷史庫（每日追加，含重試保護）。
+    這個特別重要：main()裡新聞區塊的AI新聞影響分析、題材總覽、題材趨勢分析都排在這一步之後，
+    同一個try/except包住，這裡如果失敗又沒有重試，會連帶讓後面幾個功能當天全部沒資料。
+    """
     SHEET_NEWS = "新聞歷史庫"
     existing = [ws.title for ws in ss.worksheets()]
     if SHEET_NEWS not in existing:
@@ -221,20 +252,27 @@ def _write_news_to_sheets(ss, news_df, trade_date):
         log.info(f"建立分頁：{SHEET_NEWS}")
 
     ws = ss.worksheet(SHEET_NEWS)
-    all_vals = ws.get_all_values()
+
+    def _read_existing():
+        return ws.get_all_values()
+
+    all_vals = retry_sheets_write(_read_existing, retries=2, label="新聞歷史庫讀取")
 
     # 只保留有命中關鍵字的新聞（節省空間）
     tagged = news_df[news_df["關鍵字數"] > 0].copy() if "關鍵字數" in news_df.columns else news_df
 
     cols = ["抓取日期", "來源", "標題", "命中關鍵字", "發布時間", "連結"]
     avail = [c for c in cols if c in tagged.columns]
-
-    if not all_vals or all_vals == [[]]:
-        ws.append_row(avail)
-
+    need_header = not all_vals or all_vals == [[]]
     rows = tagged[avail].fillna("").values.tolist()
-    if rows:
-        ws.append_rows(rows, value_input_option="USER_ENTERED")
+
+    def _do_write():
+        if need_header:
+            ws.append_row(avail)
+        if rows:
+            ws.append_rows(rows, value_input_option="USER_ENTERED")
+
+    retry_sheets_write(_do_write, retries=2, label="新聞歷史庫寫入")
     log.info(f"新聞寫入：{len(rows)} 篇 → {SHEET_NEWS}")
 
 
@@ -258,47 +296,60 @@ def _load_news_history(ss, days: int = 14) -> pd.DataFrame:
 
 
 def _write_trend_to_sheets(ss, trend_df, cross_df, trade_date):
-    """寫入題材趨勢報告"""
+    """寫入題材趨勢報告（含重試保護）"""
     for sheet_name, df in [("題材趨勢", trend_df), ("新聞×籌碼交叉(關鍵字版)", cross_df)]:
         existing = [ws.title for ws in ss.worksheets()]
         if sheet_name not in existing:
             ss.add_worksheet(title=sheet_name, rows=1000, cols=20)
 
         ws = ss.worksheet(sheet_name)
-        ws.clear()
 
         title_row = [f"題材分析 {trade_date}　更新：{now_tw().strftime('%H:%M')}"]
         all_rows = [title_row]
-
         if not df.empty:
             all_rows.append(df.columns.tolist())
-            rows = df.fillna("").values.tolist()
-            all_rows.extend(rows)
+            all_rows.extend(df.fillna("").values.tolist())
 
-        ws.append_rows(all_rows, value_input_option="USER_ENTERED")
-        log.info(f"{sheet_name} 寫入完成")
+        def _do_write(ws=ws, all_rows=all_rows):
+            ws.clear()
+            ws.append_rows(all_rows, value_input_option="USER_ENTERED")
+
+        try:
+            retry_sheets_write(_do_write, retries=2, label=f"{sheet_name}寫入")
+            log.info(f"{sheet_name} 寫入完成")
+        except Exception as e:
+            log.warning(f"{sheet_name} 寫入失敗（不影響主流程，但今天這張表資料遺失）: {e}")
 
 def _write_etf_strength_history(ss, stock_diff, trade_date):
-    """把每日ETF力道資料追加寫入歷史分頁，供之後計算連續天數"""
+    """把每日ETF力道資料追加寫入歷史分頁，供之後計算連續天數（含重試保護——
+    這張表是累積歷史，某天漏寫會讓「連續加碼天數」計算在那天斷掉，值得重試救回來）"""
     SHEET = "ETF力道歷史"
     existing = [ws.title for ws in ss.worksheets()]
     if SHEET not in existing:
         ss.add_worksheet(title=SHEET, rows=20000, cols=10)
     ws = ss.worksheet(SHEET)
-    all_vals = ws.get_all_values()
+
+    all_vals = retry_sheets_write(lambda: ws.get_all_values(), retries=2, label="ETF力道歷史讀取")
 
     cols = ["股票代號","股票名稱","總變動張數","成交量","ETF力道%","加碼ETF數","減碼ETF數"]
     avail = [c for c in cols if c in stock_diff.columns]
-
-    if not all_vals or all_vals == [[]]:
-        ws.append_row(["日期"] + avail)
+    need_header = not all_vals or all_vals == [[]]
 
     rows = []
     for _, row in stock_diff[avail].fillna(0).iterrows():
         rows.append([trade_date] + row.tolist())
-    if rows:
-        ws.append_rows(rows, value_input_option="USER_ENTERED")
-    log.info(f"ETF力道歷史追加完成：{len(rows)} 筆 ({trade_date})")
+
+    def _do_write():
+        if need_header:
+            ws.append_row(["日期"] + avail)
+        if rows:
+            ws.append_rows(rows, value_input_option="USER_ENTERED")
+
+    try:
+        retry_sheets_write(_do_write, retries=2, label="ETF力道歷史寫入")
+        log.info(f"ETF力道歷史追加完成：{len(rows)} 筆 ({trade_date})")
+    except Exception as e:
+        log.warning(f"ETF力道歷史追加失敗（不影響主流程，但今天連續加碼天數計算會少一天樣本）: {e}")
 
 def _add_consecutive_days(ss, stock_diff, trade_date, lookback=10, retries=2):
     """計算每檔股票連續被淨加碼的天數"""
@@ -339,7 +390,7 @@ def _add_consecutive_days(ss, stock_diff, trade_date, lookback=10, retries=2):
     
 
 def _write_diff_to_sheets(ss, stock_diff, diff_detail, trade_date):
-    """寫入差異比對結果到 Google Sheets"""
+    """寫入差異比對結果到 Google Sheets（含重試保護）"""
     SHEET_DIFF    = "今日訊號"
     SHEET_DETAIL  = "持股異動明細"
 
@@ -351,7 +402,6 @@ def _write_diff_to_sheets(ss, stock_diff, diff_detail, trade_date):
 
     # 寫入今日訊號（聚合）
     ws_diff = ss.worksheet(SHEET_DIFF)
-    ws_diff.clear()
     header = [f"⚡ 今日訊號 {trade_date}　更新：{now_tw().strftime('%H:%M')}"]
     all_diff_rows = [header]
 
@@ -364,7 +414,10 @@ def _write_diff_to_sheets(ss, stock_diff, diff_detail, trade_date):
         rows = stock_diff[available].fillna("").values.tolist()
         all_diff_rows.extend(rows)
 
-    ws_diff.append_rows(all_diff_rows, value_input_option="USER_ENTERED")
+    retry_sheets_write(
+        lambda: (ws_diff.clear(), ws_diff.append_rows(all_diff_rows, value_input_option="USER_ENTERED")),
+        retries=2, label="今日訊號寫入",
+    )
 
     # 格式化加碼/減碼行（改用 batch_format，1 次 API 呼叫取代逐列呼叫）
     if not stock_diff.empty:
@@ -391,7 +444,7 @@ def _write_diff_to_sheets(ss, stock_diff, diff_detail, trade_date):
 
     # 寫入異動明細
     ws_detail = ss.worksheet(SHEET_DETAIL)
-    ws_detail.clear()
+    all_detail_rows = None
     if not diff_detail.empty:
         detail_cols = ["股票代號","股票名稱","ETF代碼","狀態",
                        "持股數_今","持股數_昨","變動張數","資金動向(萬)","今日","昨日"]
@@ -399,8 +452,17 @@ def _write_diff_to_sheets(ss, stock_diff, diff_detail, trade_date):
         all_detail_rows = [avail]
         rows = diff_detail[avail].fillna("").values.tolist()
         all_detail_rows.extend(rows)
-        ws_detail.append_rows(all_detail_rows, value_input_option="USER_ENTERED")
-    log.info(f"異動明細寫入完成 → {SHEET_DETAIL}")
+
+    def _do_write_detail():
+        ws_detail.clear()
+        if all_detail_rows:
+            ws_detail.append_rows(all_detail_rows, value_input_option="USER_ENTERED")
+
+    try:
+        retry_sheets_write(_do_write_detail, retries=2, label="異動明細寫入")
+        log.info(f"異動明細寫入完成 → {SHEET_DETAIL}")
+    except Exception as e:
+        log.warning(f"異動明細寫入失敗（不影響主流程，但今天這張表資料遺失）: {e}")
 
 
 def main():
@@ -493,11 +555,10 @@ def main():
         # ── 追加盤後原始數據庫 ──
         try:
             ws_raw = ss.worksheet("盤後原始數據庫")
-            all_vals = ws_raw.get_all_values()
+            all_vals = retry_sheets_write(lambda: ws_raw.get_all_values(), retries=2, label="盤後原始數據庫讀取")
             raw_cols = ["股票代號","股票名稱","權重%","持股數","ETF代碼","資料來源","抓取時間"]
             avail = [c for c in raw_cols if c in raw_df.columns]
-            if not all_vals or all_vals == [[]]:
-                ws_raw.append_row(avail)
+            need_header = not all_vals or all_vals == [[]]
             today_dates = [r[avail.index("抓取時間")] if "抓取時間" in avail else "" for r in all_vals[1:]]
             unique_dates = list(set(today_dates))
             log.info(f"盤後原始數據庫現有日期: {sorted(unique_dates)[-5:]}")
@@ -506,7 +567,13 @@ def main():
                 import time
                 time.sleep(3)
                 rows = raw_df[avail].fillna("").values.tolist()
-                ws_raw.append_rows(rows, value_input_option="USER_ENTERED")
+
+                def _do_write_raw():
+                    if need_header:
+                        ws_raw.append_row(avail)
+                    ws_raw.append_rows(rows, value_input_option="USER_ENTERED")
+
+                retry_sheets_write(_do_write_raw, retries=2, label="盤後原始數據庫寫入")
                 log.info(f"盤後原始數據庫追加完成：{len(rows)} 筆 ({TRADE_DATE})")
             else:
                 log.info(f"盤後原始數據庫已有 {TRADE_DATE} 資料，跳過")
@@ -563,10 +630,14 @@ def main():
                                 ws_streak = ss2.add_worksheet(title="ETF連續加碼追蹤", rows=200, cols=10)
                             else:
                                 ws_streak = ss2.worksheet("ETF連續加碼追蹤")
-                            ws_streak.clear()
-                            ws_streak.append_row([f"ETF連續加碼追蹤 {TRADE_DATE}"])
-                            ws_streak.append_row(streak_df.columns.tolist())
-                            ws_streak.append_rows(streak_df.fillna("").values.tolist(), value_input_option="USER_ENTERED")
+
+                            def _do_write_streak(ws_streak=ws_streak, streak_df=streak_df):
+                                ws_streak.clear()
+                                ws_streak.append_row([f"ETF連續加碼追蹤 {TRADE_DATE}"])
+                                ws_streak.append_row(streak_df.columns.tolist())
+                                ws_streak.append_rows(streak_df.fillna("").values.tolist(), value_input_option="USER_ENTERED")
+
+                            retry_sheets_write(_do_write_streak, retries=2, label="ETF連續加碼追蹤寫入")
                             log.info(f"ETF連續加碼追蹤（個別ETF層級）：{len(streak_df)} 組已寫入")
                         else:
                             log.info("ETF連續加碼追蹤：本次無符合條件的組合")
@@ -612,11 +683,15 @@ def main():
                           if SHEET_CROSS not in _ex:
                               ss2.add_worksheet(title=SHEET_CROSS, rows=500, cols=10)
                           ws_cross = ss2.worksheet(SHEET_CROSS)
-                          ws_cross.clear()
                           all_cross_rows = [[f"新聞×籌碼交叉 {TRADE_DATE}（AI語意分析）"]]
                           all_cross_rows.append(news_impact_df.columns.tolist())
                           all_cross_rows.extend(news_impact_df.fillna("").values.tolist())
-                          ws_cross.append_rows(all_cross_rows, value_input_option="USER_ENTERED")
+
+                          def _do_write_cross(ws_cross=ws_cross, all_cross_rows=all_cross_rows):
+                              ws_cross.clear()
+                              ws_cross.append_rows(all_cross_rows, value_input_option="USER_ENTERED")
+
+                          retry_sheets_write(_do_write_cross, retries=2, label="新聞×籌碼交叉寫入")
                           log.info(f"AI新聞影響分析完成：{len(news_impact_df)} 筆")
                   except Exception as e:
                       log.warning(f"AI新聞影響分析失敗: {e}")
