@@ -21,6 +21,31 @@ SESSION.headers.update({
 })
 
 
+def _roc_date_to_gregorian(roc_date_str: str) -> str:
+    """
+    把TWSE回傳的民國年日期字串轉成西元年8碼（YYYYMMDD），供跟TRADE_DATE比較用。
+
+    背景：TWSE的STOCK_DAY等API固定回傳民國年格式的「日期」欄位（例如"115/08/31"代表
+    2026-08-31，115=年份、用"/"分隔），但系統其他地方（TRADE_DATE、main.py的過期偵測、
+    backfill_prices_to_multi_sheet的資料日期比對）用的都是西元年8碼格式（例如"20260831"）。
+
+    2026-08-30部署的「資料日期」欄位／過期偵測／股價回填機制，一直沒有做這個轉換，
+    直接拿民國年格式的字串（"115/08/31"）跟西元年格式（"20260831"）比較，
+    這兩種格式不管實際資料新不新，字串永遠不會相等——等於這個比對從一開始就是壞的，
+    「過期資料偵測」log天天都會誤報、「股價回填機制」永遠不會真的覆蓋任何資料，
+    不是TWSE真的每次都延遲，是比對邏輯本身有問題。
+    """
+    try:
+        parts = roc_date_str.strip().split("/")
+        if len(parts) != 3:
+            return ""
+        roc_year, month, day = parts
+        gregorian_year = int(roc_year) + 1911
+        return f"{gregorian_year:04d}{int(month):02d}{int(day):02d}"
+    except Exception:
+        return ""
+
+
 def _looks_like_futures_or_invalid(stock_code: str) -> bool:
     """
     過濾明顯不是個股代號的項目（例如期貨合約 "202608 臺股期貨08/26"）
@@ -337,9 +362,16 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
             change_pct = round(change / (latest_close - change) * 100, 2) if (latest_close - change) else 0
 
         # 資料日期：回傳實際抓到的最新一筆日期，供上層比對是否跟預期交易日一致，
-        # 偵測「資料整天沒更新、停留在前一天」這種過期狀況（不會自動修正，只是讓過期狀況可被看見）
+        # 偵測「資料整天沒更新、停留在前一天」這種過期狀況（不會自動修正，只是讓過期狀況可被看見）。
+        #
+        # 重要：TWSE回傳的「日期」欄位是民國年格式（例如"115/08/31"），這裡一定要轉成
+        # 西元年8碼（"20260831"）才能跟系統其他地方用的TRADE_DATE正確比較——
+        # 這是2026-08-31發現的問題：轉換這一步原本漏掉了，導致「資料日期」跟TRADE_DATE
+        # 用的是兩種不同曆法，字串永遠不會相等，讓「過期資料偵測」天天誤報、
+        # 「股價回填機制」永遠判定為失敗、無法真的把資料寫回去，即使TWSE其實已經更新了。
         date_col_name = next((c for c in df.columns if "日期" in c), None)
-        latest_data_date = str(df[date_col_name].iloc[-1]).strip() if date_col_name else ""
+        raw_data_date = str(df[date_col_name].iloc[-1]).strip() if date_col_name else ""
+        latest_data_date = _roc_date_to_gregorian(raw_data_date)
 
         volume = float(df[vol_col].iloc[-1]) if vol_col else 0
         amount = float(df[amt_col].iloc[-1]) if amt_col else 0
@@ -539,21 +571,3 @@ def backfill_prices_to_multi_sheet(ss, trade_date: str, delay: float = 0.3) -> i
         log.warning(f"股價回填：本次重抓{len(stock_codes)}檔全部依然是舊資料（TWSE延遲比預期更嚴重）")
 
     return updated
-
-
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-
-    # 測試
-    test_codes = ["2330", "2454", "2383", "6223", "2308", "3037"]
-    log.info(f"=== 測試 {len(test_codes)} 檔股價 ===")
-
-    records = []
-    for code in test_codes:
-        r = get_stock_price_single(code)
-        if r:
-            records.append(r)
-            log.info(f"  {code}: 收盤={r['收盤價']} 漲跌幅={r['漲跌幅%']}% MA20={r['MA20']} 站上月線={r['站上MA20']}")
-        time.sleep(0.3)
-
-    print(f"\n成功取得 {len(records)}/{len(test_codes)} 檔")
