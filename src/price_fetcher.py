@@ -1,8 +1,31 @@
 """
-price_fetcher.py v3
+price_fetcher.py v4
 串接 TWSE 股價 API
 取得：收盤價、漲跌、漲跌幅%、MA20、站上月線、成交量、成交金額
 注意：同時保留股票名稱（從 holdings_df 帶入，不從 TWSE 另外抓）
+
+2026-09-01 優化（股價資料即時性）：
+1. 新增 fetch_bulk_daily_quote()：一次抓取「全市場當日收盤行情」（TWSE MI_INDEX），
+   跟institutional_fetcher.py／margin_fetcher.py已經在用的「抓全市場再過濾」模式一致。
+   用途是當某檔股票的個別STOCK_DAY歷史查詢失敗（逾時/網路瞬斷/單檔限流）時，
+   至少還能從這份全市場快照補上收盤價/成交量，不必整檔股票的股價完全開天窗
+   （技術指標MA/KD/MACD仍需要歷史序列，這份快照無法取代，只作為收盤價的備援）。
+   ⚠️ 尚未在正式環境驗證過欄位格式，部署前請先在本機執行：
+       python -c "from price_fetcher import fetch_bulk_daily_quote; df=fetch_bulk_daily_quote(); print(len(df)); print(df.head())"
+   若失敗或格式不符，函式回傳空DataFrame，不影響原本逐檔抓取的主流程。
+2. backfill_prices_to_multi_sheet() 抽出共用邏輯為 backfill_prices_to_sheet()，
+   新增 backfill_prices_to_smart_money_sheet()，讓23:00的股價回填機制也能覆蓋
+   「聰明錢名單」分頁（原本只回填「多方驗證名單」，較早的聰明錢名單即使過期也不會被修正）。
+
+2026-09-03 修正（除權息/股票分割假漲跌%）：
+使用者發現「聰明錢名單」裡「緯穎」顯示漲跌-66.54%，查證後是當天股票分割「一股換三股」
+除權（除權參考價2615元），不是真的崩跌。get_stock_price_single()原本直接拿「今收-昨收」
+兩天的原始收盤價相減算漲跌%，沒有考慮除權息/股票分割會讓股本/參考價基準不連續，導致
+算出誤導性的巨大假跌幅。新增ABNORMAL_CHANGE_PCT_THRESHOLD門檻（台股正常單日漲跌幅上限
+±10%），偵測到遠超過這個範圍的「漲跌%」時，不提供誤導性數字，改把漲跌/漲跌幅%欄位留空，
+並用「技術指標狀態」欄位明講「疑似除權息/股票分割」——兩個回填函式(backfill_prices_to_
+multi_sheet/backfill_prices_to_smart_money_sheet)也把「技術指標狀態」加進回填欄位，
+確保23:00的回填也會同步更新/清除這個標示。
 """
 import requests
 import pandas as pd
@@ -11,14 +34,33 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional, List
 from retry_utils import retry_sheets_write
+import pytz
 
 log = logging.getLogger(__name__)
+TW_TZ = pytz.timezone("Asia/Taipei")
 
 SESSION = requests.Session()
 SESSION.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Referer": "https://www.twse.com.tw/",
 })
+
+# 除權息/股票分割偵測用門檻：台股正常單日漲跌幅上限為±10%（新股上市前5個交易日、
+# 全額交割股等少數情況除外，但這些少見情況本來就該人工另外確認，不在這裡處理）。
+# 用「原始收盤價序列」直接相減若算出遠超過這個範圍的漲跌%，幾乎可以確定不是真的單日
+# 行情，而是除權息／股票分割／減資等公司行動造成股本或參考價基準不連續，見
+# get_stock_price_single() 內的使用處與2026-09-03的緯穎(6669)案例說明。
+ABNORMAL_CHANGE_PCT_THRESHOLD = 20.0
+
+
+def get_trade_date() -> str:
+    """跟institutional_fetcher.py／margin_fetcher.py用同一套判斷邏輯，避免各檔案各寫一份、標準不一致"""
+    now = datetime.now(TW_TZ)
+    if now.hour < 16:
+        now -= timedelta(days=1)
+    while now.weekday() >= 5:
+        now -= timedelta(days=1)
+    return now.strftime("%Y%m%d")
 
 
 def _roc_date_to_gregorian(roc_date_str: str) -> str:
@@ -58,6 +100,96 @@ def _looks_like_futures_or_invalid(stock_code: str) -> bool:
     if len(code) == 6 and code.isdigit() and code.startswith("20"):
         return True
     return False
+
+
+def fetch_bulk_daily_quote(trade_date: Optional[str] = None, retries: int = 2) -> pd.DataFrame:
+    """
+    一次抓取「當日全市場」收盤價/成交量/成交金額（TWSE MI_INDEX），取代逐檔呼叫STOCK_DAY，
+    跟institutional_fetcher.py的fetch_all_institutional()／margin_fetcher.py的
+    fetch_margin_all()同一套「抓全市場再過濾」模式——這兩個模組已經證明這個模式在這個
+    專案裡是可行的，這裡是把同樣的做法延伸到股價。
+
+    只提供「當日快照」（收盤價/成交量/成交金額），不含歷史序列，所以不能取代
+    get_stock_price_single()——MA/KD/MACD等技術指標仍然需要逐檔呼叫STOCK_DAY取得歷史資料。
+    這份資料的用途是：當某檔股票的STOCK_DAY歷史查詢失敗時，至少能從這裡補上收盤價，
+    不用讓那檔股票的價格完全開天窗。
+
+    刻意不從這份表格反推「漲跌」/「漲跌幅%」——price_fetcher.py先前已經踩過TWSE原始
+    漲跌欄位正負號不可靠的坑（見get_stock_price_single內的說明），現在改成用收盤價序列
+    自己算，這裡沒有歷史序列可以自己算，所以漲跌/漲跌幅%欄位留白，不去信任TWSE這張表的
+    漲跌欄位，避免重蹈覆轍。
+
+    ⚠️ 尚未在正式環境驗證過欄位格式（開發時的sandbox網路權限無法連線TWSE測試），
+    部署前請先在本機手動確認（見檔案開頭說明）。失敗或格式不符時回傳空DataFrame，
+    呼叫端會忽略備援、維持原本行為，不影響主流程。
+    """
+    if not trade_date:
+        trade_date = get_trade_date()
+
+    url = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
+    params = {"response": "json", "date": trade_date, "type": "ALLBUT0999"}
+
+    last_error = None
+    data = None
+    for attempt in range(retries + 1):
+        try:
+            resp = SESSION.get(url, params=params, timeout=20)
+            data = resp.json()
+            if data.get("stat") != "OK" or not data.get("tables"):
+                log.warning(f"全市場當日收盤行情無資料 ({trade_date})")
+                return pd.DataFrame()
+            break
+        except Exception as e:
+            last_error = e
+            if attempt < retries:
+                time.sleep(2 * (attempt + 1))
+                continue
+            log.warning(f"全市場當日收盤行情抓取失敗（已重試{retries}次）: {e}")
+            return pd.DataFrame()
+
+    # 個股明細表格：用欄位特徵找（有「證券代號」+「收盤價」），不依賴固定index，
+    # 因為TWSE這份報表過去調整過tables內部的表格順序/數量
+    stock_table = None
+    for t in data.get("tables", []):
+        fields = t.get("fields", [])
+        if "證券代號" in fields and "收盤價" in fields:
+            stock_table = t
+            break
+
+    if stock_table is None or not stock_table.get("data"):
+        log.warning(f"全市場當日收盤行情：找不到個股明細表格 ({trade_date})，"
+                    f"實際tables標題：{[t.get('title') for t in data.get('tables', [])]}")
+        return pd.DataFrame()
+
+    fields = stock_table["fields"]
+    rows = stock_table["data"]
+
+    try:
+        df = pd.DataFrame(rows, columns=fields)
+    except Exception as e:
+        log.warning(f"全市場當日收盤行情解析失敗（欄位數與資料不符）: {e}")
+        return pd.DataFrame()
+
+    def _num(v):
+        v = str(v).replace(",", "").replace("+", "").replace("X", "").strip()
+        if v in ("", "--", "---"):
+            return None
+        try:
+            return float(v)
+        except ValueError:
+            return None
+
+    df = df.rename(columns={"證券代號": "股票代號"})
+    df["股票代號"] = df["股票代號"].astype(str).str.strip()
+
+    for col in ["收盤價", "成交股數", "成交金額", "開盤價", "最高價", "最低價"]:
+        if col in df.columns:
+            df[col] = df[col].apply(_num)
+
+    df = df.rename(columns={"成交股數": "成交量"})
+    df["資料日期"] = trade_date
+    log.info(f"全市場當日收盤行情：{len(df)} 檔 ({trade_date})")
+    return df[[c for c in ["股票代號", "收盤價", "成交量", "成交金額", "資料日期"] if c in df.columns]]
 
 
 def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
@@ -361,6 +493,22 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
             change = float(df[change_col].iloc[-1]) if change_col else 0
             change_pct = round(change / (latest_close - change) * 100, 2) if (latest_close - change) else 0
 
+        # 除權息/股票分割偵測（2026-09-03新增）：
+        # 使用者實測發現「緯穎」顯示漲跌-66.54%，查證後是當天股票分割「一股換三股」除權
+        # （除權參考價2615元），股本／參考價基準因此不連續，上面用「今收-昨收」原始價格
+        # 直接相減算出來的65%~66%「跌幅」其實是假訊號，不是真的單日崩跌——2610元的收盤價
+        # 本身沒有錯，錯的是拿它跟除權前的原始收盤價直接比較。
+        # 這裡不嘗試回頭推算「還原權值後的正確漲跌%」（需要額外查除權息公告資料才能算準，
+        # 超出這支fetcher的範圍），而是採保守做法：偵測到超出台股正常單日漲跌幅上限
+        # （±10%）甚遠的異常跳動時，承認「今天没辦法用簡單相減算出有意義的漲跌%」，
+        # 把漲跌/漲跌幅%欄位留空並用「技術指標狀態」欄位明講原因，不讓使用者被誤導的
+        # 假數字騙到——沿用專案一貫「資料不足/不可信就明講」的設計原則。
+        split_note = ""
+        if change_pct is not None and abs(change_pct) > ABNORMAL_CHANGE_PCT_THRESHOLD:
+            split_note = "⚠️ 疑似除權息/股票分割（原始股價未還原權值），今日漲跌%不具比較意義"
+            change = None
+            change_pct = None
+
         # 資料日期：回傳實際抓到的最新一筆日期，供上層比對是否跟預期交易日一致，
         # 偵測「資料整天沒更新、停留在前一天」這種過期狀況（不會自動修正，只是讓過期狀況可被看見）。
         #
@@ -406,6 +554,7 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
             "技術面共振": resonance_signal,
             "成交量":   volume,
             "成交金額": amount,
+            "技術指標狀態": split_note,
         }
 
     except Exception as e:
@@ -421,6 +570,11 @@ def enrich_with_prices(df: pd.DataFrame, top_n: Optional[int] = None) -> pd.Data
     - 自動過濾疑似期貨合約等非個股代號，避免浪費API呼叫時間
     - 股票名稱從原本的 df 保留，不會被覆蓋
     - 計算「持股市值(千萬)」= 持股數 × 收盤價 / 10000000
+
+    2026-09-01新增：全市場當日收盤行情備援。個別股票的STOCK_DAY歷史查詢完全失敗時
+    （逾時/網路瞬斷/單檔限流，回傳{}），改用fetch_bulk_daily_quote()這份全市場快照
+    補上收盤價/成交量，並用「技術指標狀態」欄位明確標示這筆是備援資料、技術指標缺失，
+    不會偽裝成跟正常路徑一樣完整——沿用專案一貫「資料不足就明講」的設計原則。
     """
     if df.empty or "股票代號" not in df.columns:
         return df
@@ -436,10 +590,33 @@ def enrich_with_prices(df: pd.DataFrame, top_n: Optional[int] = None) -> pd.Data
 
     log.info(f"抓取 {len(codes)} 檔股價...")
 
+    # 全市場當日收盤行情備援：1次API呼叫，個別股票查詢失敗時用來補收盤價，
+    # 這裡失敗也不影響主流程，只是備援機制失效、退回原本行為（該股票價格留空）
+    bulk_lookup = {}
+    try:
+        bulk_quote = fetch_bulk_daily_quote()
+        if not bulk_quote.empty:
+            bulk_lookup = bulk_quote.set_index("股票代號").to_dict(orient="index")
+    except Exception as e:
+        log.debug(f"全市場當日收盤行情備援抓取失敗（不影響主流程）: {e}")
+
     records = []
     failed_codes = []
+    fallback_codes = []
     for i, code in enumerate(codes, 1):
         result = get_stock_price_single(code)
+        if not result and code in bulk_lookup:
+            b = bulk_lookup[code]
+            if b.get("收盤價") is not None:
+                result = {
+                    "股票代號": code,
+                    "收盤價":   b.get("收盤價"),
+                    "資料日期": b.get("資料日期"),
+                    "成交量":   b.get("成交量"),
+                    "成交金額": b.get("成交金額"),
+                    "技術指標狀態": "⚠️ 僅收盤價（個股歷史查詢失敗，已用全市場備援資料補收盤價，技術指標缺失）",
+                }
+                fallback_codes.append(code)
         if result:
             records.append(result)
         else:
@@ -448,6 +625,8 @@ def enrich_with_prices(df: pd.DataFrame, top_n: Optional[int] = None) -> pd.Data
             log.info(f"  股價進度 {i}/{len(codes)}")
         time.sleep(0.35)
 
+    if fallback_codes:
+        log.info(f"以下 {len(fallback_codes)} 檔改用全市場備援資料補上收盤價（技術指標缺失）: {fallback_codes}")
     if failed_codes:
         log.warning(f"以下 {len(failed_codes)} 檔股價抓取失敗（可能是TWSE無資料/新股/興櫃/暫停交易）: {failed_codes}")
 
@@ -464,7 +643,7 @@ def enrich_with_prices(df: pd.DataFrame, top_n: Optional[int] = None) -> pd.Data
               "均線排列", "連續站上月線天數", "量能比", "K值", "D值", "KD訊號",
               "DIF", "MACD", "MACD柱狀", "MACD訊號", "背離警示",
               "布林上軌", "布林下軌", "布林位置", "布林壓縮", "ATR", "ATR%", "技術面共振",
-              "成交量", "成交金額"]
+              "成交量", "成交金額", "技術指標狀態"]
     price_df = price_df[[c for c in price_cols if c in price_df.columns]]
 
     merged = df.merge(price_df, on="股票代號", how="left")
@@ -477,39 +656,40 @@ def enrich_with_prices(df: pd.DataFrame, top_n: Optional[int] = None) -> pd.Data
         merged["持股市值(千萬)"] = (shares * merged["收盤價"] / 10000000).round(0)
 
     got = merged["收盤價"].notna().sum()
-    log.info(f"股價合併完成：{got}/{len(merged)} 筆有股價")
+    log.info(f"股價合併完成：{got}/{len(merged)} 筆有股價（含備援 {len(fallback_codes)} 筆）")
     return merged
 
 
-def backfill_prices_to_multi_sheet(ss, trade_date: str, delay: float = 0.3) -> int:
+def backfill_prices_to_sheet(ss, sheet_name: str, trade_date: str,
+                              backfill_cols: List[str], delay: float = 0.3) -> int:
     """
-    股價回填機制：2026-08-28發現TWSE股價資料當天公布得比平常晚，16:45的daily job
-    抓到的整批股票都停留在「前一交易日」的舊資料（收盤價、漲跌幅、KD、MACD等全部過期），
-    卻沒有任何錯誤訊息，因為抓取邏輯只是「拿最後一筆」，沒有檢查那筆資料的日期是否真的是今天。
+    通用股價回填：把指定分頁裡過期的股價/技術指標欄位，用當天最新資料覆蓋。
 
-    這個函式設計成在較晚時段（23:00 ai job，比16:45多爭取6小時公布時間）呼叫，
-    對「多方驗證名單」裡的每檔股票重新呼叫一次get_stock_price_single()，
-    只有新抓到的「資料日期」確認等於trade_date，才會覆蓋更新該列的股價/技術指標欄位，
-    避免用另一批依然過期的資料去覆蓋，白忙一場。
+    從原本只針對「多方驗證名單」硬編的邏輯抽出來，讓其他分頁（例如「聰明錢名單」）
+    也能套用同一套回填機制，不用重複寫一份幾乎一樣的程式碼。
 
-    回傳：成功回填的股票筆數（0代表這次重抓依然拿不到當天資料，可能TWSE延遲更嚴重）
+    設計沿用原本 backfill_prices_to_multi_sheet 的邏輯：假設分頁第1列是標題、
+    第2列(index=1)是真正欄位標題、第3列起是資料；只有重抓到的「資料日期」
+    確認等於trade_date，才會覆蓋更新該列，避免用另一批依然過期的資料去覆蓋，白忙一場。
+
+    回傳：成功回填的股票筆數（0代表這次重抓依然拿不到當天資料，可能TWSE延遲更嚴重，
+    或這個分頁本身還沒有資料）。
     """
-    SHEET_MULTI = "多方驗證名單"
     try:
-        ws = ss.worksheet(SHEET_MULTI)
+        ws = ss.worksheet(sheet_name)
         all_values = ws.get_all_values()
     except Exception as e:
-        log.warning(f"股價回填失敗，讀取「{SHEET_MULTI}」失敗: {e}")
+        log.warning(f"股價回填失敗，讀取「{sheet_name}」失敗: {e}")
         return 0
 
     if len(all_values) < 3:
-        log.warning(f"股價回填失敗：「{SHEET_MULTI}」目前沒有足夠資料")
+        log.warning(f"股價回填失敗：「{sheet_name}」目前沒有足夠資料")
         return 0
 
     header = all_values[1]
     data_rows = all_values[2:]
     if "股票代號" not in header:
-        log.warning(f"股價回填失敗：「{SHEET_MULTI}」找不到「股票代號」欄位")
+        log.warning(f"股價回填失敗：「{sheet_name}」找不到「股票代號」欄位")
         return 0
 
     df = pd.DataFrame(data_rows, columns=header)
@@ -517,8 +697,6 @@ def backfill_prices_to_multi_sheet(ss, trade_date: str, delay: float = 0.3) -> i
     if not stock_codes:
         return 0
 
-    # 這批欄位是股價/技術指標相關，過期時需要一併回填更新
-    backfill_cols = ["收盤價", "漲跌", "漲跌幅%", "KD訊號", "MACD訊號", "背離警示", "ATR%", "技術面共振"]
     for col in backfill_cols:
         if col not in df.columns:
             df[col] = ""
@@ -547,7 +725,7 @@ def backfill_prices_to_multi_sheet(ss, trade_date: str, delay: float = 0.3) -> i
         updated += 1
 
     if updated > 0:
-        title_row = [all_values[0][0] if all_values[0] else f"{SHEET_MULTI} {trade_date}"]
+        title_row = [all_values[0][0] if all_values[0] else f"{sheet_name} {trade_date}"]
         cols = df.columns.tolist()
         rows = df.fillna("").values.tolist()
 
@@ -559,15 +737,44 @@ def backfill_prices_to_multi_sheet(ss, trade_date: str, delay: float = 0.3) -> i
             ws.append_rows(rows, value_input_option="USER_ENTERED")
 
         try:
-            # 這裡是clear()+整表重寫「多方驗證名單」，不是只回填的幾個欄位——寫入失敗時
-            # 值得多重試幾次，因為失敗代表整張表被清空後沒寫回去，不只是回填的部分沒生效
-            retry_sheets_write(_do_write, retries=3, base_wait=8, label="股價回填寫入")
-            log.info(f"股價回填完成：{updated}/{len(df)} 檔已更新（資料日期：{trade_date}）"
+            # 這裡是clear()+整表重寫，不是只回填的幾個欄位——寫入失敗時值得多重試幾次，
+            # 因為失敗代表整張表被清空後沒寫回去，不只是回填的部分沒生效
+            retry_sheets_write(_do_write, retries=3, base_wait=8, label=f"{sheet_name}股價回填寫入")
+            log.info(f"「{sheet_name}」股價回填完成：{updated}/{len(df)} 檔已更新（資料日期：{trade_date}）"
                       f"，仍有{stale_still}檔重抓後依然是舊資料")
         except Exception as e:
-            log.error(f"股價回填寫入失敗（已重試仍失敗）：「{SHEET_MULTI}」可能已被清空但寫入未完成，請檢查Sheets: {e}")
+            log.error(f"「{sheet_name}」股價回填寫入失敗（已重試仍失敗），可能已被清空但寫入未完成，請檢查Sheets: {e}")
             return 0
     else:
-        log.warning(f"股價回填：本次重抓{len(stock_codes)}檔全部依然是舊資料（TWSE延遲比預期更嚴重）")
+        log.warning(f"「{sheet_name}」股價回填：本次重抓{len(stock_codes)}檔全部依然是舊資料（TWSE延遲比預期更嚴重）")
 
     return updated
+
+
+def backfill_prices_to_multi_sheet(ss, trade_date: str, delay: float = 0.3) -> int:
+    """
+    多方驗證名單的股價回填（原本的唯一回填目標）。
+    2026-08-28發現TWSE股價資料當天公布得比平常晚，16:45的daily job抓到的整批股票都停留在
+    「前一交易日」的舊資料，卻沒有任何錯誤訊息。這個函式設計成在較晚時段（23:00 ai job，
+    比16:45多爭取6小時公布時間）呼叫，對名單裡每檔股票重新確認一次是否已有當天資料。
+    """
+    return backfill_prices_to_sheet(
+        ss, "多方驗證名單", trade_date,
+        ["收盤價", "漲跌", "漲跌幅%", "KD訊號", "MACD訊號", "背離警示", "ATR%", "技術面共振", "技術指標狀態"],
+        delay=delay,
+    )
+
+
+def backfill_prices_to_smart_money_sheet(ss, trade_date: str, delay: float = 0.3) -> int:
+    """
+    聰明錢名單的股價回填（2026-09-01新增）。
+    「聰明錢名單」跟「多方驗證名單」都在16:45寫入、都可能受到TWSE股價延遲公布影響，
+    但原本的回填機制只覆蓋「多方驗證名單」——使用者如果看的是聰明錢名單，
+    23:00之後仍可能看到過期股價卻不自知。這裡用同一套回填邏輯補上這個缺口。
+    """
+    return backfill_prices_to_sheet(
+        ss, "聰明錢名單", trade_date,
+        ["收盤價", "漲跌幅%", "MA5", "MA10", "MA20", "站上MA20",
+         "均線排列", "連續站上月線天數", "量能比", "成交量", "技術指標狀態"],
+        delay=delay,
+    )

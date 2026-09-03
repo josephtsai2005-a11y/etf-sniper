@@ -147,9 +147,19 @@ def num_cols(df: pd.DataFrame, cols: list):
 
 
 def format_change(val):
-    """漲跌幅顏色格式"""
+    """漲跌幅顏色格式
+
+    2026-09-03修正：原本val是None/NaN時（例如price_fetcher.py偵測到除權息/股票分割，
+    刻意把漲跌幅%留空），float(nan)其實不會拋例外（NaN本身就是合法的float），會繼續往下
+    执行f"{v:+.2f}%"，印出「— +nan%」這種讓人一頭霧水的假訊息（使用者在「旺矽」這筆資料
+    上就看過這個現象）。改成先明確檢查pd.isna()，缺資料時給看得懂的中文說明，不留給使用者猜。
+    """
+    if val is None or (isinstance(val, float) and pd.isna(val)) or (isinstance(val, str) and val.strip() == ""):
+        return "— 無漲跌%資料"
     try:
         v = float(val)
+        if pd.isna(v):
+            return "— 無漲跌%資料"
         return f"{'🔴' if v > 0 else '🟢' if v < 0 else '—'} {v:+.2f}%"
     except:
         return str(val)
@@ -851,6 +861,18 @@ elif page == "聰明錢名單":
     # 加漲跌幅顏色欄
     if "漲跌幅%" in filtered.columns:
         filtered["漲跌"] = filtered["漲跌幅%"].apply(format_change)
+
+    # 除權息/股票分割提示（2026-09-03新增）：漲跌幅%被price_fetcher.py刻意留空時，
+    # 「技術指標狀態」欄位會註記原因（見price_fetcher.py的ABNORMAL_CHANGE_PCT_THRESHOLD），
+    # 這裡额外用一個提示區塊把受影響的股票明講出來，避免使用者誤以為是資料抓取出錯或忽略不看
+    if "技術指標狀態" in filtered.columns:
+        split_flagged = filtered[filtered["技術指標狀態"].astype(str).str.contains("除權息", na=False)]
+        if not split_flagged.empty:
+            names = "、".join(
+                f"{r.get('股票代號','')} {r.get('股票名稱','')}"
+                for _, r in split_flagged.iterrows()
+            )
+            st.info(f"ℹ️ 以下股票今日疑似除權息／股票分割，漲跌%欄位已留空避免誤導（收盤價本身仍正確）：{names}")
 
     st.divider()
 
@@ -2155,6 +2177,8 @@ elif page == "自選股查詢":
             change_pct = price_info.get("漲跌幅%", "")
 
             st.subheader(f"{code} {name}　收盤 {close}（{change_pct:+.2f}%）" if isinstance(change_pct, (int, float)) else f"{code} {name}")
+            if price_info.get("技術指標狀態"):
+                st.caption(f"ℹ️ {price_info['技術指標狀態']}")
 
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("技術面共振", price_info.get("技術面共振", "N/A"))

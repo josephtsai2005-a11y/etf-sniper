@@ -8,6 +8,22 @@ margin_fetcher.py
   - 融資大增 + 法人賣超 + 股價滯漲 → 疑似誘多出貨（散戶追高、法人退場）
   - 融資持平/減少 + 法人買超 + 股價墊高 → 疑似真實換手（籌碼從弱手到強手）
   - 融資大減（斷頭/認賠）+ 法人買超 → 疑似籌碼沉澱期，法人低接
+
+2026-09-02 修正（籌碼矛盾敘事漏看股價走勢）：
+使用者實測發現一個真實案例：某股當天股價上漲+3.44%（KD顯示高檔過熱），融資大減、
+三大法人淨買超，系統卻把這個組合講成「疑似法人低接（散戶停損認賠，法人卻在買）」——
+停損認賠是股價下跌時才會發生的行為，一支上漲、甚至過熱的股票沒理由讓散戶恐慌停損，
+這個敘事在這種情境下根本說不通。
+
+追查後發現：原本的判斷邏輯（在這個檔案的backfill_margin_signals_to_multi_sheet()，
+以及institutional_fetcher.py的cross_with_etf()裡各自維護一份幾乎一樣的邏輯）只看
+「融資增減方向」跟「三大法人買賣方向」兩個變數，完全沒有用到股價漲跌方向——即使
+compute_margin_signal()自己的docstring早就寫明「需搭配法人買賣方向、股價走勢一起看，
+單看這個欄位不足以下結論」，實際的矛盾判斷式卻漏接了股價走勢這個變數。
+
+新增compute_chip_conflict()，把股價漲跌方向（price_change_pct）一起納入判斷，取代
+原本兩處各自維護的重複邏輯，institutional_fetcher.py改成直接import這裡的版本，
+避免兩份邏輯不同步。
 """
 import requests
 import pandas as pd
@@ -242,6 +258,59 @@ def compute_margin_signal(row) -> str:
         return "融資小減"
     return "融資持平"
 
+
+def compute_chip_conflict(signal: str, inst_total, price_change_pct=None) -> str:
+    """
+    籌碼矛盾/換手敘事：融資（散戶槓桿）方向 × 三大法人方向 × 股價漲跌方向 綜合判斷。
+
+    2026-09-02修正重點：新增price_change_pct參數，取代原本只看「融資訊號」+「法人買賣
+    方向」兩個變數就下定論的做法（原本任何一天只要「融資大減+法人買超」就一律講成
+    「散戶停損認賠」，不管股價當天其實是漲是跌，導致股價明明在漲、KD還過熱的情況下，
+    系統也講成「疑似停損認賠」，這種敘事本身就說不通——停損認賠只在下跌時才成立）。
+
+    判斷邏輯：
+    - 融資大增 + 法人賣超：這個組合本身（散戶追價 vs 法人減碼）方向已經相反，不需要靠
+      股價方向才成立，維持「疑似誘多出貨/法人調節」的判斷，但依股價方向補充説明出貨壓力
+      是否已經反映在價格上。
+    - 融資大減 + 法人買超 + 股價上漲：改判為「散戶獲利了結、法人逢高續買」，這其實是
+      正常換手（籌碼從弱手轉強手），不算恐慌訊號，用💡而非⚠️標示。
+    - 融資大減 + 法人買超 + 股價下跌（或持平）：維持原本「疑似法人低接（散戶停損認賠，
+      法人卻在買）」的解讀，這才是原本設計「逢低承接」想捕捉的情境。
+    - price_change_pct 允許傳 None（呼叫端沒有漲跌幅資料時），此時退回不預設方向的中性
+      文字，不再武斷地講「認賠」。
+
+    用`in`子字串比對signal而非精確相等，讓這個函式同時相容
+    compute_margin_signal()產生的完整文字（含括號說明）跟只有「🔺 融資大增」這種簡短版本，
+    兩個呼叫端（本檔案的backfill、institutional_fetcher.py的cross_with_etf）不用統一
+    成同一種signal格式也能正確運作。
+    """
+    inst_total = inst_total if pd.notna(inst_total) else 0
+
+    pct = None
+    try:
+        if price_change_pct is not None and pd.notna(price_change_pct):
+            pct = float(price_change_pct)
+    except (ValueError, TypeError):
+        pct = None
+
+    signal = str(signal or "")
+
+    if "融資大增" in signal and inst_total < 0:
+        if pct is not None and pct < 0:
+            return "⚠️ 疑似誘多出貨（融資追價中，法人卻在賣，股價已下跌，出貨壓力可能已反映）"
+        return "⚠️ 疑似法人逢高調節（融資追價中，法人卻在賣，股價暫未走弱，須留意後續）"
+
+    elif "融資大減" in signal and inst_total > 0:
+        if pct is not None and pct > 0:
+            return "💡 疑似獲利了結換手（散戶減碼獲利了結，法人逢高續買，屬正常換手非恐慌訊號）"
+        elif pct is not None and pct < 0:
+            return "💡 疑似法人低接（散戶停損認賠，法人卻在買）"
+        else:
+            return "💡 疑似法人承接（融資減少、法人卻在買，股價漲跌不明顯，方向待觀察）"
+
+    return ""
+
+
 def backfill_margin_signals_to_multi_sheet(ss, trade_date: str) -> int:
     """
     融資融券回填機制：TWSE融資融券日報公布時間約晚上9:30（比三大法人的下午5:00晚很多），
@@ -252,6 +321,9 @@ def backfill_margin_signals_to_multi_sheet(ss, trade_date: str) -> int:
     重新抓一次當天真正的融資融券資料，回頭把「多方驗證名單」分頁裡的
     「融資增減(張)」「券資比%」「融資訊號」「籌碼矛盾」這幾欄用新資料覆蓋更新，
     其他欄位（法人/技術面/評分等）維持16:45寫入的原值不動。
+
+    2026-09-02：籌碼矛盾的敘事改用compute_chip_conflict()，加入股價漲跌方向一起判斷
+    （股價欄位在這個分頁裡本來就有，之前只是沒有拿來用）。
 
     回傳：成功回填的股票筆數（0代表融資融券資料這次依然抓不到，可能TWSE還沒公布或延遲更久）
     """
@@ -296,6 +368,9 @@ def backfill_margin_signals_to_multi_sheet(ss, trade_date: str) -> int:
             df[col] = ""
 
     df["三大合計_num"] = pd.to_numeric(df.get("三大合計"), errors="coerce")
+    # 股價漲跌方向：這個分頁在16:45就已經寫入「漲跌幅%」欄位，這裡把它一起讀出來，
+    # 用於判斷「融資大減/大增」的敘事到底該講「停損」還是「獲利了結」
+    df["漲跌幅%_num"] = pd.to_numeric(df.get("漲跌幅%"), errors="coerce")
 
     updated = 0
     for idx, row in df.iterrows():
@@ -313,16 +388,13 @@ def backfill_margin_signals_to_multi_sheet(ss, trade_date: str) -> int:
         df.at[idx, "融資訊號"] = signal
 
         inst_total = row["三大合計_num"]
-        conflict = ""
-        if signal == "🔺 融資大增（散戶槓桿追價中）" and pd.notna(inst_total) and inst_total < 0:
-            conflict = "⚠️ 疑似誘多出貨（融資追價中，法人卻在賣）"
-        elif signal == "🔻 融資大減（散戶停損/獲利了結中）" and pd.notna(inst_total) and inst_total > 0:
-            conflict = "💡 疑似法人低接（散戶停損認賠，法人卻在買）"
+        price_change_pct = row["漲跌幅%_num"]
+        conflict = compute_chip_conflict(signal, inst_total, price_change_pct)
         df.at[idx, "籌碼矛盾"] = conflict
 
         updated += 1
 
-    df = df.drop(columns=["三大合計_num"])
+    df = df.drop(columns=["三大合計_num", "漲跌幅%_num"])
 
     if updated > 0:
         title_row = [all_values[0][0] if all_values[0] else f"{SHEET_MULTI} {trade_date}"]
@@ -346,3 +418,19 @@ def backfill_margin_signals_to_multi_sheet(ss, trade_date: str) -> int:
             return 0
 
     return updated
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+    trade_date = get_trade_date()
+    log.info(f"=== 測試融資融券抓取 ({trade_date}) ===")
+
+    test_stocks = ["2330", "2454", "2383", "6223", "2308"]
+    log.info(f"測試 {len(test_stocks)} 檔個股...")
+
+    df = fetch_margin_for_stocks(test_stocks, trade_date)
+    if not df.empty:
+        print(df.to_string(index=False))
+    else:
+        log.warning("無融資融券資料（約晚上9:30後才公布）")

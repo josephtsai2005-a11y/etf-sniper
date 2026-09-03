@@ -105,7 +105,7 @@ def write_smart_money_to_sheets(ss, smart_df, trade_date: str):
     header_row = [f"⚡ 聰明錢名單 {trade_date}　更新：{now_tw().strftime('%H:%M')}"]
     cols = ["排名", "股票代號", "股票名稱", "持有ETF數", "平均權重%", "訊號", "收盤價", "漲跌幅%",
         "MA5", "MA10", "MA20", "站上MA20", "均線排列", "連續站上月線天數", "量能比",
-        "成交量", "持股市值(萬)", "持有ETF清單"]
+        "成交量", "持股市值(萬)", "持有ETF清單", "技術指標狀態"]
     available = [c for c in cols if c in smart_df.columns]
     rows = smart_df[available].fillna("").values.tolist()
 
@@ -149,7 +149,7 @@ def _write_fundamental_to_sheets(ss, fund_df, trade_date, retries: int = 2):
     all_rows = [title_row]
 
     if not fund_df.empty:
-        cols = ["股票代號","最新月份","月營收(億)","年增率%","月增率%","營收訊號","本益比","本益比訊號","基本面分數"]
+        cols = ["股票代號","資料來源","最新月份","月營收(億)","年增率%","月增率%","營收訊號","本益比","本益比訊號","基本面分數"]
         avail = [c for c in cols if c in fund_df.columns]
         all_rows.append(avail)
         rows = fund_df[avail].fillna("").values.tolist()
@@ -173,7 +173,7 @@ def _write_fundamental_to_sheets(ss, fund_df, trade_date, retries: int = 2):
                 _t.sleep(5)
                 continue
             log.warning(f"基本面資料寫入失敗（已重試{retries}次，放棄本次寫入）: {e}")
-            raise last_error 
+            raise last_error
 
 
 def _write_trends_to_sheets(ss, trends_df, cross_df, trade_date):
@@ -212,7 +212,7 @@ def _write_institutional_to_sheets(ss, inst_df, cross_df, trade_date):
     import time
     for sheet_name, df, cols in [
         ("三大法人", inst_df, ["排名","股票代號","外資買賣超","投信買賣超","自營買賣超","三大合計","買超法人數","法人訊號"]),
-        ("多方驗證名單", cross_df, ["排名","股票代號","股票名稱","持有ETF數","買超法人數","法人訊號","綜合評分","多方驗證","三大合計","買超轉換率%","法人換手強度%","融資增減(張)","券資比%","融資訊號","籌碼矛盾","KD訊號","MACD訊號","背離警示","ATR%","技術面共振","收盤價","漲跌幅%"]),
+        ("多方驗證名單", cross_df, ["排名","股票代號","股票名稱","持有ETF數","買超法人數","法人訊號","綜合評分","多方驗證","三大合計","買超轉換率%","法人換手強度%","融資增減(張)","券資比%","融資訊號","籌碼矛盾","KD訊號","MACD訊號","背離警示","ATR%","技術面共振","收盤價","漲跌幅%","技術指標狀態"]),
     ]:
         existing = [ws.title for ws in ss.worksheets()]
         if sheet_name not in existing:
@@ -387,7 +387,7 @@ def _add_consecutive_days(ss, stock_diff, trade_date, lookback=10, retries=2):
                 log.warning(f"計算連續加碼天數失敗（不影響主流程）: {str(e)[:200]}")
                 stock_diff["連續加碼天數"] = 0
                 return stock_diff
-    
+
 
 def _write_diff_to_sheets(ss, stock_diff, diff_detail, trade_date):
     """寫入差異比對結果到 Google Sheets（含重試保護）"""
@@ -814,12 +814,19 @@ def main():
             except Exception as e:
                 log.warning(f"融資融券回填失敗（不影響主報告）: {e}")
 
-            # 股價回填（新增）：TWSE股價偶爾公布得比16:45晚，這裡重新確認一次
+            # 股價回填：TWSE股價偶爾公布得比16:45晚，這裡重新確認一次
+            # 2026-09-01：除了原本的「多方驗證名單」，新增回填「聰明錢名單」——
+            # 這張表跟多方驗證名單同時間(16:45)寫入、同樣可能受TWSE延遲公布影響，
+            # 原本只回填多方驗證名單，聰明錢名單過期股價沒人補，這裡一併補上
             try:
-                from price_fetcher import backfill_prices_to_multi_sheet
+                from price_fetcher import backfill_prices_to_multi_sheet, backfill_prices_to_smart_money_sheet
                 log.info("[AI] 回填股價/技術指標到多方驗證名單...")
                 price_backfilled = backfill_prices_to_multi_sheet(ss2, TRADE_DATE)
-                log.info(f"[AI] 股價回填：{price_backfilled} 檔已更新")
+                log.info(f"[AI] 股價回填（多方驗證名單）：{price_backfilled} 檔已更新")
+
+                log.info("[AI] 回填股價/技術指標到聰明錢名單...")
+                smart_backfilled = backfill_prices_to_smart_money_sheet(ss2, TRADE_DATE)
+                log.info(f"[AI] 股價回填（聰明錢名單）：{smart_backfilled} 檔已更新")
             except Exception as e:
                 log.warning(f"股價回填失敗（不影響主報告）: {e}")
 

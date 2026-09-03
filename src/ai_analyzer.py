@@ -297,24 +297,24 @@ def analyze_news_impact(news_df, smart_df):
         data = json.loads(result)
 
         # 支援多種 JSON 格式
-        impacts = (data.get("影響清單") or 
-                   data.get("news_stock_impact") or 
-                   data.get("impacts") or 
+        impacts = (data.get("影響清單") or
+                   data.get("news_stock_impact") or
+                   data.get("impacts") or
                    data.get("analysis") or [])
 
         rows = []
         for item in impacts:
             # 支援多種欄位名稱
-            affected = (item.get("影響股票") or 
+            affected = (item.get("影響股票") or
                        item.get("affected_stocks") or [])
-            
-            news_summary = (item.get("新聞摘要") or 
+
+            news_summary = (item.get("新聞摘要") or
                            item.get("news","")[:30])
-            direction = (item.get("影響方向") or 
+            direction = (item.get("影響方向") or
                         item.get("impact_direction","中性"))
-            degree = (item.get("影響程度") or 
+            degree = (item.get("影響程度") or
                      item.get("impact_level","中"))
-            reason = (item.get("原因") or 
+            reason = (item.get("原因") or
                      item.get("reason",""))
 
             for stock in affected:
@@ -365,6 +365,13 @@ def generate_market_sentiment(inst_df: pd.DataFrame, market_margin: dict,
     資料範圍誠實聲明：inst_df（三大法人加總）只涵蓋「本系統追蹤的股票池」（約66-70檔），
     不是TWSE全市場三大法人統計（該端點尚未經測試驗證，暫不使用，避免引入未驗證資料）；
     market_margin（融資融券）才是真正的全市場數據
+
+    2026-09-03修正（配合AI job排程從23:00改到隔日05:00台股開盤前）：
+    原本prompt裡的「今天整體三大法人」，是在trade_date當天晚上23:00生成報告時寫的，
+    這時候「今天」剛好等於trade_date，講得通。改成隔日05:00生成後，讀報告的當下
+    trade_date已經是「昨天」（台股今天的交易都還沒開始），繼續講「今天」會讓人搞不清楚
+    是在講哪個交易日，所以明確改成「上一交易日（{trade_date}）」，並且說明這是作為
+    「今天開盤」的參考，把「資料屬於哪一天」跟「這份判斷要給哪一天的交易使用」分開講清楚。
     """
     inst_summary_text = "（無追蹤股票池法人資料）"
     if inst_df is not None and not inst_df.empty and "三大合計" in inst_df.columns:
@@ -388,23 +395,31 @@ def generate_market_sentiment(inst_df: pd.DataFrame, market_margin: dict,
 
     benchmark_text = ""
     if benchmark_price_change is not None:
-        benchmark_text = f"，大盤指標ETF(0050)今日{'上漲' if benchmark_price_change >= 0 else '下跌'}{abs(benchmark_price_change):.2f}%"
+        benchmark_text = f"，大盤指標ETF(0050)上一交易日{'上漲' if benchmark_price_change >= 0 else '下跌'}{abs(benchmark_price_change):.2f}%"
 
-    us_section = f"\n【美股隔夜表現】\n{us_market_text}" if us_market_text else ""
+    us_section = f"\n【美股隔夜收盤（已完整收盤確認，非盤中片段）】\n{us_market_text}" if us_market_text else ""
 
-    prompt = f"""你是台股總經分析師，請根據以下資料，判斷「今天整體三大法人是避險心態還是布局心態」。
+    trade_date_label = trade_date or "上一交易日"
 
-【追蹤股票池法人動向】
+    prompt = f"""你是台股總經分析師。這份報告固定在台股開盤前產生，請根據以下資料，判斷
+「上一交易日（{trade_date_label}）三大法人整體是避險心態還是布局心態」，作為今天台股開盤的參考。
+
+【追蹤股票池法人動向（{trade_date_label}）】
 {inst_summary_text}
 
-【全市場散戶槓桿（融資融券）】
+【全市場散戶槓桿（融資融券，{trade_date_label}）】
 {margin_text}{benchmark_text}
 {us_section}
 
-請注意：法人資料僅涵蓋本系統追蹤的股票池（非TWSE全市場統計），請在分析中誠實反映這個範圍限制，
-不要把追蹤股票池的結論當成「全市場」的定論來講。
+請注意：
+1. 法人資料僅涵蓋本系統追蹤的股票池（非TWSE全市場統計），請在分析中誠實反映這個範圍限制，
+   不要把追蹤股票池的結論當成「全市場」的定論來講。
+2. 上面的美股資料是已經完整收盤確認的隔夜數據（不是抓取當下的盤中片段），可以放心把它當成
+   「已經發生的事實」來分析，不需要用「目前」「現在」這種暗示還在變動中的語氣描述。
+3. 明確區分「{trade_date_label}的法人/籌碼資料」跟「今天即將開盤的台股交易」是兩個不同的
+   交易日，不要用「今天」指稱{trade_date_label}的資料。
 
-請用約100-150字，繁體中文，判斷法人今天整體偏向：
+請用約100-150字，繁體中文，判斷法人上一交易日整體偏向：
 1. 避險心態（法人賣超、融資減少、可能有國際情勢干擾）
 2. 布局心態（法人買超或分歧但融資理性增加、屬正常換手）
 3. 混合訊號（無法明確判斷，需觀察後續）
@@ -413,7 +428,7 @@ def generate_market_sentiment(inst_df: pd.DataFrame, market_margin: dict,
 
     result = call_claude(
         prompt,
-        system="你是誠實的台股總經分析師，會清楚標註資料範圍限制，不誇大追蹤股票池資料代表全市場結論。",
+        system="你是誠實的台股總經分析師，會清楚標註資料範圍限制與資料所屬交易日，不誇大追蹤股票池資料代表全市場結論。",
         max_tokens=500,
     )
     return result if result else ""
@@ -421,15 +436,23 @@ def generate_market_sentiment(inst_df: pd.DataFrame, market_margin: dict,
 
 def generate_premarket_watch(cross_df: pd.DataFrame, us_market_text: str = "", trade_date: str = "") -> str:
     """
-    產生「開盤前30分鐘觀察重點」段落
-    設計原則（重要）：這不是預測，是給隔天開盤時對照用的「條件式檢查清單」——
-    系統是前一晚批次產生報告，物理上不可能預知隔天盤中實際走勢，
-    所以內容格式必須是「如果...就要注意...」，不能用肯定語氣預告股價會怎麼走，
+    產生「今日開盤前30分鐘觀察重點」段落
+    設計原則（重要）：這不是預測，是給台股開盤時對照用的「條件式檢查清單」——
+    內容格式必須是「如果...就要注意...」，不能用肯定語氣預告股價會怎麼走，
     避免給使用者錯誤的確定感。
 
     優先分析對象：「籌碼矛盾」欄位有標記的股票（融資與法人方向衝突，動態決定，
     不是固定挑幾檔），這些才是真正需要提早判讀「換手還是誘多」的標的；
     訊號單純一致的股票不需要額外解讀。
+
+    2026-09-03修正（配合AI job排程從23:00改到隔日05:00台股開盤前）：
+    原本這個段落叫「明日開盤前30分鐘觀察重點」、prompt裡寫「你沒有明天的即時資料，
+    只有今晚收盤後的籌碼與美股資訊」——這是23:00當晚生成報告、隔天才會被打開來看的
+    用詞，「明天」指的是報告生成後的下一個交易日。改成05:00台股開盤前生成後，
+    使用者打開報告時，那個「明天」其實就是「今天」——用詞沒跟著改會讓人誤以為報告
+    在講後天的事。同時，這個時間點美股已經確定收盤（不是23:00時只開盤1.5小時的
+    片段資料），對「美股隔夜表現」這件事本身可以講得更肯定，但對台股接下來要怎麼走，
+    仍然要維持條件式、不預測的原則不變。
     """
     if cross_df is None or cross_df.empty:
         return ""
@@ -439,7 +462,7 @@ def generate_premarket_watch(cross_df: pd.DataFrame, us_market_text: str = "", t
     if conflict_col:
         conflicts = cross_df[cross_df[conflict_col].astype(str).str.strip() != ""]
 
-    conflict_text = "（今日無明顯籌碼矛盾標的）"
+    conflict_text = "（上一交易日無明顯籌碼矛盾標的）"
     if not conflicts.empty:
         lines = []
         for _, row in conflicts.head(8).iterrows():
@@ -451,26 +474,31 @@ def generate_premarket_watch(cross_df: pd.DataFrame, us_market_text: str = "", t
             lines.append(f"- {code} {name}：{signal}（融資：{margin_note}／法人：{inst_signal}）")
         conflict_text = "\n".join(lines)
 
-    us_section = f"\n\n【美股隔夜表現參考】\n{us_market_text}" if us_market_text else "（無美股資料）"
+    us_section = f"\n\n【美股隔夜收盤（已完整收盤確認）】\n{us_market_text}" if us_market_text else "（無美股資料）"
 
-    prompt = f"""你是台股盤前分析師，要為明天開盤前30分鐘提供一份「觀察檢查清單」，
-給使用者開盤時對照當下實際狀況判讀，**不是預測明天股價會怎麼走**。
+    trade_date_label = trade_date or "上一交易日"
+
+    prompt = f"""你是台股盤前分析師，這份報告在台股開盤前產生，要為今天開盤前30分鐘提供一份
+「觀察檢查清單」，給使用者開盤時對照當下實際狀況判讀，**不是預測今天股價會怎麼走**。
 
 嚴格規則：
-- 全部用「如果...則要注意...」這種條件式語氣，絕不能用肯定句預告股價方向
-- 你沒有明天的即時資料，只有今晚收盤後的籌碼與美股資訊，要誠實反映這個限制
-- 重點放在「籌碼矛盾」標的（融資與法人方向衝突的股票）——這些是真正需要開盤時多留意的，
-  不是隨便挑幾檔知名股
+- 全部用「如果...則要注意...」這種條件式語氣，絕不能用肯定句預告台股今天股價方向
+- 你手上的是上一交易日（{trade_date_label}）收盤後的籌碼資料，以及已經完整收盤確認的
+  美股隔夜表現——你沒有台股今天開盤後的即時資料，要誠實反映這個限制
+- 美股隔夜表現是「已經發生、已收盤確認」的事實，可以直接肯定描述（不用「目前」「現在」
+  這種暗示還在變動的語氣）；但美股走勢對台股今天開盤後的影響，仍然只能用條件式語氣推測
+- 重點放在「籌碼矛盾」標的（融資與法人方向衝突的股票，資料屬於{trade_date_label}）——
+  這些是真正需要開盤時多留意的，不是隨便挑幾檔知名股
 
-今日籌碼矛盾標的（融資 vs 法人方向衝突，需要開盤驗證是換手還是誘多/低接）：
+上一交易日（{trade_date_label}）籌碼矛盾標的（融資 vs 法人方向衝突，需要今天開盤驗證是換手還是誘多/低接）：
 {conflict_text}
 {us_section}
 
 請用以下格式產生內容（繁體中文）：
 
-### 🔔 明日開盤前30分鐘觀察重點
+### 🔔 今日開盤前30分鐘觀察重點
 
-**國際情勢／美股影響**：（1-2句，說明美股隔夜方向對台股開盤情緒的可能影響，用條件式語氣）
+**國際情勢／美股影響**：（1-2句，描述美股隔夜收盤的確定事實，再用條件式語氣說明對台股今天開盤情緒的可能影響）
 
 **法人意圖推測**：（針對籌碼矛盾標的，各1句話推測法人可能在想什麼，例如「若開盤即賣壓湧現，可能代表法人趁散戶追高出貨」）
 
@@ -482,7 +510,8 @@ def generate_premarket_watch(cross_df: pd.DataFrame, us_market_text: str = "", t
 
     result = call_claude(
         prompt,
-        system="你是誠實嚴謹的台股盤前分析師，絕不用肯定語氣預測股價，只提供條件式觀察建議，明確反映資料的時效限制。",
+        system="你是誠實嚴謹的台股盤前分析師，絕不用肯定語氣預測台股股價，只提供條件式觀察建議，"
+               "但對已經收盤確認的美股隔夜事實可以肯定描述，並明確反映資料所屬交易日與報告產生時點的限制。",
         max_tokens=800,
     )
     return result if result else ""
@@ -493,7 +522,7 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
     log.info("收集所有分頁資料...")
     data = collect_all_data(ss)
     data_text = format_data_for_ai(data, trade_date)
-    us_section = f"\n\n【美股市場參考（僅供參考）】\n{us_market_text}" if us_market_text else ""
+    us_section = f"\n\n【美股隔夜收盤（已完整收盤確認，非盤中片段）】\n{us_market_text}" if us_market_text else ""
 
     system_prompt = """你是一位擁有20年經驗的台灣股市專業基金經理人。
 
@@ -505,10 +534,17 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
 
 判斷原則：
 - 台股籌碼 > 美股走勢
-- 法人動向 > 散戶情緒  
+- 法人動向 > 散戶情緒
 - 基本面趨勢 > 短期價格波動
 - 有時美股大漲，台股因外資匯出反而下跌
 - 有時美股下跌，台股因內資撐盤反而抗跌
+
+報告產生時點（2026-09-03新增）：
+- 這份報告固定在台股開盤前產生。文中所有ETF籌碼、三大法人、融資融券、基本面資料，
+  都是「上一交易日」（報告標題的交易日）收盤後的資料；美股資料則是已經完整收盤確認的
+  隔夜表現，不是盤中片段，可以放心當成已發生的事實來分析。
+- 請用「上一交易日」或直接寫出交易日日期稱呼籌碼/法人/基本面資料，把「今天」保留給
+  即將開盤、报告使用者接下來要操作的這個台股交易日，避免兩個不同交易日被混在一起講。
 
 誠實原則（最重要）：
 - 資料不足時，明確說明缺少哪個維度及對判斷的影響
@@ -518,13 +554,15 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
 
 分析風格：繁體中文，專業但易懂，有數據支撐"""
 
-    prompt = f"""請根據以下今日市場資料，在ETF已選出的股票中找出最有潛力的標的。
+    prompt = f"""這份報告在台股開盤前產生。以下的ETF籌碼／三大法人／融資融券／基本面資料，
+是上一交易日（{trade_date}）收盤後的資料；美股資料是剛結束、已完整收盤確認的隔夜表現。
+請根據這些資料，在ETF已選出的股票中找出最有潛力的標的，作為今天台股開盤後的觀察依據。
 
 所有標的都來自主動式ETF持倉，已經過專業經理人篩選。
-你的任務：在這些股票中進一步找出「今日最有潛力」的3-5檔。
+你的任務：在這些股票中進一步找出「上一交易日表現最有潛力、值得今天開盤留意」的3-5檔。
 
 潛力評分標準（權重由高到低）：
-1. ETF籌碼集中度（幾檔持有？權重多高？今日加碼？）
+1. ETF籌碼集中度（幾檔持有？權重多高？上一交易日加碼？）
 2. 三大法人同向買超
 3. 基本面支撐（月營收年增率、本益比）
 4. 題材發酵程度（萌芽/成長期更好）
@@ -535,10 +573,10 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
 
 ## 📊 {trade_date} ETF狙擊系統每日報告
 
-### 🎯 今日市場總結
-（2-3句，以台股籌碼為核心）
+### 🎯 上一交易日市場總結
+（2-3句，以台股籌碼為核心，明確是在總結{trade_date}這個交易日）
 
-### 🏆 今日最具潛力標的（Top 3-5）
+### 🏆 上一交易日最具潛力標的（Top 3-5，今天開盤觀察用）
 每檔提供：
 - 代號與名稱
 - 各維度評分（ETF籌碼/法人/基本面/題材）
@@ -550,11 +588,11 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
 
 ### 🔥 題材面分析
 
-### 🌏 美股影響評估
+### 🌏 美股隔夜影響評估
 
 ### ⚠️ 風險提示
 
-### 💡 明日觀察清單（3-5點）
+### 💡 今日開盤觀察清單（3-5點）
 
 報告約 900-1200 字。若資料不足請明確說明，不要強行推薦。"""
 
@@ -577,7 +615,7 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
     except Exception as e:
         log.warning(f"1000元以下優選股清單生成失敗（不影響主報告）: {e}")
 
-    # 開盤前30分鐘觀察重點（籌碼矛盾標的優先分析，條件式檢查清單，非預測）
+    # 今日開盤前30分鐘觀察重點（籌碼矛盾標的優先分析，條件式檢查清單，非預測）
     premarket_section = ""
     try:
         log.info("呼叫 Claude API 產生開盤前觀察重點...")

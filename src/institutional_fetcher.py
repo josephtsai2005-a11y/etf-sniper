@@ -12,6 +12,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Optional
 from trend_analyzer import _DEFAULT_MAP as DEFAULT_MAP
+from margin_fetcher import compute_chip_conflict
 import pytz
 
 log = logging.getLogger(__name__)
@@ -269,6 +270,19 @@ def cross_with_etf(
         avail_fund = [c for c in fund_cols if c in fundamental_df.columns]
         merged = merged.merge(fundamental_df[avail_fund], on="股票代號", how="left")
 
+    # 2026-09-02修正：基本面資料整批缺失時（例如FinMind當天完全抓不到任何資料，main.py會
+    # 傳一個空DataFrame進來，不是None），上面的merge會整段被跳過，merged就不會有「基本面
+    # 分數」欄位。下面`pd.to_numeric(merged.get("基本面分數"),...).fillna(0)`原本假設這欄
+    # 一定存在——欄位缺席時`merged.get()`回傳None，`pd.to_numeric(None)`會變成單一純量
+    # nan（不是Series），對純量呼叫`.fillna(0)`會直接丟AttributeError，讓cross_with_etf()
+    # 整個函式當場崩潰。main.py呼叫這裡時外層包的是「法人模組失敗（不影響主流程）」這種
+    # 寬鬆的try/except，崩潰不會讓整個程式當掉，但會讓「多方驗證名單」「回測記錄」等
+    # 整條下游當天全部沒有資料，log卻只會顯示一行不起眼的warning，很不容易發現真正原因
+    # ——這是實測時（見test_cross_with_etf.py／手動用空DataFrame重現）意外挖出的既有bug，
+    # 不是這次修「籌碼矛盾」邏輯造成的，但既然跟這次改的函式在同一段程式碼裡，一併修掉。
+    if "基本面分數" not in merged.columns:
+        merged["基本面分數"] = 0
+
     merged["買超法人數"] = pd.to_numeric(merged.get("買超法人數"), errors="coerce").fillna(0).astype(int)
     merged["三大合計"]   = pd.to_numeric(merged.get("三大合計"),   errors="coerce").fillna(0)
     merged["基本面分數"] = pd.to_numeric(merged.get("基本面分數"), errors="coerce").fillna(0)
@@ -332,20 +346,19 @@ def cross_with_etf(
 
         merged["融資訊號"] = merged.apply(_margin_signal, axis=1)
 
-        def _chip_conflict(row):
-            """
-            籌碼矛盾偵測：融資（散戶槓桿）方向 vs 三大法人方向 是否衝突
-            這是判斷「換手還是誘多出貨」的核心線索，也是AI開盤前觀察要優先分析的對象
-            """
-            signal = row.get("融資訊號", "")
-            inst_total = row.get("三大合計", 0)
-            if signal == "🔺 融資大增" and inst_total < 0:
-                return "⚠️ 疑似誘多出貨（融資追價中，法人卻在賣）"
-            elif signal == "🔻 融資大減" and inst_total > 0:
-                return "💡 疑似法人低接（散戶停損認賠，法人卻在買）"
-            return ""
-
-        merged["籌碼矛盾"] = merged.apply(_chip_conflict, axis=1)
+        # 2026-09-02：籌碼矛盾判斷改用margin_fetcher.py的compute_chip_conflict()，
+        # 加入股價漲跌方向（漲跌幅%，smart_df在這之前已經串接過股價，這裡本來就有）一起
+        # 判斷，取代原本只看融資訊號+法人方向就下定論的舊邏輯（詳見margin_fetcher.py
+        # 開頭的修正說明）。這裡跟23:00的backfill_margin_signals_to_multi_sheet()共用
+        # 同一份判斷邏輯，避免兩處各自維護、日後改一邊忘了改另一邊。
+        merged["漲跌幅%_num"] = pd.to_numeric(merged.get("漲跌幅%"), errors="coerce")
+        merged["籌碼矛盾"] = merged.apply(
+            lambda row: compute_chip_conflict(
+                row.get("融資訊號", ""), row.get("三大合計", 0), row.get("漲跌幅%_num")
+            ),
+            axis=1,
+        )
+        merged = merged.drop(columns=["漲跌幅%_num"])
     else:
         merged["融資訊號"] = ""
         merged["籌碼矛盾"] = ""
