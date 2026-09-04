@@ -26,6 +26,23 @@ price_fetcher.py v4
 並用「技術指標狀態」欄位明講「疑似除權息/股票分割」——兩個回填函式(backfill_prices_to_
 multi_sheet/backfill_prices_to_smart_money_sheet)也把「技術指標狀態」加進回填欄位，
 確保23:00的回填也會同步更新/清除這個標示。
+
+2026-09-04 優化（月初MACD留空問題）：
+get_stock_price_single()原本固定只抓「當月+上月」兩個月份的STOCK_DAY資料，MACD(12,26,9
+EMA)需要至少26天收盤價才能算——每個月最初幾個交易日，兩個月加起來的天數可能還湊不到26天
+（尤其上月本身天數較少時），導致MACD訊號整批留空，要等到月中資料自然累積回26天以上才會
+恢復。改成：湊出來的資料不足26天時，再多抓一個月（上上月）補齊，讓月初也能盡量算出MACD，
+不用乾等——只有真的不足26天時才會多打這一次API，月中以後不會觸發，不影響平常的抓取速度。
+
+2026-09-04 修正（除權息/股票分割污染整段技術指標，不只是漲跌%）：
+使用者指出2026-09-03那次修正只處理了「漲跌/漲跌幅%」這一個欄位，但MA5/MA10/MA20、KD、
+MACD、ATR、布林通道、均線排列、連續站上月線天數這些技術指標，其實也是拿同一段「跨越除權
+前後、原始價格沒對齊」的收盤/最高/最低價序列去算的，等於全部都算錯了，只是沒有像漲跌%
+那樣被明顯攔下來、更難被發現。get_stock_price_single()改成：先掃描整段序列找出是否有
+異常跳動（沿用ABNORMAL_CHANGE_PCT_THRESHOLD門檻），有的話只保留「最後一次異常跳動之後」
+的資料來算技術指標（漲跌/漲跌幅%仍用完整序列算，維持09-03的偵測邏輯不受影響）——天數
+因此可能變少，MA20/KD/MACD等需要較長天數的指標會因為天數不夠而暫時留空，這是誠實反映
+「除權後至今資料還不夠久」，比拿新舊基準混算出一個看似正常、實際錯誤的數字好。
 """
 import requests
 import pandas as pd
@@ -204,7 +221,9 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
 
     today = datetime.now()
     this_month = today.strftime("%Y%m") + "01"
-    prev_month_date = (today.replace(day=1) - timedelta(days=1)).strftime("%Y%m") + "01"
+    prev_month_first = today.replace(day=1) - timedelta(days=1)
+    prev_month_date = prev_month_first.strftime("%Y%m") + "01"
+    prev2_month_date = (prev_month_first.replace(day=1) - timedelta(days=1)).strftime("%Y%m") + "01"
 
     url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
 
@@ -224,6 +243,17 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
             df_this = fetch_month(this_month)
             df_prev = fetch_month(prev_month_date)
             df = pd.concat([df_prev, df_this], ignore_index=True) if not df_prev.empty else df_this
+
+            # 2026-09-04優化（月初MACD留空問題）：MACD(12,26,9 EMA)需要至少26天收盤價才能算，
+            # 「當月+上月」兩個月資料在每個月最初幾個交易日（尤其上月天數本身較少時，例如2月）
+            # 可能還湊不到26天，導致MACD訊號整批留空，要等到月中資料自然累積回26天以上才會
+            # 恢復——使用者確認這是資料量不足、不是程式壞掉之後，要求順便優化：資料不足26天時
+            # 再多抓一個月（上上月）補齊，讓月初也能盡量算出MACD，不用乾等資料自然累積。只有
+            # 真的不足26天時才會多打這一次API，月中以後不會觸發，不影響平常的抓取速度。
+            if len(df) < 26:
+                df_prev2 = fetch_month(prev2_month_date)
+                if not df_prev2.empty:
+                    df = pd.concat([df_prev2, df], ignore_index=True)
 
             if df.empty:
                 # TWSE本身回傳「無資料」（例如真的還沒開始交易），重試沒有意義，直接放棄
@@ -256,6 +286,42 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
 
         if not close_col or df.empty:
             return {}
+
+        # closes_full：完整、未截斷的收盤價序列，只用來偵測「今天是不是除權息當天」跟算
+        # 「漲跌/漲跌幅%」（見下方，維持2026-09-03那次修正的邏輯不變）。
+        closes_full = df[close_col].dropna().tolist()
+        if not closes_full:
+            return {}
+
+        # 2026-09-04修正（除權息/股票分割污染整段技術指標）：
+        # 使用者指出緯穎除權那次，2026-09-03的修正只處理了「漲跌/漲跌幅%」這一個欄位
+        # （只比對最後兩天），但MA5/MA10/MA20、KD、MACD、ATR、布林通道、均線排列、
+        # 連續站上月線天數這些技術指標，全部都是拿df裡整段「跨月合併」的收盤/最高/最低價
+        # 序列去算的——如果這段期間裡發生過除權息/股票分割（股本或參考價基準不連續），
+        # 序列裡會同時混著「除權前的原始高價」跟「除權後的原始低價」，所有技術指標全部都
+        # 會算錯，只是不會像漲跌%那樣被明顯攔下來變成一個誇張的數字，而是安靜地產生一個
+        # 看起來正常、但基準根本不一致的錯誤數字，比漲跌%的假崩跌更難被發現。
+        # 修法：在計算任何技術指標之前，先掃描整段收盤價序列找出是否有異常跳動（沿用跟
+        # 漲跌%偵測同一個ABNORMAL_CHANGE_PCT_THRESHOLD門檻），如果找到，只保留「最後一次
+        # 異常跳動之後」的資料（也就是除權後、基準一致的那一段），捨棄除權前的舊資料——
+        # 這會讓可用天數變少，MA20/KD/MACD等需要較長天數的指標可能會因此暫時算不出來
+        # （沿用下面各指標本來就有的「len(closes)>=N」門檻，天數不夠時自然留空/留預設值），
+        # 但這是誠實反映「除權後至今資料還不夠久」，比拿新舊基準混算出一個看似正常、實際
+        # 錯誤的數字好——沿用專案一貫「資料不足/不可信就明講」的設計原則。
+        split_boundary_pos = None
+        prev_val = None
+        for i, val in enumerate(df[close_col].tolist()):
+            if pd.isna(val):
+                continue
+            if prev_val is not None and prev_val != 0:
+                if abs((val - prev_val) / prev_val * 100) > ABNORMAL_CHANGE_PCT_THRESHOLD:
+                    split_boundary_pos = i  # 保留最後一次異常跳動的位置，捨棄它之前的資料
+            prev_val = val
+
+        indicators_truncated = False
+        if split_boundary_pos is not None:
+            df = df.iloc[split_boundary_pos:].reset_index(drop=True)
+            indicators_truncated = True
 
         closes = df[close_col].dropna().tolist()
         if not closes:
@@ -486,9 +552,13 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
         # 不再直接信任TWSE原始「漲跌價差」欄位的文字格式——
         # 該欄位的正負號編碼在TWSE不同回應裡不一定一致，直接float()轉換曾經出現正負號顛倒的案例
         # （2026-08-28發現：某股實際上漲+3.43%，此欄位算出來卻是-3.43%，數值大小對但方向錯）
-        if len(closes) >= 2:
-            change = round(closes[-1] - closes[-2], 2)
-            change_pct = round(change / closes[-2] * 100, 2) if closes[-2] else 0
+        # 注意：這裡刻意用closes_full（未被上面除權息截斷的完整序列），不是closes——
+        # 截斷後的closes可能只剩下今天一筆（除權息剛好發生在今天時），會讓下面這段偵測
+        # 今天是不是除權息當天的邏輯失效。closes_full永遠保留完整的「今收-昨收」兩天，
+        # 才能正確抓到「今天」這筆的異常跳動。
+        if len(closes_full) >= 2:
+            change = round(closes_full[-1] - closes_full[-2], 2)
+            change_pct = round(change / closes_full[-2] * 100, 2) if closes_full[-2] else 0
         else:
             change = float(df[change_col].iloc[-1]) if change_col else 0
             change_pct = round(change / (latest_close - change) * 100, 2) if (latest_close - change) else 0
@@ -508,6 +578,13 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
             split_note = "⚠️ 疑似除權息/股票分割（原始股價未還原權值），今日漲跌%不具比較意義"
             change = None
             change_pct = None
+        elif indicators_truncated:
+            # 2026-09-04新增：今天本身不是除權息當天（上面沒被攔下），但這段查詢期間裡
+            # 之前發生過除權息/股票分割，技術指標已經改用除權後的資料重新計算——天數
+            # 可能因此比平常少，MA20/KD/MACD等需要較長天數的指標可能暫時顯示空白，
+            # 明講原因，不讓使用者誤以為是抓取失敗。
+            split_note = (f"ℹ️ 近期疑似發生除權息/股票分割，技術指標已改用除權後資料重新"
+                          f"計算（僅{len(closes)}個交易日，天數不足的指標會暫時留空）")
 
         # 資料日期：回傳實際抓到的最新一筆日期，供上層比對是否跟預期交易日一致，
         # 偵測「資料整天沒更新、停留在前一天」這種過期狀況（不會自動修正，只是讓過期狀況可被看見）。
