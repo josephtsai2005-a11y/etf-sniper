@@ -116,6 +116,41 @@ def load_sheet(sheet_name: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+# 2026-09-04修正（AI報告頁面右上角一直轉圈顯示RUNNING）：
+# 「每日AI總結」頁面原本自己寫了一個_fetch_ai_report_with_retry()直接讀Google Sheets，
+# 沒有像load_sheet()一樣加@st.cache_data——AI報告的內容是大塊文字（拆成「AI分析報告
+# （上）／（下）」兩欄，用load_sheet()的表頭偵測邏輯反而容易誤判，所以原本才另外寫一個
+# 簡化版讀取函式，但寫的時候漏掉了快取。結果是：每次切換頁面回到這裡、或畫面重新整理，
+# 都會重新直接呼叫一次Google Sheets API，如果剛好撞到429頻率限制，內建的重試機制會
+# sleep 2/4/6秒（最多3次、合計12秒），這段期間畫面右上角就會一直顯示RUNNING，使用者會
+# 覺得這個頁面特別容易卡住。修法：比照load_sheet()加上@st.cache_data(ttl=300)，5分鐘內
+# 重複造訪這個頁面不會再重新打Google Sheets——AI報告本來就是一天只更新一次（23:00），
+# 5分鐘的快取視窗完全不影響看到最新報告，只是避免同一份內容被重複抓取。
+@st.cache_data(ttl=300)
+def load_ai_report_raw(retries: int = 3):
+    """讀取「每日AI總結」分頁的原始資料（不套用load_sheet()的表頭偵測邏輯，因為這張表
+    的資料列包含大塊AI報告文字，用一般的標題列偵測容易誤判；改成直接假設第一列就是
+    表頭，對應write_ai_report_to_sheets()固定寫入的格式）"""
+    import time as _time2
+
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            _client = get_client()
+            _sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
+            _ss = _client.open_by_key(_sid)
+            _ws = _ss.worksheet("每日AI總結")
+            return _ws.get_all_values()
+        except gspread.exceptions.APIError as e:
+            last_err = e
+            is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "Quota exceeded" in str(e)
+            if is_rate_limit and attempt < retries:
+                _time2.sleep(2 * (attempt + 1))
+                continue
+            raise
+    raise last_err
+
+
 def get_update_time(sheet_name: str) -> str:
     try:
         client = get_client()
@@ -970,27 +1005,8 @@ elif page == "每日AI總結":
                 except Exception as e:
                     st.error(f"第{i}段渲染失敗: {e}")
 
-    def _fetch_ai_report_with_retry(retries: int = 3):
-        last_err = None
-        for attempt in range(retries + 1):
-            try:
-                _client = get_client()
-                _sid = st.secrets.get("SPREADSHEET_ID","") or os.environ.get("SPREADSHEET_ID","")
-                _ss = _client.open_by_key(_sid)
-                _ws = _ss.worksheet("每日AI總結")
-                return _ws.get_all_values()
-            except gspread.exceptions.APIError as e:
-                last_err = e
-                is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "Quota exceeded" in str(e)
-                if is_rate_limit and attempt < retries:
-                    import time as _time2
-                    _time2.sleep(2 * (attempt + 1))
-                    continue
-                raise
-        raise last_err
-
     try:
-        _vals = _fetch_ai_report_with_retry()
+        _vals = load_ai_report_raw()
         if len(_vals) < 2:
             st.warning("尚無 AI 報告（每日 23:00 後更新）")
         else:
