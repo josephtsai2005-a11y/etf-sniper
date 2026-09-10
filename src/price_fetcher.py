@@ -639,6 +639,73 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
         return {}
 
 
+def get_stock_price_history(stock_code: str, retries: int = 2) -> pd.DataFrame:
+    """
+    2026-09-10新增：取得單一股票近期（本月+上月，約1-2個月）的「日期＋收盤價」時間序列，
+    供app.py畫股價走勢圖用（例如跟「ETF連續加碼/減碼追蹤」的持續買超/賣超期間疊圖對照，
+    快速看出這波持續布局，股價有沒有跟著反應）。
+
+    跟get_stock_price_single()是姊妹函式，但那個函式回傳的是「算好的最新一天技術指標
+    快照」（MA/KD/均線排列等單一數值），沒有把中間用來計算的收盤價序列往外傳。這裡另外寫
+    一個輕量版本，只做「抓資料、轉換民國年日期格式、回傳DataFrame」，刻意不重算任何
+    MA/KD/除權息偵測等指標，避免跟get_stock_price_single()既有邏輯/回傳格式混在一起改動、
+    增加既有功能的回歸風險——純粹新增，不影響任何既有呼叫端。
+
+    回傳欄位：日期（西元年8碼字串，已用_roc_date_to_gregorian()轉換）、收盤價，
+    依日期由舊到新排序。抓不到資料、格式不符，或代碼疑似期貨/非個股時回傳空DataFrame。
+    """
+    if _looks_like_futures_or_invalid(stock_code):
+        log.debug(f"{stock_code} 疑似非個股代號（期貨/無效），跳過股價歷史序列抓取")
+        return pd.DataFrame()
+
+    today = datetime.now()
+    this_month = today.strftime("%Y%m") + "01"
+    prev_month_first = today.replace(day=1) - timedelta(days=1)
+    prev_month_date = prev_month_first.strftime("%Y%m") + "01"
+
+    url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
+
+    def fetch_month(date_str):
+        params = {"response": "json", "date": date_str, "stockNo": stock_code}
+        resp = SESSION.get(url, params=params, timeout=15)
+        data = resp.json()
+        if data.get("stat") != "OK" or not data.get("data"):
+            return pd.DataFrame()
+        fields = data.get("fields", [])
+        rows = data.get("data", [])
+        return pd.DataFrame(rows, columns=fields)
+
+    df = pd.DataFrame()
+    for attempt in range(retries + 1):
+        try:
+            df_this = fetch_month(this_month)
+            df_prev = fetch_month(prev_month_date)
+            df = pd.concat([df_prev, df_this], ignore_index=True) if not df_prev.empty else df_this
+            break
+        except Exception as e:
+            if attempt < retries:
+                time.sleep(1.5)
+                continue
+            log.warning(f"{stock_code} 股價歷史序列抓取失敗（已重試{retries}次）: {e}")
+            return pd.DataFrame()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    close_col = next((c for c in df.columns if "收盤" in c), None)
+    date_col = "日期" if "日期" in df.columns else None
+    if not close_col or not date_col:
+        return pd.DataFrame()
+
+    df[close_col] = df[close_col].astype(str).str.replace(",", "").str.replace("+", "")
+    df[close_col] = pd.to_numeric(df[close_col], errors="coerce")
+    df["日期"] = df[date_col].apply(_roc_date_to_gregorian)
+    df = df[df["日期"] != ""].dropna(subset=[close_col])
+    df = df.rename(columns={close_col: "收盤價"})[["日期", "收盤價"]]
+    df = df.sort_values("日期").reset_index(drop=True)
+    return df
+
+
 def enrich_with_prices(df: pd.DataFrame, top_n: Optional[int] = None) -> pd.DataFrame:
     """
     主入口：把股價欄位合併進 DataFrame

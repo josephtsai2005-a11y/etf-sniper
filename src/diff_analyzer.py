@@ -300,32 +300,43 @@ if __name__ == "__main__":
     log.info("使用方式：從 main.py 呼叫，需要今日 + 昨日兩天資料")
 
 
-def compute_consecutive_accumulation(ss, lookback_days: int = 15, min_streak: int = 3) -> pd.DataFrame:
+def _compute_consecutive_streak(
+    ss, lookback_days: int, min_streak: int, direction: str
+) -> pd.DataFrame:
     """
-    籌碼面轉折訊號：追蹤「哪一檔ETF」連續好幾個交易日持續加碼「同一檔股票」
-    比單看「今天vs昨天」更有說服力——單日加碼可能只是正常調節，
-    但同一家ETF連續3天以上都在加碼同一檔股票，代表這是有意識的、持續性的布局動作
+    籌碼面轉折訊號的共用核心：追蹤「哪一檔ETF」連續好幾個交易日持續加碼／減碼「同一檔股票」
+    比單看「今天vs昨天」更有說服力——單日加碼/減碼可能只是正常調節，
+    但同一家ETF連續3天以上都在同一方向操作同一檔股票，代表這是有意識的、持續性的動作
 
     資料來源：「盤後原始數據庫」逐日逐ETF持股紀錄（跟compute_daily_diff同一份資料，
     只是這裡多抓lookback_days天、逐日比對，而不是只比對最近一天）
 
+    direction: "up"（連續加碼/持股數上升）或 "down"（連續減碼/持股數下降）
     lookback_days: 往回看幾個交易日（預設15天，足夠抓到2-3週的連續趨勢）
-    min_streak: 至少要連續加碼幾天才算數（預設3天，避免把偶發的1-2天波動也算進來）
+    min_streak: 至少要連續加碼/減碼幾天才算數（預設3天，避免把偶發的1-2天波動也算進來）
 
-    回傳：股票代號、股票名稱、ETF代碼、目前連續加碼天數、累計加碼張數、最新持股數
+    回傳：股票代號、股票名稱、ETF代碼、連續交易日數、累計變動張數（加碼為正、減碼為負）、
+    最新持股數
 
     2026-09-04修正：加入_looks_like_futures_or_invalid()過濾，排除期貨合約等非個股代號
     （詳見檔案開頭說明），避免這類持股被當成一般個股算出沒有意義的連續加碼統計。
+    2026-09-10：原本只有「連續加碼」方向，抽出這個共用函式加上direction參數，讓
+    compute_consecutive_accumulation()／compute_consecutive_distribution()共用同一套
+    「讀歷史資料、過濾期貨代號、偵測股票分割、逐(股票,ETF)組合算連續天數」邏輯，避免
+    以後兩份幾乎一樣的程式碼各自維護、改一邊忘了改另一邊。
     """
+    assert direction in ("up", "down"), f"direction必須是'up'或'down'，實際={direction!r}"
+    action_label = "加碼" if direction == "up" else "減碼"
+
     history_df = load_history_from_sheets(ss, days=lookback_days)
     if history_df.empty:
-        log.warning("連續加碼追蹤：無歷史資料可分析")
+        log.warning(f"連續{action_label}追蹤：無歷史資料可分析")
         return pd.DataFrame()
 
     code_col, name_col, etf_col, share_col = "股票代號", "股票名稱", "ETF代碼", "持股數"
     date_col = next((c for c in history_df.columns if "日期" in c or "抓取" in c), None)
     if not date_col:
-        log.warning("連續加碼追蹤：找不到日期欄")
+        log.warning(f"連續{action_label}追蹤：找不到日期欄")
         return pd.DataFrame()
 
     df = history_df.copy()
@@ -339,13 +350,13 @@ def compute_consecutive_accumulation(ss, lookback_days: int = 15, min_streak: in
     df = df[~df[code_col].apply(_looks_like_futures_or_invalid)].copy()
     after_filter = df[code_col].nunique()
     if before_filter != after_filter:
-        log.info(f"連續加碼追蹤：過濾 {before_filter - after_filter} 檔疑似期貨/非個股代號，不列入連續加碼分析")
+        log.info(f"連續{action_label}追蹤：過濾 {before_filter - after_filter} 檔疑似期貨/非個股代號，不列入分析")
 
     # 每個(股票,ETF)組合，依日期排序後的持股數序列
     df = df.sort_values(date_col)
     dates_available = sorted(df[date_col].unique())
     if len(dates_available) < min_streak + 1:
-        log.info(f"連續加碼追蹤：目前只累積{len(dates_available)}個交易日資料，"
+        log.info(f"連續{action_label}追蹤：目前只累積{len(dates_available)}個交易日資料，"
                   f"需要至少{min_streak + 1}天才能判斷連續趨勢，暫無結果")
         return pd.DataFrame()
 
@@ -357,7 +368,8 @@ def compute_consecutive_accumulation(ss, lookback_days: int = 15, min_streak: in
         # 跳動（例如一股換三股，持股數變成3倍），這不是真的加碼，是股本基準不連續造成
         # 的假訊號。跟price_fetcher.py對付除權息的做法一致：偵測到單日持股數比例變化
         # 超過±50%時，只保留「最後一次疑似分割之後」的資料，避免分割前後的持股數被
-        # 誤判成連續加碼、或把分割當天的巨大假增量算進「累計加碼張數」。
+        # 誤判成連續加碼/減碼、或把分割當天的巨大假增量算進累計變動張數。這個判斷式不分
+        # 方向（分割可能讓比例暴增或暴減），對「up」「down」兩種方向都適用。
         shares_series_raw = grp[share_col].tolist()
         split_pos = None
         prev_v = None
@@ -376,30 +388,64 @@ def compute_consecutive_accumulation(ss, lookback_days: int = 15, min_streak: in
         shares_series = grp[share_col].tolist()
         name = grp[name_col].iloc[-1] if name_col in grp.columns else ""
 
-        # 從最新一天往回數，計算連續加碼的天數（只要有一天沒加碼就中斷計算）
+        # 從最新一天往回數，計算連續加碼/減碼的天數（只要方向反轉就中斷計算）
         streak = 0
         for i in range(len(shares_series) - 1, 0, -1):
-            if shares_series[i] > shares_series[i - 1]:
+            if direction == "up" and shares_series[i] > shares_series[i - 1]:
+                streak += 1
+            elif direction == "down" and shares_series[i] < shares_series[i - 1]:
                 streak += 1
             else:
                 break
 
         if streak >= min_streak:
-            total_increase = shares_series[-1] - shares_series[-1 - streak]
+            total_change = shares_series[-1] - shares_series[-1 - streak]
+            days_col = f"連續{action_label}交易日數"
+            change_col = f"累計{action_label}張數"
             records.append({
                 "股票代號": code,
                 "股票名稱": name,
                 "ETF代碼": etf,
-                "連續加碼交易日數": streak,
-                "累計加碼張數": round(total_increase / 1000, 1),
+                days_col: streak,
+                # 加碼方向本來就是正值；減碼方向的total_change理論上是負值，這裡統一取絕對值
+                # 顯示「減了幾張」，比顯示負數更直覺（正負號已經由欄位名稱「累計減碼張數」表達）。
+                change_col: round(abs(total_change) / 1000, 1),
                 "最新持股數(張)": round(shares_series[-1] / 1000, 1),
             })
 
     result = pd.DataFrame(records)
     if not result.empty:
-        result = result.sort_values("連續加碼交易日數", ascending=False).reset_index(drop=True)
-        log.info(f"連續加碼追蹤：找到 {len(result)} 組(股票,ETF)持續加碼{min_streak}天以上")
+        days_col = f"連續{action_label}交易日數"
+        result = result.sort_values(days_col, ascending=False).reset_index(drop=True)
+        log.info(f"連續{action_label}追蹤：找到 {len(result)} 組(股票,ETF)持續{action_label}{min_streak}天以上")
     else:
-        log.info(f"連續加碼追蹤：目前沒有任何組合連續加碼達{min_streak}天以上")
+        log.info(f"連續{action_label}追蹤：目前沒有任何組合連續{action_label}達{min_streak}天以上")
 
     return result
+
+
+def compute_consecutive_accumulation(ss, lookback_days: int = 15, min_streak: int = 3) -> pd.DataFrame:
+    """
+    籌碼面轉折訊號：追蹤「哪一檔ETF」連續好幾個交易日持續加碼「同一檔股票」
+    比單看「今天vs昨天」更有說服力——單日加碼可能只是正常調節，
+    但同一家ETF連續3天以上都在加碼同一檔股票，代表這是有意識的、持續性的布局動作
+
+    回傳欄位：股票代號、股票名稱、ETF代碼、連續加碼交易日數、累計加碼張數、最新持股數(張)
+    （欄位名稱維持修正前完全不變，避免main.py/app.py既有的呼叫端跟著要改）
+
+    2026-09-10：實作已抽到共用的_compute_consecutive_streak()，這裡只是direction="up"
+    的薄包裝，行為與修正前完全一致。
+    """
+    return _compute_consecutive_streak(ss, lookback_days, min_streak, direction="up")
+
+
+def compute_consecutive_distribution(ss, lookback_days: int = 15, min_streak: int = 3) -> pd.DataFrame:
+    """
+    2026-09-10新增：compute_consecutive_accumulation()的鏡像版——追蹤「哪一檔ETF」連續好幾個
+    交易日持續「減碼／出貨」同一檔股票。使用者的原話：目前只追蹤持續買超，沒有對稱的持續賣超
+    警示，同樣的邏輯只看持股數連續下降即可。
+
+    回傳欄位：股票代號、股票名稱、ETF代碼、連續減碼交易日數、累計減碼張數（正值，代表減少的
+    張數）、最新持股數(張)
+    """
+    return _compute_consecutive_streak(ss, lookback_days, min_streak, direction="down")

@@ -465,6 +465,25 @@ def _write_diff_to_sheets(ss, stock_diff, diff_detail, trade_date):
         log.warning(f"異動明細寫入失敗（不影響主流程，但今天這張表資料遺失）: {e}")
 
 
+def _write_streak_sheet(ss, sheet_name: str, streak_df, trade_date: str):
+    """2026-09-10新增：把compute_consecutive_accumulation()／compute_consecutive_distribution()
+    算出來的(股票,ETF)連續加碼/減碼結果寫入指定分頁，抽成共用函式，避免「ETF連續加碼追蹤」
+    「ETF連續減碼追蹤」兩張表各自維護一份幾乎一樣的清空+標題+寫入邏輯。"""
+    existing_sheets = [w.title for w in ss.worksheets()]
+    if sheet_name not in existing_sheets:
+        ws_streak = ss.add_worksheet(title=sheet_name, rows=200, cols=10)
+    else:
+        ws_streak = ss.worksheet(sheet_name)
+
+    def _do_write_streak(ws_streak=ws_streak, streak_df=streak_df):
+        ws_streak.clear()
+        ws_streak.append_row([f"{sheet_name} {trade_date}"])
+        ws_streak.append_row(streak_df.columns.tolist())
+        ws_streak.append_rows(streak_df.fillna("").values.tolist(), value_input_option="USER_ENTERED")
+
+    retry_sheets_write(_do_write_streak, retries=2, label=f"{sheet_name}寫入")
+
+
 def main():
     log.info(f"===== ETF 狙擊系統啟動 | {TRADE_DATE} =====")
 
@@ -625,24 +644,27 @@ def main():
                         from diff_analyzer import compute_consecutive_accumulation
                         streak_df = compute_consecutive_accumulation(ss2, lookback_days=15, min_streak=3)
                         if not streak_df.empty:
-                            existing_sheets = [w.title for w in ss2.worksheets()]
-                            if "ETF連續加碼追蹤" not in existing_sheets:
-                                ws_streak = ss2.add_worksheet(title="ETF連續加碼追蹤", rows=200, cols=10)
-                            else:
-                                ws_streak = ss2.worksheet("ETF連續加碼追蹤")
-
-                            def _do_write_streak(ws_streak=ws_streak, streak_df=streak_df):
-                                ws_streak.clear()
-                                ws_streak.append_row([f"ETF連續加碼追蹤 {TRADE_DATE}"])
-                                ws_streak.append_row(streak_df.columns.tolist())
-                                ws_streak.append_rows(streak_df.fillna("").values.tolist(), value_input_option="USER_ENTERED")
-
-                            retry_sheets_write(_do_write_streak, retries=2, label="ETF連續加碼追蹤寫入")
+                            _write_streak_sheet(ss2, "ETF連續加碼追蹤", streak_df, TRADE_DATE)
                             log.info(f"ETF連續加碼追蹤（個別ETF層級）：{len(streak_df)} 組已寫入")
                         else:
                             log.info("ETF連續加碼追蹤：本次無符合條件的組合")
                     except Exception as e:
                         log.warning(f"ETF連續加碼追蹤失敗（不影響主流程）: {e}")
+
+                    # 2026-09-10新增：連續加碼的鏡像版——個別ETF連續減碼/出貨追蹤。使用者指出
+                    # 原本只有「持續買超」的正向訊號，沒有對稱的「持續賣超」警示，同一套邏輯
+                    # 只是方向反過來，獨立包一層try/except，這裡失敗不影響上面已經成功寫入的
+                    # 加碼追蹤，也不影響其餘主流程。
+                    try:
+                        from diff_analyzer import compute_consecutive_distribution
+                        distrib_df = compute_consecutive_distribution(ss2, lookback_days=15, min_streak=3)
+                        if not distrib_df.empty:
+                            _write_streak_sheet(ss2, "ETF連續減碼追蹤", distrib_df, TRADE_DATE)
+                            log.info(f"ETF連續減碼追蹤（個別ETF層級）：{len(distrib_df)} 組已寫入")
+                        else:
+                            log.info("ETF連續減碼追蹤：本次無符合條件的組合")
+                    except Exception as e:
+                        log.warning(f"ETF連續減碼追蹤失敗（不影響主流程）: {e}")
                 else:
                     log.warning("差異比對無結果")
         except Exception as e:

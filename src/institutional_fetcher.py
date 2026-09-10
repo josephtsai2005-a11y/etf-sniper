@@ -72,15 +72,41 @@ def fetch_institutional_all(trade_date: Optional[str] = None) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def fetch_all_institutional(trade_date: Optional[str] = None) -> pd.DataFrame:
-    """一次抓全市場三大法人，再過濾目標股票（比逐一抓取快且穩定）"""
+def fetch_all_institutional(trade_date: Optional[str] = None, retries: int = 2) -> pd.DataFrame:
+    """一次抓全市場三大法人，再過濾目標股票（比逐一抓取快且穩定）
+
+    2026-09-07修正：這裡原本完全沒有重試機制，跟price_fetcher.py的
+    fetch_bulk_daily_quote()/get_stock_price_single()（都是「一次抓全市場」/
+    連線TWSE的同類函式）不一致——那兩個都有retries機制，這裡卻是「一次連線失敗
+    （例如TWSE偶發回傳非JSON內容，resp.json()丟JSONDecodeError）就整批放棄」，
+    直接回傳空DataFrame。實測案例（2026-09-07 16:49）：TWSE T86 API當次請求失敗，
+    導致main.py整個stage 6（三大法人）被跳過，連帶「三大法人」「多方驗證名單」兩張
+    表當天完全沒有更新（停留在前一交易日的資料），且當天的回測快照也被永久跳過
+    （沒有對應的backfill機制）。修法：比照price_fetcher.py既有的重試模式，只在
+    「連線/解析拋出例外」時重試（TWSE明確回傳stat!=OK或沒有data，代表資料本來就
+    還沒準備好，重試沒有意義，維持原本立即回傳空DataFrame的行為不變）。
+    """
     if not trade_date:
         trade_date = get_trade_date()
     url = "https://www.twse.com.tw/rwd/zh/fund/T86"
     params = {"response": "json", "date": trade_date, "selectType": "ALLBUT0999"}
+
+    last_error = None
+    data = None
+    for attempt in range(retries + 1):
+        try:
+            resp = SESSION.get(url, params=params, timeout=15)
+            data = resp.json()
+            break
+        except Exception as e:
+            last_error = e
+            if attempt < retries:
+                time.sleep(2 * (attempt + 1))
+                continue
+            log.error(f"三大法人全市場失敗（已重試{retries}次）: {e}")
+            return pd.DataFrame()
+
     try:
-        resp = SESSION.get(url, params=params, timeout=15)
-        data = resp.json()
         if data.get("stat") != "OK" or not data.get("data"):
             log.warning(f"三大法人全市場無資料 ({trade_date})")
             return pd.DataFrame()
@@ -161,15 +187,17 @@ def fetch_batch_institutional(
     stock_codes: list,
     trade_date: Optional[str] = None,
     delay: float = 0.4,
+    retries: int = 2,
 ) -> pd.DataFrame:
     """
     批次抓取多檔股票三大法人資料
+    retries: 透傳給fetch_all_institutional()的重試次數（2026-09-07新增，見該函式說明）
     """
     if not trade_date:
         trade_date = get_trade_date()
 
     # 一次抓全市場再過濾
-    all_df = fetch_all_institutional(trade_date)
+    all_df = fetch_all_institutional(trade_date, retries=retries)
     if all_df.empty:
         log.warning("批次法人資料：無結果")
         return pd.DataFrame()

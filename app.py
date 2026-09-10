@@ -256,7 +256,33 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-    update_time = get_update_time(SHEET_SMART)
+    # 2026-09-07修正：這裡原本不管目前選的是哪一頁，一律固定顯示SHEET_SMART
+    # （聰明錢名單）的更新時間。聰明錢名單通常是daily job裡最早、最穩定寫入的一張表，
+    # 一旦後面某個階段（例如法人資料抓取）當天失敗，該階段寫入的表（三大法人／
+    # 多方驗證名單）會停留在前一交易日，但側邊欄卻仍然顯示聰明錢名單「今天已更新」的
+    # 新時間，造成「側邊欄時間是新的，但畫面內容其實是舊的」這種誤導（2026-09-07實測
+    # 案例：法人抓取當天失敗，多方驗證名單停留在9/4，側邊欄卻顯示看起來很新的時間，
+    # 一開始誤導了問題排查方向）。修法：依目前選取的頁面對應到它實際讀取的主要分頁，
+    # 顯示那一頁真正的更新時間；找不到明確對應（例如跨多來源組合出來的頁面，像回測
+    # 績效／關鍵字審核／母題材審核）時，維持原本顯示聰明錢名單時間的行為，不臆測。
+    PAGE_UPDATE_SHEET = {
+        "多方驗證名單":    SHEET_MULTI,
+        "三大法人":        SHEET_INST,
+        "今日訊號":        SHEET_DIFF,
+        "聰明錢名單":      SHEET_SMART,
+        "持股異動明細":    SHEET_DETAIL,
+        "新聞×籌碼交叉":   SHEET_CROSS,
+        "散戶情緒":        SHEET_RETAIL,
+        "題材總覽":        "題材總覽",
+        "基本面資料":      SHEET_FUND,
+        "題材位置":        SHEET_POS,
+        "原始持股庫":      SHEET_RAW,
+        "ETF連續加碼追蹤": "ETF連續加碼追蹤",
+        "每日AI總結":      "每日AI總結",
+        "持倉監控":        SHEET_MULTI,
+        "ETF 覆蓋分析":    SHEET_SMART,
+    }
+    update_time = get_update_time(PAGE_UPDATE_SHEET.get(page, SHEET_SMART))
     if update_time:
         st.caption(f"📅 {update_time}")
 
@@ -2244,54 +2270,140 @@ elif page == "自選股查詢":
 
 
 elif page == "ETF連續加碼追蹤":
-    st.title("📈 ETF連續加碼追蹤")
-    st.caption("哪一檔ETF連續好幾個交易日持續加碼同一檔股票——比單看「今天vs昨天」更有說服力，"
-               "代表這是有意識的、持續性的布局動作，不是單日的正常調節")
+    st.title("📈 ETF連續加碼／減碼追蹤")
+    st.caption("哪一檔ETF連續好幾個交易日持續加碼或減碼同一檔股票——比單看「今天vs昨天」更有說服力，"
+               "代表這是有意識的、持續性的布局或出貨動作，不是單日的正常調節")
 
-    streak_df = load_sheet("ETF連續加碼追蹤")
+    # 2026-09-10新增：連續減碼/出貨鏡像版。原本這一頁只有「連續加碼」單一方向，使用者指出
+    # 少了對稱的「持續賣超」警示——同一套(股票,ETF)顆粒度的邏輯，只是方向反過來
+    # （main.py新增呼叫compute_consecutive_distribution()，寫進獨立的「ETF連續減碼追蹤」
+    # 分頁），這裡用radio切換兩個方向共用同一段渲染邏輯，避免寫兩份幾乎一樣的UI程式碼。
+    direction = st.radio(
+        "追蹤方向", ["🔺 連續加碼（買超）", "🔻 連續減碼（賣超）"],
+        horizontal=True, key="streak_direction",
+    )
+    is_up = direction.startswith("🔺")
+
+    if is_up:
+        sheet_name, days_col, change_col, change_label, bar_color = (
+            "ETF連續加碼追蹤", "連續加碼交易日數", "累計加碼張數", "加碼", "#1D9E75",
+        )
+    else:
+        sheet_name, days_col, change_col, change_label, bar_color = (
+            "ETF連續減碼追蹤", "連續減碼交易日數", "累計減碼張數", "減碼", "#E24B4A",
+        )
+
+    streak_df = load_sheet(sheet_name)
 
     if streak_df.empty:
-        st.info("目前尚無資料，可能原因：①歷史資料還在累積中（需要至少4個交易日才能判斷連續趨勢）"
-                "②目前沒有任何(股票,ETF)組合連續加碼達3天以上——這是正常情況，不代表資料異常")
+        st.info(f"目前尚無資料，可能原因：①歷史資料還在累積中（需要至少4個交易日才能判斷連續趨勢）"
+                f"②目前沒有任何(股票,ETF)組合連續{change_label}達3天以上——這是正常情況，不代表資料異常")
     else:
-        num_cols(streak_df, ["連續加碼交易日數", "累計加碼張數", "最新持股數(張)"])
+        num_cols(streak_df, [days_col, change_col, "最新持股數(張)"])
 
-        min_days = st.slider("最少連續加碼交易日數", 3, 15, 3)
-        filtered = streak_df[streak_df["連續加碼交易日數"] >= min_days].copy()
+        min_days = st.slider(f"最少連續{change_label}交易日數", 3, 15, 3, key=f"min_days_{change_label}")
+        filtered = streak_df[streak_df[days_col] >= min_days].copy()
 
         st.metric("符合條件組合數", f"{len(filtered)} 組")
 
         if filtered.empty:
-            st.info(f"目前沒有連續加碼達{min_days}天以上的組合，可調低門檻或稍後再查看")
+            st.info(f"目前沒有連續{change_label}達{min_days}天以上的組合，可調低門檻或稍後再查看")
         else:
-            filtered = filtered.sort_values("連續加碼交易日數", ascending=False)
+            filtered = filtered.sort_values(days_col, ascending=False)
+            filtered["股票代號"] = filtered["股票代號"].astype(str).str.strip()
+
+            # 2026-09-10新增：跟「連續站上月線天數」交叉對照——這波持續加碼/減碼期間，股價
+            # 有沒有同步反應（例如持續加碼卻沒站上月線，可能代表布局尚未被市場認同；持續
+            # 加碼又同時連續站上月線，訊號更一致）。從聰明錢名單帶入最新的價格/均線欄位，
+            # 不另外重抓資料——聰明錢名單本來就有這幾欄（enrich_with_prices()寫入的）。
+            smart_ref = load_sheet(SHEET_SMART)
+            ref_cols = [c for c in ["股票代號", "收盤價", "漲跌幅%", "站上MA20", "連續站上月線天數"]
+                        if c in smart_ref.columns]
+            if not smart_ref.empty and "股票代號" in ref_cols:
+                smart_ref = smart_ref[ref_cols].drop_duplicates("股票代號").copy()
+                smart_ref["股票代號"] = smart_ref["股票代號"].astype(str).str.strip()
+                filtered = filtered.merge(smart_ref, on="股票代號", how="left")
+
+            if "站上MA20" in filtered.columns:
+                filtered["站上月線"] = filtered["站上MA20"].astype(str).str.lower().isin(
+                    ["true", "1", "是", "yes"]
+                ).map({True: "✅ 站上", False: "— 未站上"})
+
+            display_cols = ["股票代號", "股票名稱", "ETF代碼", days_col, change_col, "最新持股數(張)",
+                             "收盤價", "漲跌幅%", "站上月線", "連續站上月線天數"]
+            display_cols = [c for c in display_cols if c in filtered.columns]
+
             st.dataframe(
-                filtered, use_container_width=True, hide_index=True,
+                filtered[display_cols], use_container_width=True, hide_index=True,
                 column_config={
-                    "連續加碼交易日數": st.column_config.NumberColumn("連續加碼天數", format="%d 天"),
-                    "累計加碼張數":     st.column_config.NumberColumn("累計加碼(張)", format="%.1f"),
-                    "最新持股數(張)":   st.column_config.NumberColumn("最新持股(張)", format="%.1f"),
+                    days_col:              st.column_config.NumberColumn(f"連續{change_label}天數", format="%d 天"),
+                    change_col:            st.column_config.NumberColumn(f"累計{change_label}(張)", format="%.1f"),
+                    "最新持股數(張)":       st.column_config.NumberColumn("最新持股(張)", format="%.1f"),
+                    "收盤價":              st.column_config.NumberColumn("收盤價", format="%.1f"),
+                    "漲跌幅%":             st.column_config.NumberColumn("漲跌幅%", format="%.2f%%"),
+                    "連續站上月線天數":     st.column_config.NumberColumn("連續站上月線(天)", format="%d 天"),
                 }
             )
 
-            # 同一檔股票被多檔ETF同時持續加碼，是更強的訊號——額外標示出來
+            # 同一檔股票被多檔ETF同時持續加碼/減碼，是更強的訊號——額外標示出來
             multi_etf = filtered.groupby("股票代號").filter(lambda g: len(g) >= 2)
             if not multi_etf.empty:
                 st.markdown("---")
-                st.subheader("🔥 多檔ETF同時持續加碼同一股票（更強訊號）")
-                st.caption("不只一檔ETF在連續加碼，代表這不是單一基金經理人的個別判斷，"
+                st.subheader(f"🔥 多檔ETF同時持續{change_label}同一股票（更強訊號）")
+                st.caption(f"不只一檔ETF在連續{change_label}，代表這不是單一基金經理人的個別判斷，"
                            "是跨機構的共同動作，訊號強度更高")
                 multi_stocks = multi_etf["股票代號"].unique().tolist()
                 for code in multi_stocks:
                     sub = multi_etf[multi_etf["股票代號"] == code]
                     name = sub["股票名稱"].iloc[0]
-                    st.markdown(f"**{code} {name}** — 被 {len(sub)} 檔ETF同時連續加碼")
-                    st.dataframe(
-                        sub[["ETF代碼", "連續加碼交易日數", "累計加碼張數", "最新持股數(張)"]],
-                        use_container_width=True, hide_index=True,
-                    )
+                    st.markdown(f"**{code} {name}** — 被 {len(sub)} 檔ETF同時連續{change_label}")
+                    sub_cols = [c for c in ["ETF代碼", days_col, change_col, "最新持股數(張)"] if c in sub.columns]
+                    st.dataframe(sub[sub_cols], use_container_width=True, hide_index=True)
+
+            # 2026-09-10新增：個股股價走勢圖，跟這波連續加碼/減碼期間疊圖對照。刻意做成
+            # on-demand（選好股票、按按鈕才抓）而不是頁面一載入就對表格裡每一檔股票都各打
+            # 一次TWSE——這頁的組合數不固定，一次性把它們全部抓過一輪對TWSE跟頁面載入速度
+            # 都不必要，比照「個股查詢」頁既有的作法，只在使用者實際想看時才即時抓一檔。
+            st.markdown("---")
+            st.subheader("📉 個股股價走勢對照")
+            st.caption(f"選擇一檔股票，查看最近股價走勢，並標示出這波持續{change_label}的期間，"
+                       "快速看出股價有沒有跟著這波布局反應")
+            stock_options = filtered[["股票代號", "股票名稱"]].drop_duplicates().copy()
+            stock_options["標籤"] = stock_options["股票代號"] + " " + stock_options["股票名稱"].astype(str)
+            picked_label = st.selectbox(
+                "選擇股票", stock_options["標籤"].tolist(), key=f"price_pick_{change_label}"
+            )
+            if picked_label:
+                picked_code = picked_label.split(" ")[0]
+                streak_days_for_pick = int(filtered.loc[filtered["股票代號"] == picked_code, days_col].max())
+                if st.button(f"載入 {picked_label} 股價走勢", key=f"load_price_btn_{change_label}"):
+                    with st.spinner("正在抓取股價歷史資料..."):
+                        from price_fetcher import get_stock_price_history
+                        hist = get_stock_price_history(picked_code)
+                    if hist.empty:
+                        st.warning("暫時抓不到這檔股票的股價歷史資料，可能是TWSE暫時無法連線，稍後再試")
+                    else:
+                        hist_plot = hist.tail(40).copy()  # 近40個交易日，涵蓋streak期間再往前多留一些對照
+                        fig = px.line(hist_plot, x="日期", y="收盤價", markers=True)
+                        n_mark = min(streak_days_for_pick + 1, len(hist_plot))
+                        if n_mark >= 2:
+                            mark_start = hist_plot["日期"].iloc[-n_mark]
+                            mark_end = hist_plot["日期"].iloc[-1]
+                            fig.add_vrect(
+                                x0=mark_start, x1=mark_end,
+                                fillcolor=bar_color, opacity=0.15, line_width=0,
+                                annotation_text=f"持續{change_label}期間", annotation_position="top left",
+                            )
+                        fig.update_layout(
+                            height=380, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                            margin=dict(l=40, r=20, t=30, b=30),
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                        st.caption("💡 標示區間是依連續天數往回框選最近的交易日，僅為概略對照——"
+                                   "ETF申報揭露的持股數跟股價揭露時間可能有些微落差，僅供參考，"
+                                   "不是逐日精確對應。")
 
     st.markdown("---")
     st.caption("💡 這是籌碼面「持續性」訊號，跟「多方驗證名單」的當日評分是互補角度："
-               "評分反映「今天綜合表現如何」，這裡反映「過去這段期間有沒有被持續性布局」，"
+               "評分反映「今天綜合表現如何」，這裡反映「過去這段期間有沒有被持續性布局或出貨」，"
                "兩者一起看更完整。")
