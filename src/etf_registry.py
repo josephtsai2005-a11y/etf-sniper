@@ -43,11 +43,39 @@ WebSearch確認台灣市場對主動式ETF績效有豐富的公開討論，但�
 - 如果掃描到的數量遠低於25、或是0，代表這裡的表格解析邏輯需要依實際HTML結構調整
   （不會影響現有25檔ETF的每日抓取——那一段走的是fetcher.py::get_tracked_etf_list()的
   安全網退回機制，退回時繼續使用ETF_LIST，不受這裡影響）。
+
+## 2026-09-11上線後修正2：績效計算改用「全市場單日快照」，不再逐檔查歷史序列
+
+第一次正式上線後，compute_etf_performance()原本用price_fetcher.py::get_stock_price_
+history()逐檔查詢STOCK_DAY（每檔ETF內部還要拆成13個月份的請求），25~33檔ETF疊加起來
+單次執行會對TWSE發出上百次請求。實測（兩次正式Cloud Run執行 + 使用者在自家網路的本機
+diagnose_rate_limit.py複測）都在恰好第6檔ETF（累計約85次請求左右）開始整批失敗，
+HTTP狀態碼428、回應是TWSE自己的防爬蟲HTML頁面（不是JSON）。使用者從完全不同的網路
+（住家/公司IP，不是Google Cloud）重跑同一套請求節奏，結果在幾乎一樣的位置一樣整批擋下，
+這證明問題出在「短時間內對TWSE發出的請求『總量』」本身（TWSE的限制），跟是不是Cloud Run
+的對外IP被針對無關——之前加的escalating cooldown/circuit breaker（見下方已移除的
+PERFORMANCE_GIVE_UP_THRESHOLD相關邏輯）只能防止Job無限卡住，沒辦法真正解決「資料抓不
+完整」的根本問題，即使冷卻累計超過10分鐘依然完全沒有恢復。
+
+改用TWSE另一個既有端點`MI_INDEX`（price_fetcher.py::fetch_bulk_daily_quote()已經在用
+同一個端點做「全市場當日收盤行情」，2026-09-01就寫好但一直沒有實測驗證過——這次意外地
+用使用者本機的診斷腳本連帶驗證了這個端點格式是對的）：這個端點一次請求就回傳「當天全部
+上市股票/ETF」的收盤價，不是「一檔股票一段期間」。近1月/近3月/今年以來報酬率其實只需要
+4個時間點的收盤價（今天、約1個月前、約3個月前、今年年初），改成對這4個時間點各打1次
+全市場快照（遇到假日/非交易日會自動往前一天找，最多回溯8天），不管追蹤幾檔ETF，
+固定只需要4~最多約32次請求（4個時間點 × 最多8次回退嘗試），比原本165次少了一個數量級
+以上，也不再需要cooldown/circuit breaker這些防禦性機制——請求量本身已經低到不會觸發
+TWSE的限制。
+
+代價：因為改成只看4個時間點的收盤價而非完整的每日序列，「近1月/近3月」從「精確的21/63個
+交易日」變成「約30/90個『日曆天』回推、遇到非交易日往前找最近一個有資料的交易日」的近似
+值，跟原本用交易日數回推比會有幾天的誤差（通常1-2個交易日內），但對「表現領先/中等/落後」
+這種四分位分類來說，這個誤差不影響分類結果的判斷力，換取請求量少一個數量級是值得的取捨。
 """
 import re
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import requests
@@ -55,7 +83,6 @@ import pandas as pd
 from bs4 import BeautifulSoup
 
 from fetcher import ETF_LIST
-from price_fetcher import get_stock_price_history
 from retry_utils import retry_sheets_write
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -75,9 +102,10 @@ ACTIVE_ETF_CODE_PATTERN = re.compile(r"^00\d{3}[AD]$")
 
 SHEET_REGISTRY = "ETF清單管理"
 
-# compute_etf_performance()的保險絲門檻：連續失敗達到這個次數後放棄剩餘檢查，不再發送請求
-# （見compute_etf_performance() docstring的說明）。提成模組層級常數方便測試直接引用確認。
-PERFORMANCE_GIVE_UP_THRESHOLD = 9
+# _find_market_closes_near()往回找交易日快照時，最多回溯的天數（處理週末/連假這種
+# 非交易日）。8天涵蓋得了一般連假（含國定假日調整放假），提成模組層級常數方便測試引用。
+SNAPSHOT_MAX_LOOKBACK_DAYS = 8
+
 REGISTRY_COLUMNS = [
     "ETF代碼", "ETF名稱", "追蹤狀態", "來源", "加入日期",
     "近1月報酬%", "近3月報酬%", "今年以來報酬%", "資料筆數", "備註", "最後掃描日期",
@@ -169,117 +197,147 @@ def fetch_market_active_etf_list(retries: int = 2) -> pd.DataFrame:
     return pd.DataFrame()
 
 
-def compute_etf_performance(etf_codes: list, retries: int = 1, months_back: int = 13) -> pd.DataFrame:
+def _fetch_all_market_closes(date_str: str, retries: int = 1) -> dict:
+    """
+    抓某一天「全市場」收盤價快照（TWSE MI_INDEX，1次請求涵蓋所有上市股票/ETF），
+    回傳 {證券代號: 收盤價} 的dict。
+
+    跟price_fetcher.py::fetch_bulk_daily_quote()是同樣的資料來源/端點，這裡另外寫一個
+    輕量版本（只留代號+收盤價，不轉換其他欄位），刻意不直接呼叫fetch_bulk_daily_quote()——
+    避免這個檔案對price_fetcher.py內部欄位格式（成交量/成交金額等這裡用不到的欄位）產生
+    不必要的耦合，兩邊各自獨立維護自己實際用到的最小欄位子集。
+
+    非交易日、查無資料、或連線例外，都回傳空dict（不拋例外）——呼叫端
+    _find_market_closes_near()看到空dict就會自動往前一天找，不需要這裡區分「非交易日」
+    跟「暫時性網路錯誤」這兩種情況。
+    """
+    url = "https://www.twse.com.tw/exchangeReport/MI_INDEX"
+    params = {"response": "json", "date": date_str, "type": "ALLBUT0999"}
+    for attempt in range(retries + 1):
+        try:
+            resp = SESSION.get(url, params=params, timeout=20)
+            data = resp.json()
+            if data.get("stat") != "OK":
+                return {}
+            stock_table = None
+            for t in data.get("tables", []):
+                fields = t.get("fields", [])
+                if "證券代號" in fields and "收盤價" in fields:
+                    stock_table = t
+                    break
+            if stock_table is None:
+                return {}
+            fields = stock_table["fields"]
+            code_idx = fields.index("證券代號")
+            close_idx = fields.index("收盤價")
+            closes = {}
+            for row in stock_table.get("data", []):
+                code = str(row[code_idx]).strip()
+                raw_close = str(row[close_idx]).replace(",", "").strip()
+                try:
+                    closes[code] = float(raw_close)
+                except ValueError:
+                    continue
+            return closes
+        except Exception as e:
+            if attempt < retries:
+                time.sleep(2 * (attempt + 1))
+                continue
+            log.debug(f"全市場收盤價快照抓取失敗 ({date_str}，已重試{retries}次): {e}")
+            return {}
+    return {}
+
+
+def _find_market_closes_near(target_date: datetime, max_lookback_days: int = SNAPSHOT_MAX_LOOKBACK_DAYS):
+    """
+    從target_date開始，每次抓不到資料就往前推1天，最多回溯max_lookback_days天，
+    直到抓到有資料的交易日快照為止——處理週末/國定連假這些非交易日（TWSE非交易日這個
+    端點回傳的stat不會是"OK"，或是有OK但沒有個股明細表格）。
+
+    回傳 (實際抓到資料的日期字串YYYYMMDD, {代號: 收盤價})；回溯到底仍找不到時回傳(None, {})。
+    """
+    cursor = target_date
+    for _ in range(max_lookback_days):
+        date_str = cursor.strftime("%Y%m%d")
+        closes = _fetch_all_market_closes(date_str)
+        if closes:
+            return date_str, closes
+        cursor -= timedelta(days=1)
+    return None, {}
+
+
+def compute_etf_performance(etf_codes: list) -> pd.DataFrame:
     """
     計算每檔ETF的近期報酬率，供annotate_performance()標註「表現好壞」用。
 
-    改用price_fetcher.py既有的get_stock_price_history()（STOCK_DAY對個股/ETF是同一套
-    API，2026-09-10新增、2026-09-11擴充months_back參數，這裡直接沿用，不重寫一份）抓最近
-    months_back個月（預設13個月，同時涵蓋「近1月」「近3月」「今年以來」三種常見比較窗口）
-    的收盤價時間序列。
+    2026-09-11上線後第二次修正：完全改寫，不再逐檔查詢歷史序列，改成只抓4個時間點
+    （今天、約1個月前、約3個月前、今年年初）的「全市場單日收盤價快照」（TWSE MI_INDEX，
+    見_fetch_all_market_closes()/_find_market_closes_near()）。不管追蹤幾檔ETF，固定
+    只需要4個時間點 × 最多SNAPSHOT_MAX_LOOKBACK_DAYS次回退嘗試（處理假日）的請求量，
+    從原本「逐檔查歷史序列」動輒上百次請求降到頂多幾十次，徹底避開TWSE對請求「總量」的
+    限制（詳見本檔案開頭「2026-09-11上線後修正2」的完整說明，含使用者實測證據）。
 
-    報酬率改用「交易日數」回推，不是用日曆天數，避免遇到連假/非交易日造成的誤差：
-    - 近1月報酬% ≈ 最新收盤 / 倒數第21個交易日收盤 - 1（約1個月的交易日數）
-    - 近3月報酬% ≈ 最新收盤 / 倒數第63個交易日收盤 - 1（約3個月的交易日數）
-    - 今年以來報酬%（YTD）= 最新收盤 / 今年最早一筆可查到的收盤 - 1
-      （如果該ETF是今年才上市，「今年最早一筆」就是它的上市價，這是刻意的近似值，
-      不是真正的「今年開盤第一天」，此為已知限制）
+    報酬率計算：(該ETF在「最新」快照的收盤價 / 該ETF在對應基準快照的收盤價 - 1) * 100
+    - 近1月報酬%：基準快照＝約30天前（往前找最近一個有資料的交易日）
+    - 近3月報酬%：基準快照＝約90天前
+    - 今年以來報酬%（YTD）：基準快照＝今年1月1日（往前找的話會落到去年12月，所以這裡改成
+      「往後」找最近一個有資料的交易日——用_find_market_closes_near時傳入的target_date
+      設在1/1，該函式只會往前找，所以YTD的基準改用另一個機制，見下方實作）。
 
-    資料不足時（例如ETF剛上市不久，交易日數不夠回推），對應欄位留None（不是0%）——
-    0%代表「持平」是有意義的數字，None代表「不知道」，兩者不能混為一談，沿用專案一貫
-    「資料不足就明講，不要用看似正常的假數字騙自己」的原則。
+    任一時間點該ETF沒有收盤價（快照裡完全查不到這個代號，最常見是ETF今年才上市，早期快照
+    時它還沒開始交易），或整個快照抓取失敗，對應欄位留None（不是0%）——0%代表「持平」是
+    有意義的數字，None代表「不知道」，兩者不能混為一談，沿用專案一貫原則。
 
-    回傳：DataFrame，欄位 ETF代碼／近1月報酬%／近3月報酬%／今年以來報酬%／資料筆數。
-
-    2026-09-11第一次正式上線實測後修正：原本只在每檔ETF之間固定停頓（見下方的
-    `time.sleep(2.0)`），實測發現前8檔正常，但25~33檔ETF疊加起來（每檔13個月=一次連續
-    上百次請求）還是會在某個累積量觸發TWSE的請求頻率限制——而且觸發之後不是短暫的、
-    這次實測整整快80秒、剩下所有ETF全部失敗都沒有恢復。單純加大固定間隔對「整批瞬間擋住」
-    這種情況效果有限，改成**偵測到連續失敗就自動暫停冷卻**：連續失敗達到門檻後，暫停
-    30秒（之後每再連續失敗一次，冷卻時間遞增，上限120秒）讓TWSE的限制視窗有時間重置，
-    比死撐著用固定間隔繼續打更務實——雖然仍然無法保證TWSE的限制視窗一定在這個時間內
-    重置（這部分沒有官方文件可查，也沒辦法在sandbox驗證），但至少不會像修正前那樣，
-    一被擋住就整批剩下的ETF全部陪葬。
-
-    另外加了一個**保險絲**（circuit breaker）：如果連續失敗次數衝到`GIVE_UP_THRESHOLD`
-    （目前設9，代表已經連續冷卻暫停了7次、總共停了超過10分鐘還是持續失敗），代表這已經
-    不是短暫的頻率限制、繼續冷卻等待的意義不大，直接放棄剩下還沒抓的ETF（不再發任何請求、
-    不再冷卻），全部標記「資料不足」結束這個函式——用意是替整個Job的執行時間設一個上限，
-    避免真的遇到限制長時間不解除時，Job卡在這裡耗到逾時都還沒跑完其他步驟（例如市場掃描
-    結果都掃到了、清單也該更新的，不該被卡在績效計算這一步全部拖垮）。
+    回傳：DataFrame，欄位 ETF代碼／近1月報酬%／近3月報酬%／今年以來報酬%／資料筆數
+    （資料筆數＝這4個時間點中，這檔ETF查得到收盤價的筆數，最大4，僅供參考用，不再是
+    交易日數）。
     """
+    today = datetime.now()
+
+    # YTD基準：今年1月1日附近的交易日快照。1/1通常是元旦假期，往前找會跳到去年，
+    # 這裡改成從1/1開始「往後」最多找SNAPSHOT_MAX_LOOKBACK_DAYS天（新年開紅盤通常
+    # 1月初幾天內就會開始交易）。
+    jan1 = datetime(today.year, 1, 1)
+    ytd_date, ytd_closes = None, {}
+    cursor = jan1
+    for _ in range(SNAPSHOT_MAX_LOOKBACK_DAYS):
+        date_str = cursor.strftime("%Y%m%d")
+        closes = _fetch_all_market_closes(date_str)
+        if closes:
+            ytd_date, ytd_closes = date_str, closes
+            break
+        cursor += timedelta(days=1)
+
+    latest_date, latest_closes = _find_market_closes_near(today)
+    m1_date, m1_closes = _find_market_closes_near(today - timedelta(days=30))
+    m3_date, m3_closes = _find_market_closes_near(today - timedelta(days=90))
+
+    log.info(f"績效計算快照：最新={latest_date}({len(latest_closes)}檔) "
+             f"1個月前={m1_date}({len(m1_closes)}檔) 3個月前={m3_date}({len(m3_closes)}檔) "
+             f"年初={ytd_date}({len(ytd_closes)}檔)")
+
+    def _ret(latest, base):
+        if latest is None or base is None or base == 0:
+            return None
+        return round((latest / base - 1) * 100, 2)
+
     records = []
-    consecutive_failures = 0
-    for i, code in enumerate(etf_codes, 1):
-        if consecutive_failures >= PERFORMANCE_GIVE_UP_THRESHOLD:
-            log.warning(f"連續失敗已達 {consecutive_failures} 次（冷卻多輪仍未恢復），"
-                        f"研判TWSE請求頻率限制短時間內不會解除，放棄剩餘 "
-                        f"{len(etf_codes) - i + 1} 檔的績效計算（標記為資料不足），"
-                        f"避免整個Job卡在這裡耗盡執行時間")
-            records.append({
-                "ETF代碼": code, "近1月報酬%": None, "近3月報酬%": None,
-                "今年以來報酬%": None, "資料筆數": 0,
-            })
-            continue
-
-        log.info(f"[{i}/{len(etf_codes)}] 計算 {code} 績效...")
-        hist = get_stock_price_history(code, retries=retries, months_back=months_back)
-
-        if hist.empty:
-            consecutive_failures += 1
-            records.append({
-                "ETF代碼": code, "近1月報酬%": None, "近3月報酬%": None,
-                "今年以來報酬%": None, "資料筆數": 0,
-            })
-            if consecutive_failures >= 3:
-                cooldown = min(30 * (consecutive_failures - 2), 120)
-                log.warning(f"連續 {consecutive_failures} 檔抓取失敗，可能觸發TWSE請求頻率"
-                            f"限制，暫停 {cooldown} 秒讓限制視窗有機會重置後再繼續...")
-                time.sleep(cooldown)
-            continue
-
-        consecutive_failures = 0
-
-        closes = hist["收盤價"].tolist()
-        dates = hist["日期"].tolist()
-        latest_close = closes[-1]
-        n = len(closes)
-
-        def _return_pct(lookback_days):
-            if n <= lookback_days:
-                return None
-            base = closes[-1 - lookback_days]
-            if not base:
-                return None
-            return round((latest_close / base - 1) * 100, 2)
-
-        r1m = _return_pct(21)
-        r3m = _return_pct(63)
-
-        ytd = None
-        current_year = dates[-1][:4] if dates else ""
-        if current_year:
-            year_dates_idx = [idx for idx, d in enumerate(dates) if d.startswith(current_year)]
-            if year_dates_idx:
-                base = closes[year_dates_idx[0]]
-                if base:
-                    ytd = round((latest_close / base - 1) * 100, 2)
-
+    for code in etf_codes:
+        latest_close = latest_closes.get(code)
+        r1m = _ret(latest_close, m1_closes.get(code))
+        r3m = _ret(latest_close, m3_closes.get(code))
+        ytd = _ret(latest_close, ytd_closes.get(code))
+        data_points = sum(1 for c in (latest_close, m1_closes.get(code),
+                                       m3_closes.get(code), ytd_closes.get(code)) if c is not None)
         records.append({
             "ETF代碼": code, "近1月報酬%": r1m, "近3月報酬%": r3m,
-            "今年以來報酬%": ytd, "資料筆數": n,
+            "今年以來報酬%": ytd, "資料筆數": data_points,
         })
-        # 2026-09-11修正：從1.0秒拉長到2.0秒。第一次正式上線實測發現，每檔ETF內部
-        # 13個月份的請求（見price_fetcher.py::get_stock_price_history()同日的修正）疊加
-        # 上ETF之間這裡的間隔，前5檔還正常，第6檔開始全部回傳空——研判是短時間內對TWSE
-        # 發送太多請求觸發了頻率限制，這裡也一併拉長間隔，降低整體請求密度。
-        time.sleep(2.0)
 
     return pd.DataFrame(records)
 
 
-def annotate_performance(perf_df: pd.DataFrame, rank_period: str = "近3月報酬%",
-                          min_data_points: int = 40) -> pd.DataFrame:
+def annotate_performance(perf_df: pd.DataFrame, rank_period: str = "近3月報酬%") -> pd.DataFrame:
     """
     把compute_etf_performance()算出來的報酬率，轉換成人看得懂的「備註」標籤。
 
@@ -293,9 +351,14 @@ def annotate_performance(perf_df: pd.DataFrame, rank_period: str = "近3月報�
     的操盤表現、不會被單一天的市場波動主導；比「今年以來」更即時、不會被年初以前很久的
     表現拖累近期判斷。
 
+    2026-09-11上線後第二次修正：compute_etf_performance()改成「4個時間點快照」算法後，
+    「資料筆數」的意義從「交易日數」變成「4個時間點中查得到收盤價的筆數」（最大4），
+    不再適合用原本的min_data_points=40這種交易日數門檻判斷「資料是否足夠」——改成直接
+    看rank_period那一期報酬率本身算不算得出來（notna），算不出來（通常是這檔ETF在
+    對應基準時間點還沒上市/沒有收盤價）就是「資料尚不足」，語意上更直接、不用額外參數。
+
     分類邏輯：
-    - 資料筆數不足min_data_points（預設40個交易日，約近2個月）：「🆕 資料尚不足，暫無法比較」
-      （新上市ETF常見情況，不勉強排名，避免資料太少排出來的名次沒有意義）。
+    - rank_period對應的報酬率是None：「🆕 資料尚不足，暫無法比較」（新上市ETF常見情況）。
     - 樣本數（扣除資料不足者）< 4 檔時，四分位沒有統計意義，改用「正報酬=領先／負報酬=落後／
       恰好0=中等」這種簡單判斷。
     - 樣本數 >= 4 檔時，依rank_period數值排序分四等分：前25% 🟢表現領先／後25% 🔴表現落後／
@@ -306,7 +369,7 @@ def annotate_performance(perf_df: pd.DataFrame, rank_period: str = "近3月報�
     df = perf_df.copy()
     df["備註"] = "🆕 資料尚不足，暫無法比較"
 
-    valid = df[(df["資料筆數"] >= min_data_points) & df[rank_period].notna()].copy()
+    valid = df[df[rank_period].notna()].copy()
 
     if len(valid) >= 4:
         q1 = valid[rank_period].quantile(0.25)
@@ -440,18 +503,13 @@ def run_quarterly_etf_scan(ss, retries: int = 2) -> pd.DataFrame:
         registry_df.loc[missing_mask, "備註"] = "⚠️ 本次市場掃描未偵測到，請人工確認是否已下市/代號變更"
 
     # 步驟5：績效計算 + 標註
-    # 2026-09-11新增：months_back改成依當下月份動態決定，不再固定打滿13個月——「今年以來
-    # 報酬%」只需要回溯到今年1月，不需要每次都多抓好幾個月用不到的舊資料，尤其在下半年
-    # （例如9月只需要回溯到1月，9個月就夠，不用13個月），能省下不少對TWSE的請求量，
-    # 對降低觸發請求頻率限制的機率有幫助（見compute_etf_performance()同日修正的說明）。
-    # 加2個月緩衝（例如遇到月初、當月資料還很少時，近3月報酬%需要往前多抓一點才夠天數）、
-    # 下限4個月（至少要能算近3月報酬%），上限13個月（維持原本的安全上限，1月執行時
-    # 「今年以來」本來就只有當月資料，不需要真的抓到13個月）。
-    dynamic_months_back = max(4, min(13, datetime.now().month + 2))
-
+    # 2026-09-11上線後第二次修正：compute_etf_performance()改成「4個時間點快照」算法
+    # （見本檔案開頭「上線後修正2」），不再需要months_back這種依月份動態調整回溯範圍的
+    # 參數——不管追蹤幾檔ETF、現在是幾月，請求量都固定是4個時間點左右，不用再為了省
+    # 請求量而動態調整回溯月數。
     tracked_codes = registry_df.loc[registry_df["追蹤狀態"] == "追蹤中", "ETF代碼"].tolist()
     if tracked_codes:
-        perf_df = compute_etf_performance(tracked_codes, months_back=dynamic_months_back)
+        perf_df = compute_etf_performance(tracked_codes)
         perf_df = annotate_performance(perf_df)
 
         registry_df = registry_df.merge(perf_df, on="ETF代碼", how="left", suffixes=("", "_perf"))
