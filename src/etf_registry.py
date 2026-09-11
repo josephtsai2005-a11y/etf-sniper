@@ -74,6 +74,10 @@ SESSION.headers.update({
 ACTIVE_ETF_CODE_PATTERN = re.compile(r"^00\d{3}[AD]$")
 
 SHEET_REGISTRY = "ETF清單管理"
+
+# compute_etf_performance()的保險絲門檻：連續失敗達到這個次數後放棄剩餘檢查，不再發送請求
+# （見compute_etf_performance() docstring的說明）。提成模組層級常數方便測試直接引用確認。
+PERFORMANCE_GIVE_UP_THRESHOLD = 9
 REGISTRY_COLUMNS = [
     "ETF代碼", "ETF名稱", "追蹤狀態", "來源", "加入日期",
     "近1月報酬%", "近3月報酬%", "今年以來報酬%", "資料筆數", "備註", "最後掃描日期",
@@ -186,18 +190,55 @@ def compute_etf_performance(etf_codes: list, retries: int = 1, months_back: int 
     「資料不足就明講，不要用看似正常的假數字騙自己」的原則。
 
     回傳：DataFrame，欄位 ETF代碼／近1月報酬%／近3月報酬%／今年以來報酬%／資料筆數。
+
+    2026-09-11第一次正式上線實測後修正：原本只在每檔ETF之間固定停頓（見下方的
+    `time.sleep(2.0)`），實測發現前8檔正常，但25~33檔ETF疊加起來（每檔13個月=一次連續
+    上百次請求）還是會在某個累積量觸發TWSE的請求頻率限制——而且觸發之後不是短暫的、
+    這次實測整整快80秒、剩下所有ETF全部失敗都沒有恢復。單純加大固定間隔對「整批瞬間擋住」
+    這種情況效果有限，改成**偵測到連續失敗就自動暫停冷卻**：連續失敗達到門檻後，暫停
+    30秒（之後每再連續失敗一次，冷卻時間遞增，上限120秒）讓TWSE的限制視窗有時間重置，
+    比死撐著用固定間隔繼續打更務實——雖然仍然無法保證TWSE的限制視窗一定在這個時間內
+    重置（這部分沒有官方文件可查，也沒辦法在sandbox驗證），但至少不會像修正前那樣，
+    一被擋住就整批剩下的ETF全部陪葬。
+
+    另外加了一個**保險絲**（circuit breaker）：如果連續失敗次數衝到`GIVE_UP_THRESHOLD`
+    （目前設9，代表已經連續冷卻暫停了7次、總共停了超過10分鐘還是持續失敗），代表這已經
+    不是短暫的頻率限制、繼續冷卻等待的意義不大，直接放棄剩下還沒抓的ETF（不再發任何請求、
+    不再冷卻），全部標記「資料不足」結束這個函式——用意是替整個Job的執行時間設一個上限，
+    避免真的遇到限制長時間不解除時，Job卡在這裡耗到逾時都還沒跑完其他步驟（例如市場掃描
+    結果都掃到了、清單也該更新的，不該被卡在績效計算這一步全部拖垮）。
     """
     records = []
+    consecutive_failures = 0
     for i, code in enumerate(etf_codes, 1):
-        log.info(f"[{i}/{len(etf_codes)}] 計算 {code} 績效...")
-        hist = get_stock_price_history(code, retries=retries, months_back=months_back)
-
-        if hist.empty:
+        if consecutive_failures >= PERFORMANCE_GIVE_UP_THRESHOLD:
+            log.warning(f"連續失敗已達 {consecutive_failures} 次（冷卻多輪仍未恢復），"
+                        f"研判TWSE請求頻率限制短時間內不會解除，放棄剩餘 "
+                        f"{len(etf_codes) - i + 1} 檔的績效計算（標記為資料不足），"
+                        f"避免整個Job卡在這裡耗盡執行時間")
             records.append({
                 "ETF代碼": code, "近1月報酬%": None, "近3月報酬%": None,
                 "今年以來報酬%": None, "資料筆數": 0,
             })
             continue
+
+        log.info(f"[{i}/{len(etf_codes)}] 計算 {code} 績效...")
+        hist = get_stock_price_history(code, retries=retries, months_back=months_back)
+
+        if hist.empty:
+            consecutive_failures += 1
+            records.append({
+                "ETF代碼": code, "近1月報酬%": None, "近3月報酬%": None,
+                "今年以來報酬%": None, "資料筆數": 0,
+            })
+            if consecutive_failures >= 3:
+                cooldown = min(30 * (consecutive_failures - 2), 120)
+                log.warning(f"連續 {consecutive_failures} 檔抓取失敗，可能觸發TWSE請求頻率"
+                            f"限制，暫停 {cooldown} 秒讓限制視窗有機會重置後再繼續...")
+                time.sleep(cooldown)
+            continue
+
+        consecutive_failures = 0
 
         closes = hist["收盤價"].tolist()
         dates = hist["日期"].tolist()
@@ -399,9 +440,18 @@ def run_quarterly_etf_scan(ss, retries: int = 2) -> pd.DataFrame:
         registry_df.loc[missing_mask, "備註"] = "⚠️ 本次市場掃描未偵測到，請人工確認是否已下市/代號變更"
 
     # 步驟5：績效計算 + 標註
+    # 2026-09-11新增：months_back改成依當下月份動態決定，不再固定打滿13個月——「今年以來
+    # 報酬%」只需要回溯到今年1月，不需要每次都多抓好幾個月用不到的舊資料，尤其在下半年
+    # （例如9月只需要回溯到1月，9個月就夠，不用13個月），能省下不少對TWSE的請求量，
+    # 對降低觸發請求頻率限制的機率有幫助（見compute_etf_performance()同日修正的說明）。
+    # 加2個月緩衝（例如遇到月初、當月資料還很少時，近3月報酬%需要往前多抓一點才夠天數）、
+    # 下限4個月（至少要能算近3月報酬%），上限13個月（維持原本的安全上限，1月執行時
+    # 「今年以來」本來就只有當月資料，不需要真的抓到13個月）。
+    dynamic_months_back = max(4, min(13, datetime.now().month + 2))
+
     tracked_codes = registry_df.loc[registry_df["追蹤狀態"] == "追蹤中", "ETF代碼"].tolist()
     if tracked_codes:
-        perf_df = compute_etf_performance(tracked_codes)
+        perf_df = compute_etf_performance(tracked_codes, months_back=dynamic_months_back)
         perf_df = annotate_performance(perf_df)
 
         registry_df = registry_df.merge(perf_df, on="ETF代碼", how="left", suffixes=("", "_perf"))
