@@ -13,7 +13,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pytz
-from fetcher import fetch_all_etfs, aggregate_smart_money, get_last_trading_date
+from fetcher import fetch_all_etfs, aggregate_smart_money, get_last_trading_date, get_tracked_etf_list
 from price_fetcher import enrich_with_prices, get_stock_price_single
 from diff_analyzer import load_history_from_sheets, compute_daily_diff, compute_fund_flow, aggregate_stock_diff
 from news_fetcher import fetch_all_news, tag_articles, auto_extract_hot_words
@@ -61,7 +61,7 @@ else:
     _trade_day = _tw_now
 _today_str = _trade_day.strftime("%Y%m%d")
 TRADE_DATE = os.environ.get("TRADE_DATE", _today_str)
-RUN_MODE = os.environ.get("RUN_MODE", "core")  # core | inst | news
+RUN_MODE = os.environ.get("RUN_MODE", "core")  # core | inst | news | ai | etf_scan
 
 
 def send_line_notify(message: str):
@@ -494,21 +494,50 @@ def main():
         log.error("缺少 GOOGLE_APPLICATION_CREDENTIALS 環境變數")
         sys.exit(1)
 
-    # ── 階段一：採集 34 檔 ETF ──────────────────────────────
-    log.info("[1/3] 抓取 34 檔主動式 ETF 持股...")
+    # ── RUN_MODE=etf_scan：季度ETF清單掃描（2026-09-11新增）──────────────
+    # 獨立的Cloud Run Job，由Cloud Scheduler每季觸發一次，跟每天16:45的daily job是
+    # 完全不同的流程（不抓持股、不做聰明錢聚合），只做「掃描市場上現有的主動式ETF、
+    # 跟目前追蹤中的清單比對、新的直接加入追蹤、幫全部追蹤中的ETF標註近期績效」，
+    # 結果寫進獨立的「ETF清單管理」分頁。完成或失敗都直接return，不會往下跑到抓持股
+    # 那一段（那一段假設RUN_MODE是core/inst/news/ai其中之一）。
+    if RUN_MODE == "etf_scan":
+        log.info("RUN_MODE=etf_scan，執行季度ETF清單掃描（不執行每日持股抓取流程）...")
+        try:
+            client = get_client(CREDENTIALS_PATH)
+            ss = get_or_create_spreadsheet(client, SPREADSHEET_ID)
+            from etf_registry import run_quarterly_etf_scan
+            run_quarterly_etf_scan(ss)
+            log.info("季度ETF清單掃描完成")
+        except Exception as e:
+            log.error(f"季度ETF清單掃描失敗: {e}")
+            import traceback
+            log.debug(traceback.format_exc())
+            sys.exit(1)
+        log.info("===== 全部完成 =====")
+        return
+
+    # ── 階段一：採集追蹤中的主動式 ETF ──────────────────────────────
+    # 2026-09-11修改：改用get_tracked_etf_list()動態決定要抓哪些ETF代號，不再只認
+    # fetcher.py裡寫死的ETF_LIST常數——這是季度掃描（RUN_MODE=etf_scan）新增的ETF能夠
+    # 「直接自動加入追蹤」的關鍵，如果這裡還是只抓ETF_LIST，季度掃描把新代號寫進
+    # 「ETF清單管理」分頁也不會有任何實際效果。任何原因讀不到清單都會安全退回ETF_LIST，
+    # 不影響現有25檔ETF的每日抓取。
+    from fetcher import get_tracked_etf_list
+    _list_client = get_client(CREDENTIALS_PATH)
+    _list_ss = get_or_create_spreadsheet(_list_client, SPREADSHEET_ID)
+    tracked_etf_codes = get_tracked_etf_list(_list_ss)
+    log.info(f"[1/3] 抓取 {len(tracked_etf_codes)} 檔追蹤中的主動式 ETF 持股...")
 
     if RUN_MODE in ("inst", "news"):
         # inst/news 模式：直接從 Sheets 讀取今日資料，不重新抓取
         log.info(f"RUN_MODE={RUN_MODE}，從 Sheets 讀取今日資料...")
-        _client0 = get_client(CREDENTIALS_PATH)
-        _ss0 = get_or_create_spreadsheet(_client0, SPREADSHEET_ID)
-        raw_df = load_history_from_sheets(_ss0, days=1)
+        raw_df = load_history_from_sheets(_list_ss, days=1)
         raw_df = raw_df[raw_df["抓取時間"] == TRADE_DATE].copy() if not raw_df.empty else pd.DataFrame()
         if raw_df.empty:
             log.warning(f"Sheets 無 {TRADE_DATE} 資料，改為重新抓取")
-            raw_df = fetch_all_etfs(TRADE_DATE)
+            raw_df = fetch_all_etfs(TRADE_DATE, etf_codes=tracked_etf_codes)
     else:
-        raw_df = fetch_all_etfs(TRADE_DATE)
+        raw_df = fetch_all_etfs(TRADE_DATE, etf_codes=tracked_etf_codes)
 
     if raw_df.empty:
         msg = f"[{TRADE_DATE}] 無資料（可能非交易日）"

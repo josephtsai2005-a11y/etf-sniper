@@ -188,15 +188,82 @@ def fetch_etfinfo_active_changes(etf_code: str) -> dict:
     return changes
 
 
-def fetch_all_etfs(trade_date: Optional[str] = None) -> pd.DataFrame:
-    """批次抓取 34 檔 ETF 持股"""
+def get_tracked_etf_list(ss, retries: int = 2) -> list:
+    """
+    2026-09-11新增：解析目前實際要追蹤的ETF代號清單。
+
+    背景：ETF_LIST原本是寫死在這個檔案裡的Python常數，新增/移除一檔ETF一定要改程式碼、
+    commit、push、重新部署才會生效。新增的「ETF清單管理」季度掃描功能
+    （etf_registry.py::run_quarterly_etf_scan()）如果只是把掃描結果寫進Sheets給人看，
+    「掃描到新ETF後直接自動加入追蹤」這句話並不會真的發生——因為每天16:45執行的
+    daily job讀的還是這個檔案裡寫死的ETF_LIST，不會知道Sheets裡多了新代號。
+
+    修法：daily job改成透過這個函式決定「今天到底要抓哪些ETF」——優先讀「ETF清單管理」
+    分頁裡「追蹤狀態」欄位標記為使用中的所有代號；只有在這張分頁還不存在、是空的、或讀取
+    失敗時，才退回使用ETF_LIST這份寫死清單當作安全網（例如季度掃描還沒執行過第一次、
+    或Sheets暫時連不上）。這樣季度掃描一旦把新代號寫進「ETF清單管理」，不需要改程式碼、
+    不需要重新部署，下一次daily job執行就會自動開始追蹤新ETF。
+
+    「ETF清單管理」分頁格式（由etf_registry.py::run_quarterly_etf_scan()寫入）：
+    第一列標題，第二列起是欄位名（含「ETF代碼」「追蹤狀態」等），資料列裡「追蹤狀態」
+    欄位值為「追蹤中」的才會被這個函式選入。
+
+    回傳：ETF代碼字串的list。任何失敗情況都回傳ETF_LIST（不讓呼叫端因為這裡出問題而
+    抓不到任何ETF）。
+    """
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            ws = ss.worksheet("ETF清單管理")
+            all_vals = ws.get_all_values()
+            if len(all_vals) < 3:
+                log.info("「ETF清單管理」分頁還沒有資料（可能是季度掃描還沒執行過第一次），"
+                         f"暫用內建的ETF_LIST（{len(ETF_LIST)}檔）")
+                return list(ETF_LIST)
+
+            headers = all_vals[1]
+            rows = all_vals[2:]
+            df = pd.DataFrame(rows, columns=headers)
+            if "ETF代碼" not in df.columns:
+                log.warning("「ETF清單管理」分頁找不到「ETF代碼」欄，暫用內建的ETF_LIST")
+                return list(ETF_LIST)
+
+            if "追蹤狀態" in df.columns:
+                df = df[df["追蹤狀態"].astype(str).str.strip() == "追蹤中"]
+
+            codes = [c.strip() for c in df["ETF代碼"].astype(str).tolist() if c.strip()]
+            if not codes:
+                log.warning("「ETF清單管理」分頁沒有任何「追蹤中」的ETF代碼，暫用內建的ETF_LIST")
+                return list(ETF_LIST)
+
+            log.info(f"從「ETF清單管理」分頁取得 {len(codes)} 檔追蹤中的ETF")
+            return codes
+        except Exception as e:
+            last_error = e
+            if attempt < retries:
+                time.sleep(2 * (attempt + 1))
+                continue
+            log.warning(f"讀取「ETF清單管理」分頁失敗（已重試{retries}次），暫用內建的ETF_LIST: {e}")
+            return list(ETF_LIST)
+    return list(ETF_LIST)
+
+
+def fetch_all_etfs(trade_date: Optional[str] = None, etf_codes: Optional[list] = None) -> pd.DataFrame:
+    """批次抓取ETF持股。
+
+    etf_codes: 2026-09-11新增，要抓取的ETF代號清單；預設None時沿用原本行為，抓取模組層級
+    的ETF_LIST常數（不影響既有呼叫端，例如__main__區塊/測試）。main.py的daily job現在會
+    透過get_tracked_etf_list()動態決定這份清單並傳進來，讓季度掃描新增的ETF不需要重新
+    部署就能被daily job抓到。
+    """
+    codes = etf_codes if etf_codes is not None else ETF_LIST
     if not trade_date:
         trade_date = get_last_trading_date()
-    log.info(f"開始抓取，共 {len(ETF_LIST)} 檔 ETF")
+    log.info(f"開始抓取，共 {len(codes)} 檔 ETF")
 
     frames, fail = [], []
-    for i, code in enumerate(ETF_LIST, 1):
-        log.info(f"[{i:02d}/{len(ETF_LIST)}] {code}")
+    for i, code in enumerate(codes, 1):
+        log.info(f"[{i:02d}/{len(codes)}] {code}")
         df = fetch_etfinfo_holdings(code, trade_date=trade_date)
         if not df.empty:
             frames.append(df)
@@ -204,7 +271,7 @@ def fetch_all_etfs(trade_date: Optional[str] = None) -> pd.DataFrame:
             fail.append(code)
         time.sleep(1.5)
 
-    log.info(f"完成：成功 {len(frames)} / {len(ETF_LIST)} 檔")
+    log.info(f"完成：成功 {len(frames)} / {len(codes)} 檔")
     if fail:
         log.warning(f"失敗：{fail}")
 

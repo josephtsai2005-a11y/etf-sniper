@@ -639,17 +639,23 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
         return {}
 
 
-def get_stock_price_history(stock_code: str, retries: int = 2) -> pd.DataFrame:
+def get_stock_price_history(stock_code: str, retries: int = 2, months_back: int = 2) -> pd.DataFrame:
     """
-    2026-09-10新增：取得單一股票近期（本月+上月，約1-2個月）的「日期＋收盤價」時間序列，
-    供app.py畫股價走勢圖用（例如跟「ETF連續加碼/減碼追蹤」的持續買超/賣超期間疊圖對照，
-    快速看出這波持續布局，股價有沒有跟著反應）。
+    2026-09-10新增：取得單一股票（或ETF，STOCK_DAY對兩者是同一套API）近期的「日期＋收盤價」
+    時間序列，供app.py畫股價走勢圖用（例如跟「ETF連續加碼/減碼追蹤」的持續買超/賣超期間
+    疊圖對照，快速看出這波持續布局，股價有沒有跟著反應）。
 
     跟get_stock_price_single()是姊妹函式，但那個函式回傳的是「算好的最新一天技術指標
     快照」（MA/KD/均線排列等單一數值），沒有把中間用來計算的收盤價序列往外傳。這裡另外寫
     一個輕量版本，只做「抓資料、轉換民國年日期格式、回傳DataFrame」，刻意不重算任何
     MA/KD/除權息偵測等指標，避免跟get_stock_price_single()既有邏輯/回傳格式混在一起改動、
     增加既有功能的回歸風險——純粹新增，不影響任何既有呼叫端。
+
+    months_back: 往回抓幾個月（含當月），預設2（本月+上月，維持這個函式2026-09-10
+    剛新增時的原始行為/呼叫端不用改）。2026-09-11新增這個參數，讓ETF季度掃描
+    （etf_registry.py）可以用同一個函式抓更長的歷史（例如13個月）算近1月/近3月/今年以來
+    報酬率，不用另外寫一份重複的抓取邏輯。TWSE STOCK_DAY是逐月查詢，往回抓的月數越多，
+    對TWSE的請求次數就越多，呼叫端應該只在真的需要更長歷史時才調高這個參數。
 
     回傳欄位：日期（西元年8碼字串，已用_roc_date_to_gregorian()轉換）、收盤價，
     依日期由舊到新排序。抓不到資料、格式不符，或代碼疑似期貨/非個股時回傳空DataFrame。
@@ -659,9 +665,12 @@ def get_stock_price_history(stock_code: str, retries: int = 2) -> pd.DataFrame:
         return pd.DataFrame()
 
     today = datetime.now()
-    this_month = today.strftime("%Y%m") + "01"
-    prev_month_first = today.replace(day=1) - timedelta(days=1)
-    prev_month_date = prev_month_first.strftime("%Y%m") + "01"
+    month_starts = []
+    cursor = today.replace(day=1)
+    for _ in range(max(months_back, 1)):
+        month_starts.append(cursor.strftime("%Y%m") + "01")
+        cursor = cursor - timedelta(days=1)
+        cursor = cursor.replace(day=1)
 
     url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
 
@@ -678,9 +687,9 @@ def get_stock_price_history(stock_code: str, retries: int = 2) -> pd.DataFrame:
     df = pd.DataFrame()
     for attempt in range(retries + 1):
         try:
-            df_this = fetch_month(this_month)
-            df_prev = fetch_month(prev_month_date)
-            df = pd.concat([df_prev, df_this], ignore_index=True) if not df_prev.empty else df_this
+            frames = [fetch_month(m) for m in month_starts]
+            frames = [f for f in frames if not f.empty]
+            df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
             break
         except Exception as e:
             if attempt < retries:
