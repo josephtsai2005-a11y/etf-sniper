@@ -687,7 +687,17 @@ def get_stock_price_history(stock_code: str, retries: int = 2, months_back: int 
     df = pd.DataFrame()
     for attempt in range(retries + 1):
         try:
-            frames = [fetch_month(m) for m in month_starts]
+            # 2026-09-11修正：原本用list comprehension一次把month_starts全部月份連續發出去，
+            # 中間完全沒有間隔——對months_back=2（原本唯一的用途）來說只有2次請求，還好；
+            # 但etf_registry.py的季度掃描改用months_back=13算報酬率後，單一檔ETF就會連續
+            # 轟炸TWSE13次，25~30檔ETF疊加起來短時間內幾百次請求，第一次正式上線實測
+            # 就在跑到第6檔左右開始整批失敗（前5檔正常、之後全部回傳空），研判是觸發了TWSE
+            # 的請求頻率限制，改成每個月之間停頓一下，不要無間隔連續發送。
+            frames = []
+            for i, m in enumerate(month_starts):
+                if i > 0:
+                    time.sleep(0.4)
+                frames.append(fetch_month(m))
             frames = [f for f in frames if not f.empty]
             df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
             break

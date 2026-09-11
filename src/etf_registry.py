@@ -228,7 +228,11 @@ def compute_etf_performance(etf_codes: list, retries: int = 1, months_back: int 
             "ETF代碼": code, "近1月報酬%": r1m, "近3月報酬%": r3m,
             "今年以來報酬%": ytd, "資料筆數": n,
         })
-        time.sleep(1.0)
+        # 2026-09-11修正：從1.0秒拉長到2.0秒。第一次正式上線實測發現，每檔ETF內部
+        # 13個月份的請求（見price_fetcher.py::get_stock_price_history()同日的修正）疊加
+        # 上ETF之間這裡的間隔，前5檔還正常，第6檔開始全部回傳空——研判是短時間內對TWSE
+        # 發送太多請求觸發了頻率限制，這裡也一併拉長間隔，降低整體請求密度。
+        time.sleep(2.0)
 
     return pd.DataFrame(records)
 
