@@ -93,6 +93,19 @@ def fetch_market_active_etf_list(retries: int = 2) -> pd.DataFrame:
     回傳空DataFrame——呼叫端run_quarterly_etf_scan()遇到空結果時會跳過「新增ETF」這一步，
     只針對既有追蹤清單做績效標註，不會因為這裡掃描失敗就誤判成「市場上已經沒有其他ETF」
     而錯誤地把既有追蹤清單清空或標記異常。
+
+    2026-09-11第一次正式上線實測後修正：原本的版本裡，「table抓到了但0筆吻合ETF代號格式」
+    這種情況會被當成例外，觸發重試——但這其實是邏輯/頁面結構判斷錯誤，不是網路瞬斷這種
+    暫時性問題，對同一個URL、同一套解析邏輯再打一次完全不會有不同結果，只是白白讓container
+    在512Mi記憶體限制下把整個大頁面（isin.twse.com.tw這份「全部上市證券」清單，用
+    BeautifulSoup解析對記憶體負擔本來就不小）重複解析第二次，實測第一次上線時就是這樣
+    被OOM（Out of memory）直接砍掉整個container，執行狀態顯示failed，log裡連
+    「第2次失敗」都還沒印出來就被殺了。修法：(1) 改用lxml解析器（比html.parser省記憶體、
+    速度也快，requirements.txt本來就有這個套件）；(2) 不再只認soup.find("table")抓到的
+    第一個table——這個頁面很可能有多個table（版面配置用的table、跟真正證券清單table），
+    改成掃描全部table、挑「解析出最多筆吻合ETF代號格式資料」的那一個，不用事先猜測是第
+    幾個table；(3) 「table存在但0筆吻合」不再視為例外去重試，直接回傳空DataFrame，
+    只有真正的連線/逾時/例外（requests丟出的Exception）才會觸發重試。
     """
     url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
     last_error = None
@@ -100,36 +113,51 @@ def fetch_market_active_etf_list(retries: int = 2) -> pd.DataFrame:
         try:
             resp = SESSION.get(url, timeout=30)
             resp.encoding = "big5"
-            soup = BeautifulSoup(resp.text, "html.parser")
-            table = soup.find("table")
-            if not table:
-                raise ValueError("找不到證券清單table，TWSE頁面結構可能已變更")
+            soup = BeautifulSoup(resp.text, "lxml")
+            tables = soup.find_all("table")
+            if not tables:
+                raise ValueError("找不到任何table，TWSE頁面結構可能已變更")
 
-            records = []
-            for tr in table.find_all("tr"):
-                tds = tr.find_all("td")
-                if not tds:
-                    continue
-                first_cell = tds[0].get_text(strip=True)
-                # 儲存格內容格式例如「00981A　主動统一台灣高息动能」（代號+全形空白+名稱），
-                # 沿用TWSE這份清單一貫的排版慣例。
-                parts = first_cell.split("　")
-                if len(parts) < 2:
-                    continue
-                code, name = parts[0].strip(), parts[1].strip()
-                if ACTIVE_ETF_CODE_PATTERN.match(code):
-                    records.append({"ETF代碼": code, "ETF名稱": name})
+            # 掃描全部table，挑吻合筆數最多的那一個當作真正的證券清單table——不用事先猜測
+            # 是第幾個table，避免頁面版面配置（例如外層還有一層版面table）誤判成資料table。
+            best_records = []
+            for table in tables:
+                records = []
+                for tr in table.find_all("tr"):
+                    tds = tr.find_all("td")
+                    if not tds:
+                        continue
+                    first_cell = tds[0].get_text(strip=True)
+                    # 儲存格內容格式例如「00981A　主動统一台灣高息动能」（代號+全形空白+
+                    # 名稱），沿用TWSE這份清單一貫的排版慣例。
+                    parts = first_cell.split("　")
+                    if len(parts) < 2:
+                        continue
+                    code, name = parts[0].strip(), parts[1].strip()
+                    if ACTIVE_ETF_CODE_PATTERN.match(code):
+                        records.append({"ETF代碼": code, "ETF名稱": name})
+                if len(records) > len(best_records):
+                    best_records = records
 
-            if not records:
-                raise ValueError("解析成功但找不到任何符合主動式ETF代號格式的項目")
+            del soup, tables  # 這份頁面可能不小，解析完盡快釋放，降低記憶體峰值
 
-            df = pd.DataFrame(records).drop_duplicates(subset=["ETF代碼"]).reset_index(drop=True)
+            if not best_records:
+                # 這不是連線問題——頁面抓得到、table也解析得出來，只是掃過全部table都沒有
+                # 任何一筆吻合預期格式，代表頁面實際結構/排版跟這裡假設的不一樣，重試同一個
+                # URL、同一套邏輯不會有不同結果，不觸發重試（避免像2026-09-11第一次上線那樣
+                # 白白重複解析一次大頁面把記憶體榨乾）。
+                log.warning("市場ETF清單掃描：頁面抓取與解析都成功，但掃過全部table後仍找不到"
+                            "任何符合主動式ETF代號格式的項目——可能是頁面實際結構跟這裡假設的"
+                            "不同，需要依實際HTML調整解析邏輯，不重試")
+                return pd.DataFrame()
+
+            df = pd.DataFrame(best_records).drop_duplicates(subset=["ETF代碼"]).reset_index(drop=True)
             log.info(f"市場主動式ETF掃描完成：偵測到 {len(df)} 檔")
             return df
         except Exception as e:
             last_error = e
             if attempt < retries:
-                log.warning(f"市場ETF清單掃描第{attempt + 1}次失敗，重試中: {e}")
+                log.warning(f"市場ETF清單掃描第{attempt + 1}次失敗（連線/逾時等例外），重試中: {e}")
                 time.sleep(3 * (attempt + 1))
                 continue
             log.warning(f"市場主動式ETF掃描失敗（已重試{retries}次），本次跳過新增ETF步驟: {last_error}")
