@@ -52,6 +52,44 @@ def get_client():
     return gspread.authorize(creds)
 
 
+def get_spreadsheet(retries: int = 3):
+    """
+    開啟主要試算表（含429頻率限制重試），供各頁面共用。
+
+    2026-09-11新增：修正「母題材審核」頁面按「送出審核結果」出現
+    `gspread.exceptions.APIError`、Streamlit Cloud只顯示redacted generic error訊息的問題。
+    根本原因是這裡（跟另外4個頁面：題材總覽／回測績效／關鍵字審核／持倉監控）原本各自重複
+    貼了同一段`_client.open_by_key(_sid)`，完全沒有任何try/except或重試機制——`load_sheet()`
+    跟`load_ai_report_raw()`兩個函式2026-09-04就已經加過429重試（AI報告頁面一直轉圈的那次
+    修正），但這個重試邏輯當時只補在那兩個函式裡，沒有回頭統一套用到其他頁面各自重複的
+    `open_by_key`呼叫上，導致同樣的429/暫時性錯誤在這5個頁面完全沒有防護，一撞到就整頁
+    直接crash，使用者只會看到Streamlit Cloud的redacted generic error，看不到真正原因。
+
+    修法：抽出這個共用函式，套用跟`load_sheet()`同一套「429/RESOURCE_EXHAUSTED/Quota
+    exceeded時，重試前遞增等待2/4/6秒（最多3次）」的重試邏輯，取代所有頁面各自重複的
+    raw `_client.open_by_key(_sid)`。不加`@st.cache_data`——這裡回傳的是Spreadsheet
+    物件本身（給呼叫端接下來做讀取或寫入操作用），不是資料內容，快取物件容易在使用者
+    互動之間造成意外的狀態共用，沿用原本「每次進頁面重新開一次」的行為，只補上重試，
+    不改變原本的呼叫時機。
+    """
+    import time as _time_retry
+
+    _client = get_client()
+    _sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            return _client.open_by_key(_sid)
+        except gspread.exceptions.APIError as e:
+            last_err = e
+            is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "Quota exceeded" in str(e)
+            if is_rate_limit and attempt < retries:
+                _time_retry.sleep(2 * (attempt + 1))
+                continue
+            raise
+    raise last_err
+
+
 @st.cache_data(ttl=300)
 def load_sheet(sheet_name: str) -> pd.DataFrame:
     import time as _time
@@ -153,9 +191,7 @@ def load_ai_report_raw(retries: int = 3):
 
 def get_update_time(sheet_name: str) -> str:
     try:
-        client = get_client()
-        sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
-        ss = client.open_by_key(sid)
+        ss = get_spreadsheet()
         ws = ss.worksheet(sheet_name)
         first_row = ws.row_values(1)
         return first_row[0] if first_row else ""
@@ -323,6 +359,53 @@ if page == "多方驗證名單":
     c2.metric("🔥 三大齊買", f"{(multi_df.get('買超法人數',pd.Series())==3).sum()} 檔")
     c3.metric("⭐ 綜合評分≥7", f"{(pd.to_numeric(multi_df.get('綜合評分',pd.Series()),errors='coerce')>=7).sum()} 檔")
     c4.metric("✅ 多重確認", f"{multi_df.get('多方驗證',pd.Series()).str.count('✅').ge(3).sum()} 檔")
+
+    st.divider()
+
+    # 🔔 每日訊號提醒（2026-09-14新增）：聰明錢集中度提升／融資券異常變化／籌碼矛盾出現解除
+    # 三種訊號都是重用既有欄位做純資料比對，不呼叫AI；跟每日AI報告用同一套邏輯（alert_signals.py），
+    # 差別只是這裡用app.py既有的load_sheet()（5分鐘快取），避免額外的Sheets請求造成頻率限制
+    try:
+        import alert_signals
+        from price_fetcher import get_trade_date
+
+        diff_df_alert = load_sheet(SHEET_DIFF)
+        history_df_alert = load_sheet(alert_signals.SHEET_CHIP_HISTORY)
+        alert_summary = alert_signals.build_daily_alert_summary(
+            multi_df, diff_df_alert, history_df_alert, today_date_str=get_trade_date(),
+        )
+        up_df = alert_summary.get("concentration_up", pd.DataFrame())
+        margin_df_alert = alert_summary.get("margin_abnormal", pd.DataFrame())
+        conflict_df_alert = alert_summary.get("chip_conflict_change", pd.DataFrame())
+        total_alerts = len(up_df) + len(margin_df_alert) + len(conflict_df_alert)
+
+        with st.container(border=True):
+            st.markdown(f"#### 🔔 今日訊號提醒（共 {total_alerts} 檔觸發）")
+            tab1, tab2, tab3 = st.tabs([
+                f"📈 聰明錢集中度提升（{len(up_df)}）",
+                f"💰 融資券異常變化（{len(margin_df_alert)}）",
+                f"⚖️ 籌碼矛盾出現/解除（{len(conflict_df_alert)}）",
+            ])
+            with tab1:
+                if up_df.empty:
+                    st.caption("今日無符合標的")
+                else:
+                    cols = [c for c in ["排名","股票代號","股票名稱","主要狀態",
+                                         "新增ETF數","加碼ETF數","總變動張數"] if c in up_df.columns]
+                    st.dataframe(up_df[cols].reset_index(drop=True), use_container_width=True, hide_index=True)
+            with tab2:
+                if margin_df_alert.empty:
+                    st.caption("今日無符合標的")
+                else:
+                    cols = [c for c in ["排名","股票代號","股票名稱","融資訊號","券資比%"] if c in margin_df_alert.columns]
+                    st.dataframe(margin_df_alert[cols].reset_index(drop=True), use_container_width=True, hide_index=True)
+            with tab3:
+                if conflict_df_alert.empty:
+                    st.caption("今日無變化（提醒：至少需累積2天歷史資料才會有比對結果）")
+                else:
+                    st.dataframe(conflict_df_alert.reset_index(drop=True), use_container_width=True, hide_index=True)
+    except Exception as e:
+        st.caption(f"⚠️ 訊號提醒載入失敗（不影響下方名單）: {e}")
 
     st.divider()
 
@@ -749,9 +832,7 @@ elif page == "新聞×籌碼交叉":
 # 頁面：散戶情緒（Google Trends）
 # ══════════════════════════════════════════════════════════════
 elif page == "題材總覽":
-    _client = get_client()
-    _sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
-    ss = _client.open_by_key(_sid)
+    ss = get_spreadsheet()
 
     from topic_analyzer import build_master_theme_overview
 
@@ -1358,9 +1439,7 @@ elif page == "回測績效":
     st.title("📈 回測績效追蹤")
     st.caption("驗證「綜合評分」「法人訊號」「法人交易量/一致性」「相對大盤表現」與未來實際報酬率的相關性")
 
-    _client = get_client()
-    _sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
-    ss = _client.open_by_key(_sid)
+    ss = get_spreadsheet()
 
     from backtest_tracker import (
         get_backtest_summary, get_signal_summary, get_institutional_intensity_summary,
@@ -1730,9 +1809,7 @@ elif page == "關鍵字審核":
     st.title("🔍 AI關鍵字審核")
     st.caption("勾選要「刪除／拒絕」的關鍵字，其餘未勾選的會一次核准。核准後才會生效（比對新聞/Trends）")
 
-    _client = get_client()
-    _sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
-    ss = _client.open_by_key(_sid)
+    ss = get_spreadsheet()
 
     from keyword_generator import get_pending_keywords, apply_review_decisions, STATUS_APPROVED, STATUS_REJECTED
 
@@ -1798,9 +1875,7 @@ elif page == "持倉監控":
     st.caption("進出場訊號規則：進場嚴選評分/法人一致性高的標的；出場採「停損／停利／訊號轉弱／技術面提早轉弱」四重條件，先觸發先出。"
                "支援自選股（不在ETF追蹤範圍的股票）追蹤，同股票分批買進會自動合併為加權平均價")
 
-    _client = get_client()
-    _sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
-    ss = _client.open_by_key(_sid)
+    ss = get_spreadsheet()
 
     from position_manager import (
         add_position, close_position, delete_position, update_position,
@@ -2042,9 +2117,7 @@ elif page == "母題材審核":
     st.title("🗂️ 母題材審核")
     st.caption("AI生成關鍵字時，若現有母題材清單沒有合適選項，會建議新母題材。核准後才會生效，成為之後配對的選項")
 
-    _client = get_client()
-    _sid = st.secrets.get("SPREADSHEET_ID", "") or os.environ.get("SPREADSHEET_ID", "")
-    ss = _client.open_by_key(_sid)
+    ss = get_spreadsheet()
 
     from theme_manager import (
         get_pending_themes, apply_theme_review_decisions, get_approved_themes,

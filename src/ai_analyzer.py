@@ -518,7 +518,8 @@ def generate_premarket_watch(cross_df: pd.DataFrame, us_market_text: str = "", t
 
 
 def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.DataFrame = None,
-                                 market_margin: dict = None, benchmark_price_change: float = None):
+                                 market_margin: dict = None, benchmark_price_change: float = None,
+                                 alert_text: str = ""):
     log.info("收集所有分頁資料...")
     data = collect_all_data(ss)
     data_text = format_data_for_ai(data, trade_date)
@@ -639,9 +640,19 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
     except Exception as e:
         log.warning(f"大盤法人氛圍生成失敗（不影響主報告）: {e}")
 
+    # 每日訊號提醒（聰明錢集中度提升／融資券異常變化／籌碼矛盾出現解除，純資料比對，不呼叫AI）
+    alert_section = ""
+    if alert_text:
+        alert_section = (
+            "\n\n### 🔔 訊號提醒（聰明錢集中度提升／融資券異常變化／籌碼矛盾出現解除）\n\n"
+            + alert_text
+        )
+
     final_report = main_report
     if affordable_section:
         final_report += affordable_section
+    if alert_section:
+        final_report += alert_section
     if related:
         final_report += "\n\n" + related
     if premarket_section:

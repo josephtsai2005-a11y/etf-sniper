@@ -865,6 +865,51 @@ def main():
             except Exception as e:
                 log.warning(f"融資融券回填失敗（不影響主報告）: {e}")
 
+            # 每日訊號提醒（2026-09-14新增）：聰明錢集中度提升／融資券異常變化／籌碼矛盾出現解除
+            # 三種訊號都是純資料比對，不呼叫AI；必須放在上面融資融券回填「之後」執行，
+            # 因為「多方驗證名單」的融資訊號/籌碼矛盾要到這裡才有真正的值（16:45當下是空的）
+            alert_text = ""
+            try:
+                import alert_signals
+
+                def _read_3row_sheet(sheet_name):
+                    """讀取「標題列+表頭列+資料列」三列慣例的分頁，回傳DataFrame"""
+                    ws = ss2.worksheet(sheet_name)
+                    vals = ws.get_all_values()
+                    if len(vals) < 2:
+                        return pd.DataFrame()
+                    return pd.DataFrame(vals[2:], columns=vals[1])
+
+                multi_df_alert = _read_3row_sheet("多方驗證名單")
+                diff_df_alert = _read_3row_sheet("今日訊號")
+
+                try:
+                    history_ws = ss2.worksheet(alert_signals.SHEET_CHIP_HISTORY)
+                    history_vals = history_ws.get_all_values()
+                    history_df_alert = (
+                        pd.DataFrame(history_vals[1:], columns=history_vals[0])
+                        if len(history_vals) >= 1 else pd.DataFrame()
+                    )
+                except Exception:
+                    # 分頁可能還不存在（第一次執行），視為沒有歷史資料
+                    history_df_alert = pd.DataFrame()
+
+                alert_summary = alert_signals.build_daily_alert_summary(
+                    multi_df_alert, diff_df_alert, history_df_alert, today_date_str=TRADE_DATE,
+                )
+                alert_text = alert_signals.format_alert_summary_for_ai(alert_summary)
+                log.info(
+                    f"[AI] 訊號提醒：集中度提升{len(alert_summary.get('concentration_up', []))}檔／"
+                    f"融資異常{len(alert_summary.get('margin_abnormal', []))}檔／"
+                    f"籌碼矛盾變化{len(alert_summary.get('chip_conflict_change', []))}檔"
+                )
+
+                # 比對完成後才把今天的籌碼矛盾/融資訊號存進歷史，避免污染上面「今天 vs 昨天」的比對
+                appended = alert_signals.append_chip_conflict_history(ss2, multi_df_alert, TRADE_DATE)
+                log.info(f"[AI] 籌碼矛盾歷史記錄：新增 {appended} 筆")
+            except Exception as e:
+                log.warning(f"每日訊號提醒產生失敗（不影響主報告）: {e}")
+
             # 股價回填：TWSE股價偶爾公布得比16:45晚，這裡重新確認一次
             # 2026-09-01：除了原本的「多方驗證名單」，新增回填「聰明錢名單」——
             # 這張表跟多方驗證名單同時間(16:45)寫入、同樣可能受TWSE延遲公布影響，
@@ -897,6 +942,7 @@ def main():
             report = generate_investment_report(
                 ss2, TRADE_DATE, us_text,
                 market_margin=market_margin, benchmark_price_change=benchmark_change,
+                alert_text=alert_text,
             )
 
             if report:
