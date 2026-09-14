@@ -22,11 +22,12 @@ alert_signals.py（2026-09-14新增）
    負責寫入）來解決這個問題，而不是沿用backtest_tracker.py既有的「回測記錄」——
    「回測記錄」是main.py在16:45（階段六）呼叫record_daily_snapshot()時記錄的，那個時間點
    融資融券資料通常還沒公布（TWSE融資融券日報約21:30才公布），「籌碼矛盾」/「融資訊號」
-   在那個時間點幾乎必定是空的，等23:00真正的資料回填進「多方驗證名單」時，「回測記錄」
+   在那個時間點幾乎必定是空的，等RUN_MODE=="ai"的AI job（2026-09-03起改成隔日05:00
+   台股開盤前執行，原本是23:00）真正的資料回填進「多方驗證名單」時，「回測記錄」
    當天那筆已經記過、不會再更新，沿用它會導致這裡永遠比對到空值。改成在
-   backfill_margin_signals_to_multi_sheet()真正拿到當天資料「之後」（main.py的
-   RUN_MODE=="ai"、23:00附近）才呼叫append_chip_conflict_history()記錄，才能保證
-   比對到的是真正的值。
+   backfill_margin_signals_to_multi_sheet()真正拿到當天資料「之後」（同一個
+   RUN_MODE=="ai"的隔日05:00 job裡）才呼叫append_chip_conflict_history()記錄，
+   才能保證比對到的是真正的值。
 
 設計原則：detect_*/build_daily_alert_summary()這幾個「偵測」函式全部是純DataFrame輸入
 輸出，不接觸Google Sheets——呼叫端（app.py／main.py）各自用自己既有的讀取方式（app.py是
@@ -69,12 +70,13 @@ def detect_chip_conflict_transitions(multi_df: pd.DataFrame, history_df: pd.Data
     （history_df，累積的「籌碼矛盾歷史」分頁）的「籌碼矛盾」欄位，找出「新出現」或
     「剛解除」的股票。
 
-    today_date_str：目前的交易日（YYYYMMDD）。如果「籌碼矛盾歷史」分頁裡已經有這個日期的
-    記錄（代表今天23:00的AI job已經跑過、append_chip_conflict_history()已經把今天的值
-    寫進去了），需要先排除掉這筆，才能真正拿到「上一個交易日」，否則會誤把「今天」的記錄
-    當成比較基準，變成「今天 vs 今天」，永遠比對不出任何變化。不傳這個參數時，直接取
-    history_df裡最新的日期當基準（假設呼叫端知道歷史分頁還沒有寫入今天的資料，例如
-    main.py在呼叫append_chip_conflict_history()「之前」呼叫這個函式的情境）。
+    today_date_str：目前處理的交易日trade_date（YYYYMMDD）。如果「籌碼矛盾歷史」分頁裡
+    已經有這個日期的記錄（代表這個trade_date對應的AI job——RUN_MODE=="ai"，隔日05:00
+    台股開盤前執行——已經跑過、append_chip_conflict_history()已經把這天的值寫進去了），
+    需要先排除掉這筆，才能真正拿到「上一個交易日」，否則會誤把「今天」的記錄當成比較基準，
+    變成「今天 vs 今天」，永遠比對不出任何變化。不傳這個參數時，直接取history_df裡最新的
+    日期當基準（假設呼叫端知道歷史分頁還沒有寫入今天的資料，例如main.py在呼叫
+    append_chip_conflict_history()「之前」呼叫這個函式的情境）。
 
     回傳欄位：股票代號、股票名稱、變化、昨日籌碼矛盾、今日籌碼矛盾。「變化」為
     「🆕 矛盾出現」或「✅ 矛盾解除」。冷啟動（歷史分頁還沒有任何記錄，或這檔股票在
@@ -171,7 +173,8 @@ def append_chip_conflict_history(ss, multi_df: pd.DataFrame, trade_date: str) ->
     供之後detect_chip_conflict_transitions()比對「今天 vs 上一個交易日」用。
 
     呼叫時機：務必在backfill_margin_signals_to_multi_sheet()真正拿到當天融資融券資料
-    「之後」呼叫（main.py的RUN_MODE=="ai"、23:00附近），且務必在同一次執行裡「先」呼叫
+    「之後」呼叫（main.py的RUN_MODE=="ai"，2026-09-03起改成隔日05:00台股開盤前執行，
+    原本是23:00），且務必在同一次執行裡「先」呼叫
     detect_chip_conflict_transitions()做完比對「之後」才呼叫這個函式——順序顛倒的話，
     今天的記錄會提早出現在歷史分頁裡，讓比對邏輯誤把「今天」當成「上一個交易日」。
 

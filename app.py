@@ -162,7 +162,8 @@ def load_sheet(sheet_name: str) -> pd.DataFrame:
 # 都會重新直接呼叫一次Google Sheets API，如果剛好撞到429頻率限制，內建的重試機制會
 # sleep 2/4/6秒（最多3次、合計12秒），這段期間畫面右上角就會一直顯示RUNNING，使用者會
 # 覺得這個頁面特別容易卡住。修法：比照load_sheet()加上@st.cache_data(ttl=300)，5分鐘內
-# 重複造訪這個頁面不會再重新打Google Sheets——AI報告本來就是一天只更新一次（23:00），
+# 重複造訪這個頁面不會再重新打Google Sheets——AI報告本來就是一天只更新一次
+# （2026-09-03起改成隔日05:00台股開盤前，原本是23:00），
 # 5分鐘的快取視窗完全不影響看到最新報告，只是避免同一份內容被重複抓取。
 @st.cache_data(ttl=300)
 def load_ai_report_raw(retries: int = 3):
@@ -272,7 +273,7 @@ with st.sidebar:
         if st.button(p, key=f"btn_{p}", use_container_width=True):
             st.session_state.selected_page = p
     st.markdown("---")
-    st.markdown("#### 23:00 AI報告")
+    st.markdown("#### 05:00 AI報告")
     for p in ["每日AI總結"]:
         if st.button(p, key=f"btn_{p}", use_container_width=True):
             st.session_state.selected_page = p
@@ -1115,7 +1116,7 @@ elif page == "每日AI總結":
     try:
         _vals = load_ai_report_raw()
         if len(_vals) < 2:
-            st.warning("尚無 AI 報告（每日 23:00 後更新）")
+            st.warning("尚無 AI 報告（每日05:00台股開盤前更新）")
         else:
             _headers = _vals[0]
             _rows = pd.DataFrame(_vals[1:], columns=_headers)
@@ -1129,7 +1130,7 @@ elif page == "每日AI總結":
             if _report.strip():
                 render_report_in_chunks(_report)
             else:
-                st.warning("報告內容為空，請等待 23:00 後更新")
+                st.warning("報告內容為空，請等待05:00更新")
             st.divider()
             if len(_rows) > 1:
                 with st.expander("歷史報告"):

@@ -855,7 +855,8 @@ def main():
             log.info(f"[AI] 美股摘要：{us_summary}")
 
             # 回填融資融券：TWSE融資融券日報約晚上9:30才公布，比16:45的daily job時間晚，
-            # 16:45當下抓到的一定是空的，這裡（23:00，確定已過公布時間）重新抓一次真正的資料，
+            # 16:45當下抓到的一定是空的，這裡（RUN_MODE=="ai"，2026-09-03起改成隔日05:00
+            # 台股開盤前執行，原本是23:00，確定已過公布時間）重新抓一次真正的資料，
             # 回頭把「多方驗證名單」的融資融券相關欄位補上
             try:
                 from margin_fetcher import backfill_margin_signals_to_multi_sheet
