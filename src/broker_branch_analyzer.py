@@ -43,6 +43,11 @@ SHEET_BROKER_ANALYSIS = "券商分點分析"
 # Claude vision建議的最佳長邊像素，超過此值圖片會被API自動downscale、卻仍依原始
 # 大小計算token/上傳時間，所以上傳前自己先縮圖，同時可以壓縮檔案大小加快上傳。
 MAX_IMAGE_DIMENSION = 1568
+# 2026-09-16追加：使用者實測後回報，判讀一檔股票常常需要同時提供「統計結果截圖」
+# （分點買賣超表格）+「線形圖的券商分點進出圖」（走勢線圖）兩張不同呈現方式的畫面，
+# 缺任何一張都不夠完整判讀。開放多張上傳，同時設一個上限避免有人無限上傳推高
+# Claude API成本——4張已經足夠涵蓋「統計表格+線圖」再加上不同天期各一張的常見組合。
+MAX_ANALYSIS_IMAGES = 4
 
 
 def _prepare_image_for_claude(image_bytes: bytes) -> tuple:
@@ -68,11 +73,20 @@ def _prepare_image_for_claude(image_bytes: bytes) -> tuple:
     return b64, "image/jpeg"
 
 
-def build_broker_branch_prompt(stock_code: str, stock_name: str, recent_history: list = None) -> str:
+def build_broker_branch_prompt(
+    stock_code: str, stock_name: str, recent_history: list = None, num_images: int = 1
+) -> str:
     """
     建立分析prompt，架構參考使用者實測過覺得有用的Gemini範例（贏家分點動向／
     避開陷阱訊號／天期比較／綜合判斷四段式），改寫成明確要求Claude只依畫面實際
     內容判讀、不可杜撰數字。
+
+    2026-09-16追加num_images：使用者反映常常需要同時提供「統計結果截圖」（分點買賣
+    超表格）+「線形圖的券商分點進出圖」（走勢線圖）才夠完整判讀——純數字表格看不出
+    買賣超動能是加速還是趨緩，要搭配線圖；純線圖又看不出實際張數跟券商名稱。
+    num_images>1時，開頭改成提醒Claude這是多張不同呈現方式的畫面，要互相對照、
+    綜合判讀，不要只看其中一張就下結論，也不要預設假設每張圖分別是什麼類型
+    （表格或線圖），依實際畫面內容判斷。
 
     2026-09-16修正：原本第3段是「天期切換建議」，假設使用者可以在App裡切換20日/
     60日/120日等不同回顧天期——但使用者實測後回報，他用的App「無法設定期間，只能
@@ -113,8 +127,22 @@ def build_broker_branch_prompt(stock_code: str, stock_name: str, recent_history:
             "拐點。這次先只根據單一畫面判讀，不臆測未來趨勢。"
         )
 
-    return f"""你是台股籌碼分析專家。這張圖是「{stock_label}」的券商分點進出統計截圖
-（APP畫面，通常包含焦點券商、囤貨/出貨張數、贏家/輸家標記、買賣超排行等資訊）。
+    if num_images > 1:
+        image_intro = (
+            f"你是台股籌碼分析專家。這裡提供了{num_images}張「{stock_label}」的券商分點"
+            f"相關截圖（APP畫面，可能包含分點買賣超統計表格、也可能包含買賣超走勢線圖等"
+            f"不同呈現方式，實際內容以畫面顯示為準）。請把這{num_images}張畫面當成同一次"
+            f"判讀的完整資訊，彼此對照、互相補充——例如統計表格能看出實際券商名稱跟張數，"
+            f"走勢線圖能看出買賣超動能是加速還是趨緩，兩者合起來看才完整，不要只看其中一張"
+            f"就下結論，也不要假設每張圖分別是什麼類型，依實際畫面內容判斷。"
+        )
+    else:
+        image_intro = (
+            f"你是台股籌碼分析專家。這張圖是「{stock_label}」的券商分點進出統計截圖"
+            f"（APP畫面，通常包含焦點券商、囤貨/出貨張數、贏家/輸家標記、買賣超排行等資訊）。"
+        )
+
+    return f"""{image_intro}
 畫面上的囤貨/出貨/贏家/輸家分類，是這個App自己用固定回顧天期（例如過去120日）算出
 來的，使用者這邊沒有調整天期的選項，請不要建議使用者「切換到20日/60日」之類的操作，
 這個App做不到。
@@ -141,10 +169,16 @@ def build_broker_branch_prompt(stock_code: str, stock_name: str, recent_history:
 
 
 def analyze_broker_branch_screenshot(
-    image_bytes: bytes, stock_code: str, stock_name: str, recent_history: list = None
+    image_bytes_list, stock_code: str, stock_name: str, recent_history: list = None
 ) -> str:
     """
-    上傳截圖 -> 呼叫Claude vision -> 回傳分析文字（失敗回傳空字串）。
+    上傳一張或多張截圖 -> 呼叫Claude vision -> 回傳分析文字（失敗回傳空字串）。
+
+    2026-09-16追加多圖支援：image_bytes_list是bytes的list（原本是單一bytes）——
+    使用者反映常常需要同時提供「統計結果截圖」+「線形圖的券商分點進出圖」兩張才夠
+    完整判讀。為了呼叫端方便，也接受單一bytes（自動包成長度1的list），呼叫端不用
+    自己判斷要包不包list。超過MAX_ANALYSIS_IMAGES張時只取前MAX_ANALYSIS_IMAGES張，
+    避免無限上傳推高單次API成本（呼叫端app.py也會先擋一次、這裡是第二層防呆）。
 
     recent_history：同一檔股票過去的分析紀錄（由舊到新排列的dict list，通常是
     load_broker_branch_history()篩選出該股票後、取最近幾筆再反轉順序得到），用來讓
@@ -152,14 +186,22 @@ def analyze_broker_branch_screenshot(
     """
     from ai_analyzer import call_claude_vision
 
+    if isinstance(image_bytes_list, (bytes, bytearray)):
+        image_bytes_list = [image_bytes_list]
+    image_bytes_list = list(image_bytes_list)[:MAX_ANALYSIS_IMAGES]
+    if not image_bytes_list:
+        return ""
+
     try:
-        b64, media_type = _prepare_image_for_claude(image_bytes)
+        prepared_images = [_prepare_image_for_claude(b) for b in image_bytes_list]
     except Exception as e:
         log.error(f"券商分點截圖前處理失敗: {e}")
         return ""
 
-    prompt = build_broker_branch_prompt(stock_code, stock_name, recent_history=recent_history)
-    return call_claude_vision(prompt, b64, media_type=media_type, max_tokens=1000)
+    prompt = build_broker_branch_prompt(
+        stock_code, stock_name, recent_history=recent_history, num_images=len(prepared_images)
+    )
+    return call_claude_vision(prompt, prepared_images, max_tokens=1000)
 
 
 def save_broker_branch_analysis(ss, stock_code: str, stock_name: str, analysis_text: str, trade_date: str):

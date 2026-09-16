@@ -60,12 +60,18 @@ def call_claude(prompt, system="", max_tokens=2000, retries=2):
     return ""
 
 
-def call_claude_vision(prompt, image_b64, media_type="image/jpeg", system="", max_tokens=1000, retries=2):
+def call_claude_vision(prompt, images, system="", max_tokens=1000, retries=2):
     """
-    呼叫Claude API並附帶一張圖片（例如券商分點截圖），供2026-09-16新增的
+    呼叫Claude API並附帶一張或多張圖片（例如券商分點截圖），供2026-09-16新增的
     broker_branch_analyzer.py使用。與call_claude()共用同一套重試/錯誤處理邏輯，
-    差異只在content多帶一個image區塊——image區塊放在text前面是Anthropic官方建議
-    的順序，實測對圖片判讀品質比較穩定。
+    差異只在content多帶image區塊——image區塊放在text前面是Anthropic官方建議的順序，
+    實測對圖片判讀品質比較穩定。
+
+    2026-09-16追加：原本只接受單一張圖片（image_b64, media_type兩個獨立參數），
+    使用者實際使用時發現常常需要一次給「統計結果截圖」+「買賣超走勢線圖」兩張畫面
+    才能完整判讀（純數字表格看不出動能是加速還是趨緩，要搭配線圖）。改成images參數
+    接受(base64字串, media_type)的tuple list，多張圖片依序放在text前面，是同一種
+    「圖片在前、問題在後」的建議順序，只是圖片數量從固定1張變成可以是多張。
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY).strip()
     if not api_key:
@@ -77,9 +83,10 @@ def call_claude_vision(prompt, image_b64, media_type="image/jpeg", system="", ma
         "content-type": "application/json",
     }
     content = [
-        {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
-        {"type": "text", "text": prompt},
+        {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}}
+        for image_b64, media_type in images
     ]
+    content.append({"type": "text", "text": prompt})
     body = {"model": MODEL, "max_tokens": max_tokens, "messages": [{"role": "user", "content": content}]}
     if system:
         body["system"] = system

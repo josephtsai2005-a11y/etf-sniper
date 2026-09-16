@@ -2573,19 +2573,32 @@ elif page == "券商分點分析":
     with col_name:
         bb_name = st.text_input("股票名稱（選填）", placeholder="例如：台達電", key="bb_stock_name")
 
-    uploaded_img = st.file_uploader(
-        "上傳券商分點截圖", type=["png", "jpg", "jpeg"], key="bb_upload"
-    )
-    if uploaded_img is not None:
-        st.image(uploaded_img, caption="已上傳截圖預覽", width=400)
+    # 2026-09-16追加多圖上傳：使用者反映常常需要同時提供「統計結果截圖」（分點買賣超
+    # 表格）+「線形圖的券商分點進出圖」（走勢線圖）才夠完整判讀，開放一次選多張，
+    # 上限MAX_ANALYSIS_IMAGES張（見broker_branch_analyzer.py的常數，避免無限上傳
+    # 推高單次AI呼叫成本）。
+    from broker_branch_analyzer import MAX_ANALYSIS_IMAGES
 
-    if st.button("🤖 AI 分析", type="primary", disabled=(uploaded_img is None or not bb_code.strip())):
+    uploaded_imgs = st.file_uploader(
+        f"上傳券商分點截圖（可一次選多張，例如統計表格+走勢線圖，最多{MAX_ANALYSIS_IMAGES}張）",
+        type=["png", "jpg", "jpeg"], key="bb_upload", accept_multiple_files=True,
+    )
+    if uploaded_imgs and len(uploaded_imgs) > MAX_ANALYSIS_IMAGES:
+        st.warning(f"一次最多分析{MAX_ANALYSIS_IMAGES}張截圖，只會使用前{MAX_ANALYSIS_IMAGES}張")
+        uploaded_imgs = uploaded_imgs[:MAX_ANALYSIS_IMAGES]
+    if uploaded_imgs:
+        preview_cols = st.columns(len(uploaded_imgs))
+        for _col, _f in zip(preview_cols, uploaded_imgs):
+            with _col:
+                st.image(_f, caption=_f.name, width=280)
+
+    if st.button("🤖 AI 分析", type="primary", disabled=(not uploaded_imgs or not bb_code.strip())):
         from broker_branch_analyzer import (
             analyze_broker_branch_screenshot, save_broker_branch_analysis, load_broker_branch_history,
         )
 
         with st.spinner("Claude 正在判讀截圖，請稍候（通常10~30秒）..."):
-            image_bytes = uploaded_img.getvalue()
+            image_bytes_list = [f.getvalue() for f in uploaded_imgs]
             # 2026-09-16新增：先撈這檔股票過去存過的分析紀錄，讓AI能跨天比對「贏家
             # 分點是否已經轉買」——使用者回報他用的App沒有天期切換選項，只能每天拿到
             # 「當日重新計算」的固定天期總結圖，所以短線拐點只能靠累積每次上傳的歷史
@@ -2599,7 +2612,7 @@ elif page == "券商分點分析":
             except Exception:
                 recent_history = None
             analysis = analyze_broker_branch_screenshot(
-                image_bytes, bb_code.strip(), bb_name.strip(), recent_history=recent_history
+                image_bytes_list, bb_code.strip(), bb_name.strip(), recent_history=recent_history
             )
 
         if not analysis:
