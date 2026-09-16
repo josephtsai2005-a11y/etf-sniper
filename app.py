@@ -40,6 +40,21 @@ SHEET_RETAIL = "散戶情緒"
 SHEET_POS    = "題材位置"
 SHEET_FUND   = "基本面資料"
 
+# 2026-09-16新增：「券商分點分析」頁面第一次從app.py（Streamlit Cloud）直接呼叫
+# ai_analyzer.py的Claude API（過去都只有main.py這個Cloud Run Job在呼叫）。main.py
+# 跑在Cloud Run，ANTHROPIC_API_KEY本來就是一般OS環境變數；但app.py部署在Streamlit
+# Cloud，金鑰是放在st.secrets（secrets.toml），不會自動變成os.environ。
+# ai_analyzer.call_claude()/call_claude_vision()讀的是os.environ，所以這裡在啟動時
+# 把st.secrets的值橋接進os.environ一次，兩邊共用同一套讀取邏輯，不用另外改
+# ai_analyzer.py。本機執行（os.environ已經有值）或st.secrets沒設定時都不會出錯。
+if not os.environ.get("ANTHROPIC_API_KEY"):
+    try:
+        _anthropic_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+        if _anthropic_key:
+            os.environ["ANTHROPIC_API_KEY"] = _anthropic_key
+    except Exception:
+        pass
+
 
 @st.cache_resource
 def get_client():
@@ -282,6 +297,11 @@ with st.sidebar:
     for p in ["回測績效", "關鍵字審核", "母題材審核", "持倉監控"]:
         if st.button(p, key=f"btn_{p}", use_container_width=True):
             st.session_state.selected_page = p
+    st.markdown("---")
+    st.markdown("#### 手動分析工具")
+    for p in ["券商分點分析"]:
+        if st.button(p, key=f"btn_{p}", use_container_width=True):
+            st.session_state.selected_page = p
 
     if "selected_page" not in st.session_state:
         st.session_state.selected_page = "多方驗證名單"
@@ -407,6 +427,25 @@ if page == "多方驗證名單":
                     st.dataframe(conflict_df_alert.reset_index(drop=True), use_container_width=True, hide_index=True)
     except Exception as e:
         st.caption(f"⚠️ 訊號提醒載入失敗（不影響下方名單）: {e}")
+
+    # 📸 你上傳過的券商分點分析（2026-09-16新增）：跟上面「🔔今日訊號提醒」同樣是
+    # 純資料交集比對——只篩出「今天名單裡」+「你曾經上傳過分析」的交集，不會反過來
+    # 影響上面已經算好的綜合評分/排序，純粹是「這幾檔剛好你也手動分析過，一起參考」。
+    # 刻意獨立一個try/except，跟上面的訊號提醒互不依賴，其中一個失敗不影響另一個。
+    try:
+        from broker_branch_analyzer import get_latest_analysis_by_stock
+
+        ss_bb = get_spreadsheet()
+        bb_recent = get_latest_analysis_by_stock(ss_bb, multi_df["股票代號"].astype(str).tolist())
+        if not bb_recent.empty:
+            with st.container(border=True):
+                st.markdown(f"#### 📸 你上傳過的券商分點分析（{len(bb_recent)} 檔，僅顯示最近7天內上傳的）")
+                st.caption("這是你自己截圖上傳的手動分析，不是自動涵蓋全部名單，僅供交叉參考")
+                for _, r in bb_recent.iterrows():
+                    with st.expander(f"{r.get('股票代號','')} {r.get('股票名稱','')}（{r.get('日期','')}上傳）"):
+                        st.markdown(r.get("AI分析", ""))
+    except Exception as e:
+        st.caption(f"⚠️ 券商分點分析載入失敗（不影響上方名單）: {e}")
 
     st.divider()
 
@@ -2504,3 +2543,92 @@ elif page == "ETF連續加碼追蹤":
     st.caption("💡 這是籌碼面「持續性」訊號，跟「多方驗證名單」的當日評分是互補角度："
                "評分反映「今天綜合表現如何」，這裡反映「過去這段期間有沒有被持續性布局或出貨」，"
                "兩者一起看更完整。")
+
+
+# ══════════════════════════════════════════════════════════════
+# 頁面：券商分點分析（2026-09-16新增）
+# ══════════════════════════════════════════════════════════════
+
+elif page == "券商分點分析":
+    st.title("🔍 券商分點分析")
+    st.caption("上傳券商分點App的截圖，由AI判讀贏家/輸家分點動向，輔助判斷進場時機")
+
+    st.info(
+        "💡 這個功能不會自動幫所有股票抓分點資料——TWSE官方查詢系統有CAPTCHA擋自動化，"
+        "第三方資料商（FinMind）雖然有分點資料但需要額外付費訂閱，且能否涵蓋全市場尚未確認，"
+        "所以先做成「你截圖、AI幫你判讀」的手動工具：券商分點App（例如Fugle、玩股網等）"
+        "查好某檔股票的分點進出後，把畫面截圖上傳到這裡即可。"
+    )
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        st.warning(
+            "⚠️ 尚未設定 ANTHROPIC_API_KEY，這個頁面無法呼叫AI分析。"
+            "請在 Streamlit Cloud 的 Secrets 設定裡加入 ANTHROPIC_API_KEY"
+            "（跟 Cloud Run Job 用同一把 Key，見 .streamlit/secrets.toml.template）。"
+        )
+
+    col_code, col_name = st.columns(2)
+    with col_code:
+        bb_code = st.text_input("股票代號", placeholder="例如：2308", key="bb_stock_code")
+    with col_name:
+        bb_name = st.text_input("股票名稱（選填）", placeholder="例如：台達電", key="bb_stock_name")
+
+    uploaded_img = st.file_uploader(
+        "上傳券商分點截圖", type=["png", "jpg", "jpeg"], key="bb_upload"
+    )
+    if uploaded_img is not None:
+        st.image(uploaded_img, caption="已上傳截圖預覽", width=400)
+
+    if st.button("🤖 AI 分析", type="primary", disabled=(uploaded_img is None or not bb_code.strip())):
+        from broker_branch_analyzer import (
+            analyze_broker_branch_screenshot, save_broker_branch_analysis, load_broker_branch_history,
+        )
+
+        with st.spinner("Claude 正在判讀截圖，請稍候（通常10~30秒）..."):
+            image_bytes = uploaded_img.getvalue()
+            # 2026-09-16新增：先撈這檔股票過去存過的分析紀錄，讓AI能跨天比對「贏家
+            # 分點是否已經轉買」——使用者回報他用的App沒有天期切換選項，只能每天拿到
+            # 「當日重新計算」的固定天期總結圖，所以短線拐點只能靠累積每次上傳的歷史
+            # 紀錄來比對，不能靠切換App裡的觀察天期（App做不到）。
+            try:
+                _ss_for_history = get_spreadsheet()
+                _hist_df = load_broker_branch_history(_ss_for_history, stock_code=bb_code.strip())
+                # load_broker_branch_history()回傳最新在前，這裡最近3筆反轉成「由舊到新」
+                # 給prompt，符合人類閱讀時間序列的直覺順序
+                recent_history = _hist_df.head(3).iloc[::-1].to_dict("records") if not _hist_df.empty else None
+            except Exception:
+                recent_history = None
+            analysis = analyze_broker_branch_screenshot(
+                image_bytes, bb_code.strip(), bb_name.strip(), recent_history=recent_history
+            )
+
+        if not analysis:
+            st.error("分析失敗，可能是AI回應逾時或圖片無法判讀，請重試一次；若持續失敗請確認上方的ANTHROPIC_API_KEY設定。")
+        else:
+            st.success("分析完成")
+            st.markdown(analysis)
+            try:
+                ss = get_spreadsheet()
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                save_broker_branch_analysis(ss, bb_code.strip(), bb_name.strip(), analysis, today_str)
+                st.caption("✅ 已存檔，可在下方「歷史分析紀錄」查看")
+                st.cache_data.clear()
+            except Exception as e:
+                st.caption(f"⚠️ 分析結果存檔失敗（不影響上面顯示的分析內容）: {e}")
+
+    st.markdown("---")
+    st.subheader("📜 歷史分析紀錄")
+    hist_filter = st.text_input("篩選股票代號（留空顯示全部）", placeholder="例如：2308", key="bb_hist_filter")
+    try:
+        from broker_branch_analyzer import load_broker_branch_history
+        ss = get_spreadsheet()
+        hist_df = load_broker_branch_history(ss, stock_code=hist_filter.strip() or None)
+        if hist_df.empty:
+            st.caption("尚無歷史分析紀錄")
+        else:
+            for _, r in hist_df.iterrows():
+                with st.expander(f"📅 {r.get('日期','')}　{r.get('股票代號','')} {r.get('股票名稱','')}　"
+                                  f"（上傳於 {r.get('上傳時間','')}）"):
+                    st.markdown(r.get("AI分析", ""))
+    except Exception as e:
+        st.caption(f"讀取歷史紀錄失敗: {e}")

@@ -59,6 +59,62 @@ def call_claude(prompt, system="", max_tokens=2000, retries=2):
             return ""
     return ""
 
+
+def call_claude_vision(prompt, image_b64, media_type="image/jpeg", system="", max_tokens=1000, retries=2):
+    """
+    呼叫Claude API並附帶一張圖片（例如券商分點截圖），供2026-09-16新增的
+    broker_branch_analyzer.py使用。與call_claude()共用同一套重試/錯誤處理邏輯，
+    差異只在content多帶一個image區塊——image區塊放在text前面是Anthropic官方建議
+    的順序，實測對圖片判讀品質比較穩定。
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY).strip()
+    if not api_key:
+        log.warning("缺少 ANTHROPIC_API_KEY")
+        return ""
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    content = [
+        {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
+        {"type": "text", "text": prompt},
+    ]
+    body = {"model": MODEL, "max_tokens": max_tokens, "messages": [{"role": "user", "content": content}]}
+    if system:
+        body["system"] = system
+
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=body, timeout=120)
+            data = resp.json()
+            if resp.status_code != 200:
+                log.error(f"Claude API(圖片) 失敗 (status={resp.status_code}): {data}")
+                # 額度不足(400)、認證錯誤等重試也沒用，直接放棄；其他狀態碼才重試
+                if resp.status_code in (400, 401, 403):
+                    return ""
+                last_error = f"status={resp.status_code}"
+                if attempt < retries:
+                    import time as _time
+                    wait = 5 * (attempt + 1)
+                    log.warning(f"Claude API(圖片)重試中（第{attempt+1}次，{wait}秒後）...")
+                    _time.sleep(wait)
+                    continue
+                return ""
+            return data["content"][0]["text"]
+        except Exception as e:
+            last_error = e
+            if attempt < retries:
+                import time as _time
+                wait = 5 * (attempt + 1)
+                log.warning(f"Claude API(圖片)呼叫異常，{wait}秒後重試（第{attempt+1}次）: {e}")
+                _time.sleep(wait)
+                continue
+            log.error(f"Claude API(圖片) 呼叫異常（已重試{retries}次，放棄）: {e}")
+            return ""
+    return ""
+
 def collect_all_data(ss):
     data = {}
     sheets = {"聰明錢名單":20,"今日訊號":30,"持股異動明細":30,"三大法人":20,"多方驗證名單":20,"基本面資料":20,"題材趨勢":15,"新聞x籌碼交叉":15,"散戶情緒":10,"題材位置":15}
@@ -519,7 +575,7 @@ def generate_premarket_watch(cross_df: pd.DataFrame, us_market_text: str = "", t
 
 def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.DataFrame = None,
                                  market_margin: dict = None, benchmark_price_change: float = None,
-                                 alert_text: str = ""):
+                                 alert_text: str = "", broker_branch_text: str = ""):
     log.info("收集所有分頁資料...")
     data = collect_all_data(ss)
     data_text = format_data_for_ai(data, trade_date)
@@ -648,11 +704,24 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
             + alert_text
         )
 
+    # 2026-09-16新增：你上傳過的券商分點分析（純資料比對，不呼叫AI，不影響上面主報告
+    # 的選股評分邏輯——分點分析是手動、選擇性上傳的，涵蓋率天生不完整，刻意不當成
+    # 正式評分維度，只當補充註記附加在報告最後，由使用者自己判斷要不要採信）
+    broker_branch_section = ""
+    if broker_branch_text:
+        broker_branch_section = (
+            "\n\n### 📸 你上傳過的券商分點分析（僅涵蓋你自己截圖上傳過的股票，"
+            "非全市場自動涵蓋，僅供參考）\n\n"
+            + broker_branch_text
+        )
+
     final_report = main_report
     if affordable_section:
         final_report += affordable_section
     if alert_section:
         final_report += alert_section
+    if broker_branch_section:
+        final_report += broker_branch_section
     if related:
         final_report += "\n\n" + related
     if premarket_section:
