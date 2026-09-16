@@ -906,12 +906,15 @@ elif page == "散戶情緒":
 
     num_cols(retail_df, ["當前搜尋量","近3日均","近7日均","搜尋成長%","峰值","相對峰值%"])
 
-    # 摘要
-    c1, c2, c3, c4 = st.columns(4)
+    # 摘要（2026-09-16：散戶關注度改成5級分類後，這裡補上原本沒有的「退場」欄位；
+    # 「🌱 萌芽」原本標題誤寫成「法人期」，跟下面「題材位置分析」的「🎯 法人期」是
+    # 完全不同的兩件事，容易搞混，這裡一併修正標籤文字）
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("💤 最佳布局", f"{retail_df['散戶關注度'].str.contains('淡漠',na=False).sum()} 個")
-    c2.metric("🌱 法人期",   f"{retail_df['散戶關注度'].str.contains('萌芽',na=False).sum()} 個")
+    c2.metric("🌱 萌芽",     f"{retail_df['散戶關注度'].str.contains('萌芽',na=False).sum()} 個")
     c3.metric("⚡ 注意",     f"{retail_df['散戶關注度'].str.contains('追進',na=False).sum()} 個")
     c4.metric("🔥 危險",     f"{retail_df['散戶關注度'].str.contains('爆買',na=False).sum()} 個")
+    c5.metric("📉 退場",     f"{retail_df['散戶關注度'].str.contains('退場',na=False).sum()} 個")
 
     st.divider()
 
@@ -919,7 +922,8 @@ elif page == "散戶情緒":
     display_cols = ["排名","主題","散戶關注度","進場訊號","當前搜尋量","搜尋成長%","相對峰值%"]
     avail = [c for c in display_cols if c in retail_df.columns]
 
-    # 顏色標記
+    # 顏色標記（2026-09-16修正：這個函式原本定義了卻從沒被實際套用到任何表格上，
+    # 是死碼——下面補上.style.map()實際套用，「進場訊號」欄位才會真的有顏色區分）
     def highlight_signal(val):
         if "最佳" in str(val) or "法人期" in str(val):
             return "background-color: #E8F5E9"
@@ -929,8 +933,12 @@ elif page == "散戶情緒":
             return "background-color: #FFEBEE"
         return ""
 
+    styler = retail_df[avail].reset_index(drop=True)
+    if "進場訊號" in avail:
+        styler = styler.style.map(highlight_signal, subset=["進場訊號"])
+
     st.dataframe(
-        retail_df[avail].reset_index(drop=True),
+        styler,
         use_container_width=True, height=420, hide_index=True,
         column_config={
             "當前搜尋量":  st.column_config.ProgressColumn("搜尋量", min_value=0, max_value=100, format="%d"),
@@ -965,15 +973,30 @@ elif page == "散戶情緒":
                           paper_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig, use_container_width=True)
 
-    # 題材位置交叉表
+    # 題材位置交叉表（2026-09-16修正：「題材位置」欄位原本從未被算出過，這裡永遠是空的
+    # ——見trends_fetcher.py::cross_news_and_trends()這次補上的classify_topic_position()）
     if not pos_df.empty:
         st.subheader("📍 題材位置分析（新聞 × 搜尋）")
         st.caption("新聞熱但搜尋冷 = 法人期 = 最佳進場時機")
         pos_display = ["排名","主題","題材位置","新聞篇數","當前搜尋量"]
         pos_avail = [c for c in pos_display if c in pos_df.columns]
         if pos_avail:
-            st.dataframe(pos_df[pos_avail].reset_index(drop=True),
-                        use_container_width=True, height=350, hide_index=True)
+            def highlight_position(val):
+                if "法人期" in str(val):
+                    return "background-color: #E8F5E9"
+                elif "過熱" in str(val):
+                    return "background-color: #FFEBEE"
+                elif "退燒" in str(val):
+                    return "background-color: #FFF3E0"
+                return ""
+
+            pos_styler = pos_df[pos_avail].reset_index(drop=True)
+            if "題材位置" in pos_avail:
+                pos_styler = pos_styler.style.map(highlight_position, subset=["題材位置"])
+
+            st.dataframe(pos_styler, use_container_width=True, height=350, hide_index=True)
+        else:
+            st.caption("尚無可顯示欄位（等待下次21:00新聞job更新）")
 
 
 # ══════════════════════════════════════════════════════════════
