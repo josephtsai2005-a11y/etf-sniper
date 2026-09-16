@@ -27,6 +27,17 @@ broker_branch_analyzer.py
 `get_latest_analysis_by_stock()`／`format_recent_analysis_for_report()`這兩個函式
 就是給這個用途——同一份查詢結果，`app.py`的「多方驗證名單」頁面拿去做即時內嵌顯示，
 `main.py`的AI報告流程拿去格式化成附加段落，兩處共用同一套邏輯，不用維護兩份。
+
+2026-09-16再追加：使用者接著問，能不能讓AI透過分點走勢圖了解贏家券商的進出策略，
+「預估」多方驗證名單裡股票的進出場時間。這裡刻意**不**做「AI預測進場時間」——
+Claude讀的是一張截圖，看到的是視覺化的趨勢描述，不是結構化的數字時間序列，讓AI
+從一張圖裡講出帶時間刻度的預測，容易讓使用者高估這個判讀的可靠度（違反專案一貫
+「資料不足/推論薄弱要明講，不強行給結論」的誠實原則）。改成比照`main.py`裡
+`generate_premarket_watch()`既有的「條件式檢查清單，非預測」設計哲學：
+`build_entry_exit_checklist()`把這檔股票「多方驗證名單」裡本來就有、每天自動更新
+的技術面欄位（KD訊號/MACD訊號/技術面共振/籌碼矛盾）整理成「目前哪些條件成立」的
+清單，跟你上傳截圖判讀出的分點動向並列顯示——不合成新的AI推論，純粹是「把兩種
+已經存在的資訊放在一起給你看」，時間點跟要不要進場，由使用者自己判斷。
 """
 import io
 import base64
@@ -88,6 +99,14 @@ def build_broker_branch_prompt(
     綜合判讀，不要只看其中一張就下結論，也不要預設假設每張圖分別是什麼類型
     （表格或線圖），依實際畫面內容判斷。
 
+    2026-09-16再追加：使用者傳來實際會用的4張截圖範例，確認典型組合是「1張統計
+    表格＋3張走勢圖」——3張走勢圖其實是同一張K線圖＋分點進出長條圖，只是底下疊的
+    技術指標面板不同（App一次只能顯示一種指標面板，分別截KD、MACD、成交量三種）。
+    這種「同一張圖、不同指標面板」的組合，如果不特別說明，AI容易誤判成三張互不相干
+    的獨立圖表分開講——這裡在多圖說明裡額外加一段，明講這種常見組合，並要求技術
+    指標的判讀併入第1段「贏家分點動向」一起講（分點買賣超動向 × 技術指標是否同步），
+    不要跟主要的贏家/輸家判讀切成兩件事。
+
     2026-09-16修正：原本第3段是「天期切換建議」，假設使用者可以在App裡切換20日/
     60日/120日等不同回顧天期——但使用者實測後回報，他用的App「無法設定期間，只能
     給每日的分點進出圖片，但數字資訊是總結120日的結果」，也就是畫面上的囤貨/出貨/
@@ -134,7 +153,13 @@ def build_broker_branch_prompt(
             f"不同呈現方式，實際內容以畫面顯示為準）。請把這{num_images}張畫面當成同一次"
             f"判讀的完整資訊，彼此對照、互相補充——例如統計表格能看出實際券商名稱跟張數，"
             f"走勢線圖能看出買賣超動能是加速還是趨緩，兩者合起來看才完整，不要只看其中一張"
-            f"就下結論，也不要假設每張圖分別是什麼類型，依實際畫面內容判斷。"
+            f"就下結論，也不要假設每張圖分別是什麼類型，依實際畫面內容判斷。\n"
+            f"常見組合是「1張統計表格＋數張走勢圖」，走勢圖裡如果看到同一張K線圖搭配"
+            f"分點進出長條圖、只是下方疊的技術指標面板不同（KD、MACD、成交量等分開各"
+            f"一張），請把它們視為同一組資料的不同角度合併解讀，不要當成互不相干的三張"
+            f"圖分開講——技術指標的判讀請併入下面第1段「贏家分點動向」一起講，例如"
+            f"「贏家分點買超這幾天在放大，同時KD正從低檔翻揚／MACD柱狀由綠轉紅，動能"
+            f"方向一致」這種交叉對照，而不是分點跟技術指標各自獨立寫一段。"
         )
     else:
         image_intro = (
@@ -152,7 +177,10 @@ def build_broker_branch_prompt(
 
 1.【贏家分點動向】列出畫面中屬於「贏家」（近期波段獲利最多）的分點，目前是買超還是
    賣超、累計張數大概多少；如果是賣超，提醒「這幾家若連續轉買超轉正，才是相對安全的
-   跟隨買點」。
+   跟隨買點」。如果畫面裡有附上該分點的K線圖搭配KD/MACD/成交量等技術指標，請一併
+   說明目前指標狀態（例如KD在低檔/高檔、MACD柱狀翻紅或翻綠、成交量是否放大），並
+   指出分點買賣超動向跟技術指標之間有沒有明顯同步（訊號一致更值得留意，訊號不一致
+   則要明講「兩者方向不同步，證據還不夠齊全」，不要為了湊出結論硬講成一致）。
 
 2.【避開的陷阱訊號】找出畫面中「囤貨但同時是輸家」的分點（越跌越買、可能已被套牢），
    提醒不要只看到買超就衝動跟進，需等到贏家分點也回歸買方。
@@ -307,3 +335,81 @@ def format_recent_analysis_for_report(recent_df: pd.DataFrame) -> str:
         text = r.get("AI分析", "")
         blocks.append(f"**{code} {name}**（{date}上傳）\n{text}")
     return "\n\n".join(blocks)
+
+
+def build_entry_exit_checklist(stock_row: dict) -> dict:
+    """
+    2026-09-16新增：進出場條件checklist——純資料比對，不呼叫AI。
+
+    依「多方驗證名單」裡這檔股票每天自動更新的技術面欄位（KD訊號/MACD訊號/
+    技術面共振/籌碼矛盾），整理成「目前哪些條件成立」的清單，跟你上傳截圖判讀出的
+    分點動向並列顯示。這是條件checklist，不是預測：只呈現「現在條件夠不夠」，
+    不猜測會在哪一天發生轉折，時間點跟要不要進場由使用者自己判斷（見本檔案開頭
+    2026-09-16再追加的決策說明——為什麼不做「AI預測進場時間」）。
+
+    MACD/KD的多空判斷標準跟price_fetcher.py::compute_technical_indicators()算
+    「技術面共振」燈號時用的是同一套MACD_BULL_SET/KD_BULL_SET等常數，不自己另外
+    發明一套標準。
+
+    stock_row：「多方驗證名單」裡這檔股票那一列資料（dict或pandas Series皆可，
+    用.get()讀取，缺欄位不會crash，只會標成「資料不足」）。
+
+    回傳：{"items": [{"label", "status"（met/unmet/unknown）, "detail"}, ...],
+           "met_count": int, "total_count": int}
+    total_count只計「有明確資料可判讀」的項目數（不含unknown），met_count是其中
+    成立的項目數，例如"2/3"代表3項有資料可判讀的條件裡有2項目前成立。
+    """
+    from price_fetcher import MACD_BULL_SET, MACD_BEAR_SET, KD_BULL_SET, KD_BEAR_SET
+
+    def _get(key):
+        try:
+            val = stock_row.get(key, "")
+        except AttributeError:
+            val = stock_row[key] if key in stock_row else ""
+        return str(val).strip() if val is not None else ""
+
+    items = []
+
+    kd = _get("KD訊號")
+    if kd in KD_BULL_SET:
+        items.append({"label": "KD指標", "status": "met", "detail": f"{kd}（偏多）"})
+    elif kd in KD_BEAR_SET:
+        items.append({"label": "KD指標", "status": "unmet", "detail": f"{kd}（偏空）"})
+    else:
+        items.append({"label": "KD指標", "status": "unknown", "detail": kd or "資料不足"})
+
+    macd = _get("MACD訊號")
+    if macd in MACD_BULL_SET:
+        items.append({"label": "MACD指標", "status": "met", "detail": f"{macd}（偏多）"})
+    elif macd in MACD_BEAR_SET:
+        items.append({"label": "MACD指標", "status": "unmet", "detail": f"{macd}（偏空）"})
+    else:
+        items.append({"label": "MACD指標", "status": "unknown", "detail": macd or "資料不足"})
+
+    resonance = _get("技術面共振")
+    if resonance in ("🟢🟢 多頭共振", "🟢 偏多"):
+        items.append({"label": "技術面共振", "status": "met", "detail": resonance})
+    elif resonance in ("🔴 偏空", "🔴🔴 空頭共振"):
+        items.append({"label": "技術面共振", "status": "unmet", "detail": resonance})
+    else:
+        items.append({"label": "技術面共振", "status": "unknown", "detail": resonance or "資料不足"})
+
+    # 籌碼矛盾：margin_fetcher.py::compute_chip_conflict()只有三種可能——
+    # 空字串（無矛盾，中性）、"💡"開頭（散戶減碼/停損但法人在買，這套系統一貫認為
+    # 是有利訊號，見compute_chip_conflict()docstring）、"⚠️"開頭（散戶追價但法人在賣，
+    # 不利訊號）。用字串前綴判斷，不猜測空字串以外的其他文字格式。
+    conflict = _get("籌碼矛盾")
+    if conflict.startswith("💡"):
+        items.append({"label": "籌碼矛盾狀態", "status": "met", "detail": conflict})
+    elif conflict.startswith("⚠️"):
+        items.append({"label": "籌碼矛盾狀態", "status": "unmet", "detail": conflict})
+    elif conflict:
+        items.append({"label": "籌碼矛盾狀態", "status": "unknown", "detail": conflict})
+    else:
+        items.append({"label": "籌碼矛盾狀態", "status": "unknown", "detail": "無矛盾（中性）"})
+
+    known_items = [i for i in items if i["status"] != "unknown"]
+    met_count = sum(1 for i in known_items if i["status"] == "met")
+    total_count = len(known_items)
+
+    return {"items": items, "met_count": met_count, "total_count": total_count}

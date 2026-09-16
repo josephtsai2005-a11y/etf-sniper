@@ -433,17 +433,39 @@ if page == "多方驗證名單":
     # 影響上面已經算好的綜合評分/排序，純粹是「這幾檔剛好你也手動分析過，一起參考」。
     # 刻意獨立一個try/except，跟上面的訊號提醒互不依賴，其中一個失敗不影響另一個。
     try:
-        from broker_branch_analyzer import get_latest_analysis_by_stock
+        from broker_branch_analyzer import get_latest_analysis_by_stock, build_entry_exit_checklist
 
         ss_bb = get_spreadsheet()
         bb_recent = get_latest_analysis_by_stock(ss_bb, multi_df["股票代號"].astype(str).tolist())
         if not bb_recent.empty:
             with st.container(border=True):
                 st.markdown(f"#### 📸 你上傳過的券商分點分析（{len(bb_recent)} 檔，僅顯示最近7天內上傳的）")
-                st.caption("這是你自己截圖上傳的手動分析，不是自動涵蓋全部名單，僅供交叉參考")
+                st.caption(
+                    "這是你自己截圖上傳的手動分析，不是自動涵蓋全部名單，僅供交叉參考。"
+                    "下方「進出場條件」是把這檔股票現有的技術面欄位整理成條件清單——"
+                    "純資料比對，不是AI預測，只呈現目前條件夠不夠，時間點由你自己判斷"
+                )
                 for _, r in bb_recent.iterrows():
-                    with st.expander(f"{r.get('股票代號','')} {r.get('股票名稱','')}（{r.get('日期','')}上傳）"):
+                    _code = r.get("股票代號", "")
+                    with st.expander(f"{_code} {r.get('股票名稱','')}（{r.get('日期','')}上傳）"):
                         st.markdown(r.get("AI分析", ""))
+
+                        # 🎯 進出場條件checklist（2026-09-16新增）：純資料比對，不呼叫AI，
+                        # 跟上面AI截圖判讀的分點動向並列顯示，不合成新的AI推論——見
+                        # broker_branch_analyzer.py::build_entry_exit_checklist()的決策說明
+                        _match = multi_df[multi_df["股票代號"].astype(str) == str(_code)]
+                        if not _match.empty:
+                            _checklist = build_entry_exit_checklist(_match.iloc[0].to_dict())
+                            st.markdown("---")
+                            st.markdown(
+                                f"**🎯 進出場條件（{_checklist['met_count']}/{_checklist['total_count']} 項成立）**"
+                            )
+                            _status_icon = {"met": "✅", "unmet": "❌", "unknown": "➖"}
+                            for _item in _checklist["items"]:
+                                st.caption(
+                                    f"{_status_icon.get(_item['status'], '➖')} "
+                                    f"{_item['label']}：{_item['detail']}"
+                                )
     except Exception as e:
         st.caption(f"⚠️ 券商分點分析載入失敗（不影響上方名單）: {e}")
 

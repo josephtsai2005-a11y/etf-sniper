@@ -62,6 +62,15 @@ SESSION.headers.update({
     "Referer": "https://www.twse.com.tw/",
 })
 
+# MACD/KD訊號字串的多空分類，原本只在下面_技術面共振計算時內嵌定義。2026-09-16
+# 抽成模組層級常數，讓broker_branch_analyzer.py::build_entry_exit_checklist()
+# 也能引用同一套「怎樣算偏多/偏空」的判斷標準，避免兩處各自定義、之後改一邊
+# 忘了改另一邊而悄悄產生不一致。
+MACD_BULL_SET = {"🟢 黃金交叉", "柱狀翻紅", "🌱 空方動能趨緩"}
+MACD_BEAR_SET = {"🔴 死亡交叉", "柱狀翻綠", "🍂 多方動能趨緩"}
+KD_BULL_SET = {"🟢 黃金交叉", "🌱 醞釀黃金交叉", "K>D"}
+KD_BEAR_SET = {"🔴 死亡交叉", "🍂 醞釀死亡交叉", "K<D"}
+
 # 除權息/股票分割偵測用門檻：台股正常單日漲跌幅上限為±10%（新股上市前5個交易日、
 # 全額交割股等少數情況除外，但這些少見情況本來就該人工另外確認，不在這裡處理）。
 # 用「原始收盤價序列」直接相減若算出遠超過這個範圍的漲跌%，幾乎可以確定不是真的單日
@@ -523,18 +532,14 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
         elif ma_alignment == "空頭排列":
             tech_score -= 1
 
-        macd_bull_set = {"🟢 黃金交叉", "柱狀翻紅", "🌱 空方動能趨緩"}
-        macd_bear_set = {"🔴 死亡交叉", "柱狀翻綠", "🍂 多方動能趨緩"}
-        if macd_cross in macd_bull_set:
+        if macd_cross in MACD_BULL_SET:
             tech_score += 1
-        elif macd_cross in macd_bear_set:
+        elif macd_cross in MACD_BEAR_SET:
             tech_score -= 1
 
-        kd_bull_set = {"🟢 黃金交叉", "🌱 醞釀黃金交叉", "K>D"}
-        kd_bear_set = {"🔴 死亡交叉", "🍂 醞釀死亡交叉", "K<D"}
-        if kd_signal in kd_bull_set:
+        if kd_signal in KD_BULL_SET:
             tech_score += 1
-        elif kd_signal in kd_bear_set:
+        elif kd_signal in KD_BEAR_SET:
             tech_score -= 1
 
         if tech_score == 3:
