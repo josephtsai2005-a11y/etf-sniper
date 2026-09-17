@@ -895,15 +895,38 @@ def main():
                     # 分頁可能還不存在（第一次執行），視為沒有歷史資料
                     history_df_alert = pd.DataFrame()
 
+                # 2026-09-16新增：「技術面共振轉向」訊號要用的「回測記錄」——這張表在
+                # RUN_MODE=core/inst（約16:45）就已經寫好今天的技術指標，不用像籌碼矛盾
+                # 歷史那樣另外等，讀取失敗（例如分頁還不存在）視為沒有歷史資料，不影響
+                # 其他3種訊號正常產生
+                try:
+                    from backtest_tracker import load_backtest_history
+                    backtest_df_alert = load_backtest_history(ss2)
+                except Exception as e:
+                    log.warning(f"讀取回測記錄失敗（技術面共振轉向這項訊號跳過，不影響其他3種）: {e}")
+                    backtest_df_alert = pd.DataFrame()
+
                 alert_summary = alert_signals.build_daily_alert_summary(
-                    multi_df_alert, diff_df_alert, history_df_alert, today_date_str=TRADE_DATE,
+                    multi_df_alert, diff_df_alert, history_df_alert,
+                    backtest_df=backtest_df_alert, today_date_str=TRADE_DATE,
                 )
                 alert_text = alert_signals.format_alert_summary_for_ai(alert_summary)
                 log.info(
                     f"[AI] 訊號提醒：集中度提升{len(alert_summary.get('concentration_up', []))}檔／"
                     f"融資異常{len(alert_summary.get('margin_abnormal', []))}檔／"
-                    f"籌碼矛盾變化{len(alert_summary.get('chip_conflict_change', []))}檔"
+                    f"籌碼矛盾變化{len(alert_summary.get('chip_conflict_change', []))}檔／"
+                    f"技術面共振轉向{len(alert_summary.get('resonance_shift', []))}檔"
                 )
+
+                # 2026-09-16新增：把四種訊號打包成「今天值得截圖看券商分點」的行動清單，
+                # 附加在alert_text後面（見alert_signals.py::build_screenshot_worthy_list()
+                # 的決策說明）——不新增generate_investment_report()的參數，直接併進
+                # alert_text，沿用既有的「🔔 訊號提醒」段落一起呈現
+                screenshot_df = alert_signals.build_screenshot_worthy_list(alert_summary)
+                screenshot_text = alert_signals.format_screenshot_worthy_for_ai(screenshot_df)
+                if screenshot_text:
+                    alert_text = (alert_text + "\n\n" + screenshot_text) if alert_text else screenshot_text
+                    log.info(f"[AI] 值得截圖提醒：{len(screenshot_df)} 檔")
 
                 # 比對完成後才把今天的籌碼矛盾/融資訊號存進歷史，避免污染上面「今天 vs 昨天」的比對
                 appended = alert_signals.append_chip_conflict_history(ss2, multi_df_alert, TRADE_DATE)

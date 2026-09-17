@@ -392,20 +392,26 @@ if page == "多方驗證名單":
 
         diff_df_alert = load_sheet(SHEET_DIFF)
         history_df_alert = load_sheet(alert_signals.SHEET_CHIP_HISTORY)
+        # 2026-09-16新增：「技術面共振轉向」要用的「回測記錄」，沿用app.py既有的
+        # load_sheet()（5分鐘快取），跟其他訊號同一套避免額外Sheets請求的做法
+        backtest_df_alert = load_sheet("回測記錄")
         alert_summary = alert_signals.build_daily_alert_summary(
-            multi_df, diff_df_alert, history_df_alert, today_date_str=get_trade_date(),
+            multi_df, diff_df_alert, history_df_alert,
+            backtest_df=backtest_df_alert, today_date_str=get_trade_date(),
         )
         up_df = alert_summary.get("concentration_up", pd.DataFrame())
         margin_df_alert = alert_summary.get("margin_abnormal", pd.DataFrame())
         conflict_df_alert = alert_summary.get("chip_conflict_change", pd.DataFrame())
-        total_alerts = len(up_df) + len(margin_df_alert) + len(conflict_df_alert)
+        resonance_df_alert = alert_summary.get("resonance_shift", pd.DataFrame())
+        total_alerts = len(up_df) + len(margin_df_alert) + len(conflict_df_alert) + len(resonance_df_alert)
 
         with st.container(border=True):
             st.markdown(f"#### 🔔 今日訊號提醒（共 {total_alerts} 檔觸發）")
-            tab1, tab2, tab3 = st.tabs([
+            tab1, tab2, tab3, tab4 = st.tabs([
                 f"📈 聰明錢集中度提升（{len(up_df)}）",
                 f"💰 融資券異常變化（{len(margin_df_alert)}）",
                 f"⚖️ 籌碼矛盾出現/解除（{len(conflict_df_alert)}）",
+                f"🔄 技術面共振轉向（{len(resonance_df_alert)}）",
             ])
             with tab1:
                 if up_df.empty:
@@ -425,6 +431,35 @@ if page == "多方驗證名單":
                     st.caption("今日無變化（提醒：至少需累積2天歷史資料才會有比對結果）")
                 else:
                     st.dataframe(conflict_df_alert.reset_index(drop=True), use_container_width=True, hide_index=True)
+            with tab4:
+                if resonance_df_alert.empty:
+                    st.caption("今日無變化（提醒：至少需累積2天「回測記錄」資料才會有比對結果）")
+                else:
+                    st.dataframe(resonance_df_alert.reset_index(drop=True), use_container_width=True, hide_index=True)
+
+        # 🎯 值得截圖看券商分點（2026-09-16新增）：把上面四種訊號打包成「今天的截圖
+        # 待辦清單」，回答使用者「什麼時候該去找券商分點」——純粹整理既有訊號，不是
+        # 新的判斷邏輯，見alert_signals.py::build_screenshot_worthy_list()的決策說明
+        screenshot_df = alert_signals.build_screenshot_worthy_list(alert_summary)
+        if not screenshot_df.empty:
+            with st.container(border=True):
+                st.markdown(f"#### 🎯 值得截圖看券商分點（{len(screenshot_df)} 檔）")
+                st.caption(
+                    "以上四種訊號今天至少命中一種的股票——不是叫你一定要買，是提醒你"
+                    "「這幾檔剛好有變化，如果方便的話去手動截圖看看券商分點，交叉驗證"
+                    "會比較有時間點意義」，訊號數不代表分數，只代表命中幾種既有指標。"
+                )
+                for _, r in screenshot_df.iterrows():
+                    _s_code, _s_name = str(r.get("股票代號", "")), r.get("股票名稱", "")
+                    col_a, col_b = st.columns([5, 1])
+                    with col_a:
+                        st.markdown(f"**{_s_code} {_s_name}** — {r.get('觸發訊號','')}")
+                    with col_b:
+                        if st.button("📸 去截圖分析", key=f"jump_bb_{_s_code}"):
+                            st.session_state["bb_stock_code"] = _s_code
+                            st.session_state["bb_stock_name"] = _s_name
+                            st.session_state.selected_page = "券商分點分析"
+                            st.rerun()
     except Exception as e:
         st.caption(f"⚠️ 訊號提醒載入失敗（不影響下方名單）: {e}")
 

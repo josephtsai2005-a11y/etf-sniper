@@ -62,6 +62,14 @@ def _load_backtest_sheet(ss) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame(columns=all_cols)
 
+def load_backtest_history(ss) -> pd.DataFrame:
+    """
+    2026-09-16新增：`_load_backtest_sheet()`的公開版本，供其他模組讀取「回測記錄」
+    歷史時使用（例如`alert_signals.py::detect_resonance_shift()`要比對股票「技術面
+    共振」昨天vs今天的變化，需要讀取這張表找前一交易日的值）——直接重用這裡已經寫好的
+    讀取+欄位補齊邏輯，不用在別的模組裡重刻一次幾乎一樣的程式碼。
+    """
+    return _load_backtest_sheet(ss)
 
 def _write_backtest_sheet(ss, df: pd.DataFrame):
     """
