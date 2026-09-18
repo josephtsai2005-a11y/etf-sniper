@@ -786,15 +786,26 @@ AI在這種情況下容易產出「聽起來合理但缺乏統計意義」的敘
 
     data_text = "\n".join(data_blocks)
 
+    raw_df = _load_backtest_sheet(ss)
+    date_range_text = "資料日期範圍不明"
+    if not raw_df.empty and "記錄日期" in raw_df.columns:
+        dates = sorted(raw_df["記錄日期"].dropna().unique().tolist())
+        if dates:
+            date_range_text = f"{dates[0]} ～ {dates[-1]}"
+    today_str = datetime.now(TW_TZ).strftime("%Y-%m-%d")
+
     prompt = f"""你是一位資深量化分析師，現在要針對一套自建的台股ETF籌碼評分系統的回測結果，
 向主管做一份誠實、嚴謹的績效驗證報告。這套系統用「多檔主動式ETF同時持有同一標的」加上
 三大法人買賣超、基本面成長等因子，產出0-11分的「綜合評分」，理論上分數越高代表未來報酬應該越好。
+
+今天的日期是{today_str}。這份報告如果需要提到日期或年份，請以這個日期為準，不要自己猜測或使用其他年份。
 
 以下是目前累積的回測統計資料（每組都已標示樣本數）：
 
 {data_text}
 
-累積總樣本數：{sufficiency['total_records']} 筆快照，涵蓋 {sufficiency['trading_days']} 個交易日。
+累積總樣本數：{sufficiency['total_records']} 筆快照，涵蓋 {sufficiency['trading_days']} 個交易日，
+記錄日期範圍：{date_range_text}。
 
 請用以下架構撰寫報告（繁體中文，Markdown格式，適合直接呈現給主管看）：
 
@@ -826,7 +837,7 @@ AI在這種情況下容易產出「聽起來合理但缺乏統計意義」的敘
     result = call_claude(
         prompt,
         system="你是嚴謹的量化分析師，重視統計證據強度，絕不誇大薄弱證據的結論，會主動揭露方法論限制。",
-        max_tokens=2500,
+        max_tokens=6000,
     )
 
     if not result:
