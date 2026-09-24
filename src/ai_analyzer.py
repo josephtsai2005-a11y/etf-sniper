@@ -582,7 +582,7 @@ def generate_premarket_watch(cross_df: pd.DataFrame, us_market_text: str = "", t
 
 def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.DataFrame = None,
                                  market_margin: dict = None, benchmark_price_change: float = None,
-                                 alert_text: str = "", broker_branch_text: str = ""):
+                                 alert_text: str = ""):
     log.info("收集所有分頁資料...")
     data = collect_all_data(ss)
     data_text = format_data_for_ai(data, trade_date)
@@ -711,24 +711,21 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
             + alert_text
         )
 
-    # 2026-09-16新增：你上傳過的券商分點分析（純資料比對，不呼叫AI，不影響上面主報告
-    # 的選股評分邏輯——分點分析是手動、選擇性上傳的，涵蓋率天生不完整，刻意不當成
-    # 正式評分維度，只當補充註記附加在報告最後，由使用者自己判斷要不要採信）
-    broker_branch_section = ""
-    if broker_branch_text:
-        broker_branch_section = (
-            "\n\n### 📸 你上傳過的券商分點分析（僅涵蓋你自己截圖上傳過的股票，"
-            "非全市場自動涵蓋，僅供參考）\n\n"
-            + broker_branch_text
-        )
+    # 2026-09-24移除：原本這裡會把你上傳過的「券商分點分析」附加在AI報告最後（見
+    # 2026-09-16的決策），但這份資料是手動、選擇性截圖上傳的，沒有固定更新頻率——
+    # 如果沒有每天/常常上傳，AI報告裡看到的永遠是同一批舊分析，時效性反而造成誤導
+    # （使用者2026-09-24反映此問題）。改成完全移除這段附加，AI報告只保留全自動、
+    # 每天都會更新的資料維度。你上傳過的分析仍然完整保留在「手動籌碼分析」頁面本身
+    # 的歷史紀錄可以查閱，也仍會在「多方驗證名單」頁面即時顯示（那裡是查詢當下，不是
+    # 隔夜快照，沒有時效性問題）——只有「AI報告」這個每天生成一次、容易被誤以為是當天
+    # 新資料的地方不再顯示。main.py裡對應的broker_branch_text計算區塊也一併移除，
+    # 避免白白多打一次Sheets查詢。
 
     final_report = main_report
     if affordable_section:
         final_report += affordable_section
     if alert_section:
         final_report += alert_section
-    if broker_branch_section:
-        final_report += broker_branch_section
     if related:
         final_report += "\n\n" + related
     if premarket_section:

@@ -205,6 +205,18 @@ def load_ai_report_raw(retries: int = 3):
     raise last_err
 
 
+# 2026-09-24修正（頁面右上角常常顯示RUNNING）：get_update_time()在每一頁的側邊欄
+# 都會被無條件呼叫一次（見下面PAGE_UPDATE_SHEET那段），但這個函式本身完全沒有快取
+# ——不管使用者按哪個按鈕、切到哪一頁，只要整份script重跑（Streamlit任何互動都會
+# 觸發重跑），就會重新真的打一次Google Sheets API（get_spreadsheet()開試算表＋
+# ws.row_values(1)讀第一列）。這是2026-09-04（AI報告頁面RUNNING）、2026-09-11
+# （5個頁面open_by_key補429重試）兩次修正都沒處理到的漏網之魚——比那兩次更嚴重，
+# 因為這裡是「所有頁面、每一次互動」都會打到，不是特定頁面才會。改成比照
+# load_sheet()／load_ai_report_raw()同一套做法，加上@st.cache_data(ttl=300)：
+# 這幾張表的「更新時間」本來就是一天只變動2~3次（15:30/21:00/05:00各批次job），
+# 5分鐘的快取視窗不影響使用者看到的時間準確度，但能大幅減少每次點擊都重打
+# Google Sheets API、進而讓右上角一直顯示RUNNING的情況。
+@st.cache_data(ttl=300)
 def get_update_time(sheet_name: str) -> str:
     try:
         ss = get_spreadsheet()
@@ -299,7 +311,7 @@ with st.sidebar:
             st.session_state.selected_page = p
     st.markdown("---")
     st.markdown("#### 手動分析工具")
-    for p in ["券商分點分析"]:
+    for p in ["手動籌碼分析"]:
         if st.button(p, key=f"btn_{p}", use_container_width=True):
             st.session_state.selected_page = p
 
@@ -458,7 +470,7 @@ if page == "多方驗證名單":
                         if st.button("📸 去截圖分析", key=f"jump_bb_{_s_code}"):
                             st.session_state["bb_stock_code"] = _s_code
                             st.session_state["bb_stock_name"] = _s_name
-                            st.session_state.selected_page = "券商分點分析"
+                            st.session_state.selected_page = "手動籌碼分析"
                             st.rerun()
     except Exception as e:
         st.caption(f"⚠️ 訊號提醒載入失敗（不影響下方名單）: {e}")
@@ -474,7 +486,7 @@ if page == "多方驗證名單":
         bb_recent = get_latest_analysis_by_stock(ss_bb, multi_df["股票代號"].astype(str).tolist())
         if not bb_recent.empty:
             with st.container(border=True):
-                st.markdown(f"#### 📸 你上傳過的券商分點分析（{len(bb_recent)} 檔，僅顯示最近7天內上傳的）")
+                st.markdown(f"#### 📸 你上傳過的籌碼分析（{len(bb_recent)} 檔，僅顯示最近7天內上傳的）")
                 st.caption(
                     "這是你自己截圖上傳的手動分析，不是自動涵蓋全部名單，僅供交叉參考。"
                     "下方「進出場條件」是把這檔股票現有的技術面欄位整理成條件清單——"
@@ -2603,18 +2615,27 @@ elif page == "ETF連續加碼追蹤":
 
 
 # ══════════════════════════════════════════════════════════════
-# 頁面：券商分點分析（2026-09-16新增）
+# 頁面：手動籌碼分析（2026-09-16新增，2026-09-23併入籌碼總覽並改名）
+# 2026-09-23：原名「券商分點分析」，因為新增支援籌碼總覽截圖（外資/投信/自營/
+# 法人、融資/融券、大戶/散戶、主力、董監），涵蓋範圍不再只是分點，所以改名成
+# 「手動籌碼分析」。注意：只有這裡的頁面顯示標籤改了，Google Sheets儲存分頁名稱
+# SHEET_BROKER_ANALYSIS仍是"券商分點分析"（broker_branch_analyzer.py），刻意保留
+# 不改，避免既有歷史分析紀錄的資料遷移風險——請勿手動把Sheets的分頁名稱改成跟
+# 這裡的新標籤一致，否則load_broker_branch_history()/save_broker_branch_analysis()
+# 會找不到這張分頁。
 # ══════════════════════════════════════════════════════════════
 
-elif page == "券商分點分析":
-    st.title("🔍 券商分點分析")
-    st.caption("上傳券商分點App的截圖，由AI判讀贏家/輸家分點動向，輔助判斷進場時機")
+elif page == "手動籌碼分析":
+    st.title("🔍 手動籌碼分析")
+    st.caption("上傳分點/技術指標/籌碼總覽等截圖，由AI判讀籌碼動向，輔助判斷進場時機")
 
     st.info(
-        "💡 這個功能不會自動幫所有股票抓分點資料——TWSE官方查詢系統有CAPTCHA擋自動化，"
-        "第三方資料商（FinMind）雖然有分點資料但需要額外付費訂閱，且能否涵蓋全市場尚未確認，"
-        "所以先做成「你截圖、AI幫你判讀」的手動工具：券商分點App（例如Fugle、玩股網等）"
-        "查好某檔股票的分點進出後，把畫面截圖上傳到這裡即可。"
+        "💡 這個功能不會自動幫所有股票抓這些資料——分點資料TWSE官方查詢系統有CAPTCHA"
+        "擋自動化，第三方資料商（FinMind）雖然有分點資料但需要額外付費訂閱且涵蓋範圍"
+        "未確認；大戶/散戶、董監目前也還沒自動化；「主力」則是券商App專屬的proprietary"
+        "指標，本來就沒有公開資料源可以抓。所以做成「你截圖、AI幫你判讀」的手動工具："
+        "券商App（例如Fugle、玩股網等）查好某檔股票的分點進出、技術指標，或「籌碼總覽」"
+        "頁面後，把畫面截圖上傳到這裡即可，可以混合上傳不同類型的截圖。"
     )
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -2630,41 +2651,70 @@ elif page == "券商分點分析":
     with col_name:
         bb_name = st.text_input("股票名稱（選填）", placeholder="例如：台達電", key="bb_stock_name")
 
-    # 2026-09-16追加多圖上傳：使用者反映常常需要同時提供「統計結果截圖」（分點買賣超
-    # 表格）+「線形圖的券商分點進出圖」（走勢線圖）才夠完整判讀，開放一次選多張，
-    # 上限MAX_ANALYSIS_IMAGES張（見broker_branch_analyzer.py的常數，避免無限上傳
-    # 推高單次AI呼叫成本）。
     from broker_branch_analyzer import MAX_ANALYSIS_IMAGES
 
-    uploaded_imgs = st.file_uploader(
-        f"上傳券商分點截圖（可一次選多張，例如統計表格+走勢線圖，最多{MAX_ANALYSIS_IMAGES}張）",
-        type=["png", "jpg", "jpeg"], key="bb_upload", accept_multiple_files=True,
-    )
-    if uploaded_imgs and len(uploaded_imgs) > MAX_ANALYSIS_IMAGES:
-        st.warning(f"一次最多分析{MAX_ANALYSIS_IMAGES}張截圖，只會使用前{MAX_ANALYSIS_IMAGES}張")
-        uploaded_imgs = uploaded_imgs[:MAX_ANALYSIS_IMAGES]
-    if uploaded_imgs:
-        preview_cols = st.columns(len(uploaded_imgs))
-        for _col, _f in zip(preview_cols, uploaded_imgs):
-            with _col:
-                st.image(_f, caption=_f.name, width=280)
+    # 2026-09-23再追加：使用者反映截圖通常要分好幾次才截得齊（分點統計/走勢＋技術
+    # 指標＋籌碼總覽近5日/近5週，一檔股票實測常常要準備到6~8張），一次file_uploader
+    # 選取視窗不一定能一次選齊。改成「累積上傳清單」：每次選檔後按「加入清單」，
+    # 加進session_state持續累積，可以分好幾次選、也可以個別移除某一張，湊齊了才按
+    # 「AI分析」一次送出。file_uploader用遞增的key版本號重置控件本身——Streamlit的
+    # 元件是用key識別狀態，換一個key等於給一個全新的空白選取狀態，是官方建議的
+    # 「清空上傳控件」作法（沒有st.file_uploader.clear()這種API）。
+    if "bb_pending_images" not in st.session_state:
+        st.session_state.bb_pending_images = []  # [{"name":..., "bytes":...}, ...]
+    if "bb_uploader_ver" not in st.session_state:
+        st.session_state.bb_uploader_ver = 0
 
-    if st.button("🤖 AI 分析", type="primary", disabled=(not uploaded_imgs or not bb_code.strip())):
+    pending = st.session_state.bb_pending_images
+    st.caption(f"📋 目前清單：{len(pending)}/{MAX_ANALYSIS_IMAGES} 張（可分多次加入，湊齊再按下面「AI分析」）")
+
+    new_imgs = st.file_uploader(
+        "選擇截圖加入清單（分點統計/走勢、技術指標、籌碼總覽皆可混合，可一次選多張）",
+        type=["png", "jpg", "jpeg"], key=f"bb_upload_{st.session_state.bb_uploader_ver}",
+        accept_multiple_files=True,
+    )
+
+    col_add, col_clear = st.columns([1, 1])
+    with col_add:
+        if st.button("➕ 加入清單", disabled=not new_imgs, use_container_width=True):
+            room_left = MAX_ANALYSIS_IMAGES - len(pending)
+            if room_left <= 0:
+                st.warning(f"清單已達上限{MAX_ANALYSIS_IMAGES}張，請先移除幾張再加入新的")
+            else:
+                to_add = new_imgs[:room_left]
+                for _f in to_add:
+                    pending.append({"name": _f.name, "bytes": _f.getvalue()})
+                if len(new_imgs) > room_left:
+                    st.warning(f"清單只剩{room_left}個空位，只加入了前{room_left}張，"
+                               f"其餘的請先移除清單裡的舊圖後再重新選取加入")
+                st.session_state.bb_uploader_ver += 1  # 重置上傳控件，避免同一批被重複加入
+                st.rerun()
+    with col_clear:
+        if st.button("🗑️ 清空清單", disabled=not pending, use_container_width=True):
+            st.session_state.bb_pending_images = []
+            st.session_state.bb_uploader_ver += 1
+            st.rerun()
+
+    if pending:
+        _n_cols = min(len(pending), 4)
+        preview_cols = st.columns(_n_cols)
+        for _i, _item in enumerate(pending):
+            with preview_cols[_i % _n_cols]:
+                st.image(_item["bytes"], caption=_item["name"], width=200)
+                if st.button("移除", key=f"bb_remove_{_i}"):
+                    st.session_state.bb_pending_images.pop(_i)
+                    st.rerun()
+
+    if st.button("🤖 AI 分析", type="primary", disabled=(not pending or not bb_code.strip())):
         from broker_branch_analyzer import (
             analyze_broker_branch_screenshot, save_broker_branch_analysis, load_broker_branch_history,
         )
 
-        with st.spinner("Claude 正在判讀截圖，請稍候（通常10~30秒）..."):
-            image_bytes_list = [f.getvalue() for f in uploaded_imgs]
-            # 2026-09-16新增：先撈這檔股票過去存過的分析紀錄，讓AI能跨天比對「贏家
-            # 分點是否已經轉買」——使用者回報他用的App沒有天期切換選項，只能每天拿到
-            # 「當日重新計算」的固定天期總結圖，所以短線拐點只能靠累積每次上傳的歷史
-            # 紀錄來比對，不能靠切換App裡的觀察天期（App做不到）。
+        with st.spinner("Claude 正在判讀截圖，請稍候（圖片較多時可能需要30~60秒）..."):
+            image_bytes_list = [item["bytes"] for item in pending]
             try:
                 _ss_for_history = get_spreadsheet()
                 _hist_df = load_broker_branch_history(_ss_for_history, stock_code=bb_code.strip())
-                # load_broker_branch_history()回傳最新在前，這裡最近3筆反轉成「由舊到新」
-                # 給prompt，符合人類閱讀時間序列的直覺順序
                 recent_history = _hist_df.head(3).iloc[::-1].to_dict("records") if not _hist_df.empty else None
             except Exception:
                 recent_history = None
@@ -2685,6 +2735,10 @@ elif page == "券商分點分析":
                 st.cache_data.clear()
             except Exception as e:
                 st.caption(f"⚠️ 分析結果存檔失敗（不影響上面顯示的分析內容）: {e}")
+            # 分析成功送出後清空清單，避免下次不小心對同一批圖重複分析、或誤加到
+            # 下一檔股票的分析裡；失敗時刻意不清空，讓使用者不用重新截圖/重新選取
+            st.session_state.bb_pending_images = []
+            st.session_state.bb_uploader_ver += 1
 
     st.markdown("---")
     st.subheader("📜 歷史分析紀錄")

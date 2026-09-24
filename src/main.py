@@ -934,32 +934,13 @@ def main():
             except Exception as e:
                 log.warning(f"每日訊號提醒產生失敗（不影響主報告）: {e}")
 
-            # 你上傳過的券商分點分析（2026-09-16新增）：純資料比對，不呼叫AI，補充
-            # 註記而已——刻意不塞進上面AI主報告的選股評分邏輯，因為分點分析是使用者
-            # 手動、選擇性上傳的，涵蓋率天生不完整，當成正式評分維度會讓「有上傳」跟
-            # 「沒上傳」的股票被不公平比較，改成當附加段落接在報告最後（見
-            # ai_analyzer.py::generate_investment_report()的broker_branch_section）。
-            # 獨立於上面的每日訊號提醒重新讀一次「多方驗證名單」股票代號清單，
-            # 兩段落彼此不依賴，其中一段失敗不影響另一段。
-            broker_branch_text = ""
-            try:
-                import broker_branch_analyzer
-
-                def _read_3row_sheet_codes(sheet_name):
-                    ws = ss2.worksheet(sheet_name)
-                    vals = ws.get_all_values()
-                    if len(vals) < 2:
-                        return []
-                    df = pd.DataFrame(vals[2:], columns=vals[1])
-                    return df.get("股票代號", pd.Series(dtype=str)).astype(str).tolist()
-
-                multi_codes = _read_3row_sheet_codes("多方驗證名單")
-                recent_bb = broker_branch_analyzer.get_latest_analysis_by_stock(ss2, multi_codes)
-                broker_branch_text = broker_branch_analyzer.format_recent_analysis_for_report(recent_bb)
-                if broker_branch_text:
-                    log.info(f"[AI] 券商分點分析：{len(recent_bb)} 檔今日名單股票有近期上傳紀錄")
-            except Exception as e:
-                log.warning(f"券商分點分析段落產生失敗（不影響主報告）: {e}")
+            # 2026-09-24移除：原本這裡會撈「你上傳過的券商分點分析」附加進AI報告
+            # （見2026-09-16的決策、ai_analyzer.py::generate_investment_report()），
+            # 但這份資料是手動、選擇性截圖上傳的，沒有固定更新頻率，使用者若沒有每天/
+            # 常常上傳，AI報告裡看到的永遠是同一批舊分析，時效性反而造成誤導——這次
+            # 直接移除整段查詢與傳遞，AI報告不再包含這個附加段落，你上傳過的分析仍然
+            # 完整保留在「手動籌碼分析」頁面歷史紀錄、以及「多方驗證名單」頁面的即時
+            # 顯示（那裡是查詢當下、沒有時效性問題），只是不再進AI報告。
 
             # 股價回填：TWSE股價偶爾公布得比16:45晚，這裡重新確認一次
             # 2026-09-01：除了原本的「多方驗證名單」，新增回填「聰明錢名單」——
@@ -993,7 +974,7 @@ def main():
             report = generate_investment_report(
                 ss2, TRADE_DATE, us_text,
                 market_margin=market_margin, benchmark_price_change=benchmark_change,
-                alert_text=alert_text, broker_branch_text=broker_branch_text,
+                alert_text=alert_text,
             )
 
             if report:
