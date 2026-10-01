@@ -145,6 +145,11 @@ CANDLE_BODY_DOJI_PCT = 0.1      # 實體 <= 當日振幅的10% 視為十字線
 CANDLE_SHADOW_RATIO = 2.0       # 下影線(或上影線) >= 實體的2倍 才算長影線
 CANDLE_TREND_LOOKBACK = 5       # 用前5天的收盤價判斷盤前是漲是跌
 
+VOLUME_DIVERGENCE_LOOKBACK = 10  # 跟KD頂部背離用同一個回看天數，比較基準一致
+VOLUME_DRY_UP_RATIO = 0.7        # 量能比(今量/近5日均量) <= 此值，視為「量縮」
+VOLUME_SPIKE_RATIO = 2.5         # 量能比 >= 此值，視為「異常爆量」
+VOLUME_BOTTOM_LOOKBACK = 20      # 判斷「量能萎縮築底」要回看的天數（股價是否在相對低檔）
+
 
 def _detect_candlestick_pattern(opens: list, highs: list, lows: list, closes: list) -> str:
     """
@@ -600,6 +605,35 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
             except Exception:
                 pass
 
+        # ── 量價背離（2026-10-01新增）：股價創近期新高，但當日成交量明顯低於近5日均量，
+        # 代表這波上攻是「量縮價漲」撐出來的，跟上面KD背離是同一等級的提早示警，
+        # 只是觀察的指標不同；KD背離已經判斷到的話優先保留，避免互相覆蓋掉判斷依據
+        if not divergence_signal and len(closes) >= VOLUME_DIVERGENCE_LOOKBACK and volume_ratio:
+            try:
+                recent_closes_v = closes[-VOLUME_DIVERGENCE_LOOKBACK:]
+                price_new_high_v = recent_closes_v[-1] >= max(recent_closes_v)
+                if price_new_high_v and volume_ratio < VOLUME_DRY_UP_RATIO:
+                    divergence_signal = f"⚠️ 量價背離：價格創高但成交量未跟上（量能比{volume_ratio}）"
+            except Exception:
+                pass
+
+        # ── 量能訊號（2026-10-01新增）：量能萎縮築底 / 異常爆量 ─────────────
+        # 跟上面「背離警示」不同，這兩種不是單純的看跌訊號：量縮築底常是落底徵兆
+        # （偏多方參考），爆量則方向不定（可能出貨出清、也可能資金進場），所以獨立
+        # 開一個欄位，不會套用position_manager.py那組「背離警示非空就建議出場」的邏輯
+        volume_signal = ""
+        if volume_ratio:
+            if volume_ratio >= VOLUME_SPIKE_RATIO:
+                volume_signal = f"💥 異常爆量（今量達近5日均量{volume_ratio}倍）"
+            elif len(closes) >= VOLUME_BOTTOM_LOOKBACK and volume_ratio <= VOLUME_DRY_UP_RATIO:
+                try:
+                    recent_closes_b = closes[-VOLUME_BOTTOM_LOOKBACK:]
+                    near_recent_low = recent_closes_b[-1] <= min(recent_closes_b) * (1 + SUPPORT_RESISTANCE_NEAR_PCT / 100)
+                    if near_recent_low:
+                        volume_signal = "🌙 量能萎縮築底（近期低檔+量縮，留意止跌訊號）"
+                except Exception:
+                    pass
+
         # ── 布林通道（20期，2倍標準差）────────────────────────
         # 中軌沿用MA20；上下軌反映近期波動範圍，可看「是否觸及極端」跟「通道寬窄變化（噴出前兆）」
         bb_upper, bb_lower, bb_position, bb_signal = None, None, "", ""
@@ -774,6 +808,7 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
             "MACD柱狀": macd_hist,
             "MACD訊號": macd_cross,
             "背離警示": divergence_signal,
+            "量能訊號": volume_signal,
             "布林上軌": bb_upper,
             "布林下軌": bb_lower,
             "布林位置": bb_position,
@@ -960,7 +995,7 @@ def enrich_with_prices(df: pd.DataFrame, top_n: Optional[int] = None) -> pd.Data
     # 保留原本名稱欄，合併股價（不合入名稱）
     price_cols = ["股票代號", "收盤價", "漲跌", "漲跌幅%", "資料日期", "MA5", "MA10", "MA20", "站上MA20",
               "均線排列", "連續站上月線天數", "量能比", "K值", "D值", "KD訊號",
-              "DIF", "MACD", "MACD柱狀", "MACD訊號", "背離警示",
+              "DIF", "MACD", "MACD柱狀", "MACD訊號", "背離警示", "量能訊號",
               "布林上軌", "布林下軌", "布林位置", "布林壓縮", "ATR", "ATR%",
               "支撐價", "壓力價", "價格位置", "K線型態", "技術面共振",
               "成交量", "成交金額", "技術指標狀態"]
@@ -1080,7 +1115,8 @@ def backfill_prices_to_multi_sheet(ss, trade_date: str, delay: float = 0.3) -> i
     """
     return backfill_prices_to_sheet(
         ss, "多方驗證名單", trade_date,
-        ["收盤價", "漲跌", "漲跌幅%", "KD訊號", "MACD訊號", "背離警示", "ATR%", "技術面共振", "技術指標狀態"],
+        ["收盤價", "漲跌", "漲跌幅%", "KD訊號", "MACD訊號", "背離警示", "量能訊號",
+         "支撐價", "壓力價", "價格位置", "K線型態", "ATR%", "技術面共振", "技術指標狀態"],
         delay=delay,
     )
 

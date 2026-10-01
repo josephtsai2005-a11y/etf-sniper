@@ -473,6 +473,11 @@ def get_entry_candidates(latest_cross_df: pd.DataFrame, max_positions: int = MAX
         candle_pos = str(row.get("K線型態", ""))
         if "鎚子線" in candle_pos or "看漲吞噬" in candle_pos:
             notes.append(f"K線:{candle_pos}")
+        # 2026-10-01新增：量能萎縮築底——股價在近期低檔、量能明顯萎縮，是常見的落底
+        # 訊號之一，同樣只是附加參考資訊，不影響篩選結果本身。
+        volume_sig = str(row.get("量能訊號", ""))
+        if "量能萎縮築底" in volume_sig:
+            notes.append(f"量:{volume_sig}")
         return "、".join(notes)
 
     if "KD訊號" in candidates.columns or "MACD訊號" in candidates.columns:
