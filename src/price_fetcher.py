@@ -141,6 +141,70 @@ def _price_position_label(latest_close, support, resistance) -> str:
         return "區間中段"
     return ""
 
+CANDLE_BODY_DOJI_PCT = 0.1      # 實體 <= 當日振幅的10% 視為十字線
+CANDLE_SHADOW_RATIO = 2.0       # 下影線(或上影線) >= 實體的2倍 才算長影線
+CANDLE_TREND_LOOKBACK = 5       # 用前5天的收盤價判斷盤前是漲是跌
+
+
+def _detect_candlestick_pattern(opens: list, highs: list, lows: list, closes: list) -> str:
+    """
+    判斷最新一根K棒屬於哪種基本型態（十字線/鎚子線/上吊線/吞噬），
+    回傳中文標籤字串；偵測不到型態、或資料不足時回傳空字串。
+
+    鎚子線/上吊線是同一種K棒形狀（小實體+長下影線），差別在出現之前
+    是下跌還是上漲（用 CANDLE_TREND_LOOKBACK 判斷盤前走勢）；
+    吞噬需要比對最新兩根K棒的實體關係，也用同一套前段趨勢來判斷
+    是看漲吞噬還是看跌吞噬。
+    """
+    n = len(closes)
+    if n < CANDLE_TREND_LOOKBACK + 2 or len(opens) != n or len(highs) != n or len(lows) != n:
+        return ""
+
+    o, h, l, c = opens[-1], highs[-1], lows[-1], closes[-1]
+    if o is None or h is None or l is None or c is None or h == l:
+        return ""
+
+    body = abs(c - o)
+    rng = h - l
+    upper_shadow = h - max(o, c)
+    lower_shadow = min(o, c) - l
+
+    prior_close = closes[-2]
+    trend_ref_close = closes[-1 - CANDLE_TREND_LOOKBACK]
+    if prior_close is None or trend_ref_close is None:
+        prior_trend = "flat"
+    elif prior_close > trend_ref_close:
+        prior_trend = "up"
+    elif prior_close < trend_ref_close:
+        prior_trend = "down"
+    else:
+        prior_trend = "flat"
+
+    # ── 吞噬（兩根K棒實體比較，優先判斷）──
+    prev_o, prev_c = opens[-2], closes[-2]
+    if prev_o is not None and prev_c is not None and body > 0:
+        prev_body_low, prev_body_high = min(prev_o, prev_c), max(prev_o, prev_c)
+        cur_body_low, cur_body_high = min(o, c), max(o, c)
+        is_engulfing = cur_body_low <= prev_body_low and cur_body_high >= prev_body_high
+        if is_engulfing:
+            if prev_c < prev_o and c > o and prior_trend != "up":
+                return "🟢 看漲吞噬"
+            if prev_c > prev_o and c < o and prior_trend != "down":
+                return "🔴 看跌吞噬"
+
+    # ── 十字線 ──
+    if rng > 0 and body / rng <= CANDLE_BODY_DOJI_PCT:
+        return "➕ 十字線（變盤訊號）"
+
+    # ── 鎚子線 / 上吊線（同形狀，差在之前走勢）──
+    if body > 0 and lower_shadow >= body * CANDLE_SHADOW_RATIO and upper_shadow <= body * 0.5:
+        if prior_trend == "down":
+            return "🔨 鎚子線（止跌訊號）"
+        if prior_trend == "up":
+            return "⚠️ 上吊線（止漲訊號）"
+
+    return ""
+
 
 def get_trade_date() -> str:
     """跟institutional_fetcher.py／margin_fetcher.py用同一套判斷邏輯，避免各檔案各寫一份、標準不一致"""
@@ -352,6 +416,7 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
         close_col  = next((c for c in df.columns if "收盤" in c), None)
         high_col   = next((c for c in df.columns if "最高" in c), None)
         low_col    = next((c for c in df.columns if "最低" in c), None)
+        open_col   = next((c for c in df.columns if "開盤" in c), None)
         change_col = next((c for c in df.columns if "漲跌" in c and "幅" not in c), None)
         vol_col    = next((c for c in df.columns if "成交股數" in c or "成交量" in c), None)
         amt_col    = next((c for c in df.columns if "成交金額" in c), None)
@@ -599,6 +664,13 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
                 resistance_price = round(resistance_price, 2)
             price_position = _price_position_label(latest_close, support_price, resistance_price)
 
+        candle_pattern = ""
+        if open_col and high_col and low_col and len(closes) >= CANDLE_TREND_LOOKBACK + 2:
+            opens_cd = df[open_col].tolist()
+            highs_cd = df[high_col].tolist()
+            lows_cd = df[low_col].tolist()
+            candle_pattern = _detect_candlestick_pattern(opens_cd, highs_cd, lows_cd, closes)
+
         # ── 技術面共振燈號：把均線/MACD/KD三個不同週期指標的方向合成一個燈號 ──
         # 三個都同意才是「共振」；方向不一致時明確標示「分歧」，不強行合併成單一買賣訊號
         tech_score = 0
@@ -711,6 +783,7 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
             "支撐價":   support_price,
             "壓力價":   resistance_price,
             "價格位置": price_position,
+            "K線型態":  candle_pattern,
             "技術面共振": resonance_signal,
             "成交量":   volume,
             "成交金額": amount,
@@ -889,7 +962,7 @@ def enrich_with_prices(df: pd.DataFrame, top_n: Optional[int] = None) -> pd.Data
               "均線排列", "連續站上月線天數", "量能比", "K值", "D值", "KD訊號",
               "DIF", "MACD", "MACD柱狀", "MACD訊號", "背離警示",
               "布林上軌", "布林下軌", "布林位置", "布林壓縮", "ATR", "ATR%",
-              "支撐價", "壓力價", "價格位置", "技術面共振",
+              "支撐價", "壓力價", "價格位置", "K線型態", "技術面共振",
               "成交量", "成交金額", "技術指標狀態"]
     price_df = price_df[[c for c in price_cols if c in price_df.columns]]
 

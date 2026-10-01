@@ -328,6 +328,7 @@ def evaluate_open_positions(ss, latest_cross_df: pd.DataFrame) -> pd.DataFrame:
             "支撐價": None,
             "壓力價": None,
             "價格位置": None,
+            "K線型態": None,
         }
 
         if latest is None or entry_price is None:
@@ -347,6 +348,7 @@ def evaluate_open_positions(ss, latest_cross_df: pd.DataFrame) -> pd.DataFrame:
         result["支撐價"] = latest.get("支撐價")
         result["壓力價"] = latest.get("壓力價")
         result["價格位置"] = latest.get("價格位置")
+        result["K線型態"] = latest.get("K線型態")
 
         if pd.notna(current_price) and entry_price:
             ret_pct = round((current_price - entry_price) / entry_price * 100, 2)
@@ -407,6 +409,14 @@ def evaluate_open_positions(ss, latest_cross_df: pd.DataFrame) -> pd.DataFrame:
             result["建議出場"] = True
             result["觸發原因"].append(f"🟠 技術面轉弱（跌破近期支撐 {current_support}）")
 
+        # 技術面提早轉弱（續）：K線出現轉弱型態（2026-10-01新增，見price_fetcher.py的
+        # K線型態判斷——上吊線/看跌吞噬都是短線反轉警訊，跟KD/MACD死叉醞釀屬於同一等級
+        # 的「提早」訊號，不等實際跌破支撐才動作）
+        candle_pattern_now = str(latest.get("K線型態", "")) if latest is not None else ""
+        if "上吊線" in candle_pattern_now or "看跌吞噬" in candle_pattern_now:
+            result["建議出場"] = True
+            result["觸發原因"].append(f"🟠 技術面轉弱（{candle_pattern_now}）")
+
         results.append(result)
 
         # 更新最後檢查日期
@@ -458,6 +468,11 @@ def get_entry_candidates(latest_cross_df: pd.DataFrame, max_positions: int = MAX
         price_pos = str(row.get("價格位置", ""))
         if "已突破近期壓力" in price_pos or "接近支撐" in price_pos:
             notes.append(f"位置:{price_pos}")
+        # 2026-10-01新增：K線出現轉強型態——鎚子線/看漲吞噬都是短線反轉訊號，
+        # 同樣只是附加參考資訊，不影響篩選結果本身。
+        candle_pos = str(row.get("K線型態", ""))
+        if "鎚子線" in candle_pos or "看漲吞噬" in candle_pos:
+            notes.append(f"K線:{candle_pos}")
         return "、".join(notes)
 
     if "KD訊號" in candidates.columns or "MACD訊號" in candidates.columns:
