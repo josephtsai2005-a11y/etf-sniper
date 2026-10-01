@@ -533,7 +533,8 @@ if page == "多方驗證名單":
     display_cols = ["排名","股票代號","股票名稱","持有ETF數","買超法人數",
                     "法人訊號","綜合評分","多方驗證","年增率%","營收訊號","三大合計",
                     "買超轉換率%","法人換手強度%","融資訊號","券資比%","籌碼矛盾",
-                    "KD訊號","MACD訊號","背離警示","技術面共振","ATR%","收盤價","漲跌幅%"]
+                    "KD訊號","MACD訊號","背離警示","量能訊號","支撐價","壓力價","價格位置","K線型態",
+                    "技術面共振","ATR%","收盤價","漲跌幅%"]
     avail = [c for c in display_cols if c in filtered.columns]
 
     st.dataframe(
@@ -2206,7 +2207,8 @@ elif page == "持倉監控":
         display_cols = ["排名","股票代號","股票名稱","持有ETF數","買超法人數",
                     "法人訊號","綜合評分","多方驗證","年增率%","營收訊號","三大合計",
                     "買超轉換率%","法人換手強度%","融資訊號","券資比%","籌碼矛盾",
-                    "KD訊號","MACD訊號","背離警示","技術面共振","ATR%","收盤價","漲跌幅%"]
+                    "KD訊號","MACD訊號","背離警示","量能訊號","支撐價","壓力價","價格位置","K線型態",
+                    "技術面共振","ATR%","收盤價","漲跌幅%"]
         st.dataframe(
             candidates[[c for c in display_cols if c in candidates.columns]],
             use_container_width=True, hide_index=True,
@@ -2443,6 +2445,16 @@ elif page == "自選股查詢":
             c7.metric("均線排列", price_info.get("均線排列", "N/A"))
             c8.metric("量能比", f"{price_info.get('量能比', 'N/A')}")
 
+            # 2026-10-01新增：支撐/壓力/價格位置/K線型態/量能訊號（技術分析課程缺口
+            # 分析①②③項的欄位），這頁是逐股詳細檢視的地方，之前只有主表格跟進場
+            # 候選表格顯示，這裡沒跟著補，等於查單一股票時反而看不到這些欄位
+            c9, c10, c11, c12, c13 = st.columns(5)
+            c9.metric("支撐價", price_info.get("支撐價", "N/A"))
+            c10.metric("壓力價", price_info.get("壓力價", "N/A"))
+            c11.metric("價格位置", price_info.get("價格位置", "N/A"))
+            c12.metric("K線型態", price_info.get("K線型態", "") or "無")
+            c13.metric("量能訊號", price_info.get("量能訊號", "") or "無")
+
             # 法人
             inst_row = res["inst"][res["inst"]["股票代號"].astype(str) == code] if not res["inst"].empty else pd.DataFrame()
             if not inst_row.empty:
@@ -2627,16 +2639,35 @@ elif page == "ETF連續加碼追蹤":
 
 elif page == "手動籌碼分析":
     st.title("🔍 手動籌碼分析")
-    st.caption("上傳分點/技術指標/籌碼總覽等截圖，由AI判讀籌碼動向，輔助判斷進場時機")
 
-    st.info(
-        "💡 這個功能不會自動幫所有股票抓這些資料——分點資料TWSE官方查詢系統有CAPTCHA"
-        "擋自動化，第三方資料商（FinMind）雖然有分點資料但需要額外付費訂閱且涵蓋範圍"
-        "未確認；大戶/散戶、董監目前也還沒自動化；「主力」則是券商App專屬的proprietary"
-        "指標，本來就沒有公開資料源可以抓。所以做成「你截圖、AI幫你判讀」的手動工具："
-        "券商App（例如Fugle、玩股網等）查好某檔股票的分點進出、技術指標，或「籌碼總覽」"
-        "頁面後，把畫面截圖上傳到這裡即可，可以混合上傳不同類型的截圖。"
+    from broker_branch_analyzer import ANALYSIS_TYPE_BROKER_BRANCH, ANALYSIS_TYPE_PATTERN
+
+    bb_analysis_type = st.radio(
+        "分析類型", [ANALYSIS_TYPE_BROKER_BRANCH, ANALYSIS_TYPE_PATTERN],
+        horizontal=True, key="bb_analysis_type",
     )
+
+    if bb_analysis_type == ANALYSIS_TYPE_PATTERN:
+        st.caption("上傳K線走勢圖截圖，由AI辨識箱型整理/軌道線突破/頭肩頂底/W底M頭等古典價格型態")
+        st.info(
+            "💡 型態辨識需要的截圖：**只需要一張乾淨、完整連續的K線價格走勢圖**"
+            "（建議涵蓋2~3個月以上，太短看不出箱型整理/頭肩頂底/W底M頭這類需要時間"
+            "醞釀的型態），如果App一張畫面裝不下，最多再補1~2張（最多3張）。\n\n"
+            "不需要成交量/KD/MACD等技術指標截圖——這些系統已經有即時資料，分析完成後"
+            "會自動帶出來並排顯示，不用你額外截圖，也避免AI從圖片估測不準。\n\n"
+            "⚠️ 如果你的App會把走勢圖跟指標面板切成分開區塊，請只上傳乾淨的走勢圖"
+            "那一塊，不要連被切開的指標區塊也傳上來，避免AI誤判成不連續的型態。"
+        )
+    else:
+        st.caption("上傳分點/技術指標/籌碼總覽等截圖，由AI判讀籌碼動向，輔助判斷進場時機")
+        st.info(
+            "💡 這個功能不會自動幫所有股票抓這些資料——分點資料TWSE官方查詢系統有CAPTCHA"
+            "擋自動化，第三方資料商（FinMind）雖然有分點資料但需要額外付費訂閱且涵蓋範圍"
+            "未確認；大戶/散戶、董監目前也還沒自動化；「主力」則是券商App專屬的proprietary"
+            "指標，本來就沒有公開資料源可以抓。所以做成「你截圖、AI幫你判讀」的手動工具："
+            "券商App（例如Fugle、玩股網等）查好某檔股票的分點進出、技術指標，或「籌碼總覽」"
+            "頁面後，把畫面截圖上傳到這裡即可，可以混合上傳不同類型的截圖。"
+        )
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
         st.warning(
@@ -2651,7 +2682,12 @@ elif page == "手動籌碼分析":
     with col_name:
         bb_name = st.text_input("股票名稱（選填）", placeholder="例如：台達電", key="bb_stock_name")
 
-    from broker_branch_analyzer import MAX_ANALYSIS_IMAGES
+    from broker_branch_analyzer import MAX_ANALYSIS_IMAGES, MAX_PATTERN_IMAGES
+
+    # 2026-10-01新增：型態辨識只需要少量乾淨的走勢圖，上限用MAX_PATTERN_IMAGES
+    # （比籌碼分析的MAX_ANALYSIS_IMAGES低很多），避免使用者沿用籌碼分析的習慣
+    # 一次塞很多張不相干的截圖進來
+    bb_effective_max = MAX_PATTERN_IMAGES if bb_analysis_type == ANALYSIS_TYPE_PATTERN else MAX_ANALYSIS_IMAGES
 
     # 2026-09-23再追加：使用者反映截圖通常要分好幾次才截得齊（分點統計/走勢＋技術
     # 指標＋籌碼總覽近5日/近5週，一檔股票實測常常要準備到6~8張），一次file_uploader
@@ -2666,7 +2702,7 @@ elif page == "手動籌碼分析":
         st.session_state.bb_uploader_ver = 0
 
     pending = st.session_state.bb_pending_images
-    st.caption(f"📋 目前清單：{len(pending)}/{MAX_ANALYSIS_IMAGES} 張（可分多次加入，湊齊再按下面「AI分析」）")
+    st.caption(f"📋 目前清單：{len(pending)}/{bb_effective_max} 張（可分多次加入，湊齊再按下面「AI分析」）")
 
     new_imgs = st.file_uploader(
         "選擇截圖加入清單（分點統計/走勢、技術指標、籌碼總覽皆可混合，可一次選多張）",
@@ -2677,9 +2713,9 @@ elif page == "手動籌碼分析":
     col_add, col_clear = st.columns([1, 1])
     with col_add:
         if st.button("➕ 加入清單", disabled=not new_imgs, use_container_width=True):
-            room_left = MAX_ANALYSIS_IMAGES - len(pending)
+            room_left = bb_effective_max - len(pending)
             if room_left <= 0:
-                st.warning(f"清單已達上限{MAX_ANALYSIS_IMAGES}張，請先移除幾張再加入新的")
+                st.warning(f"清單已達上限{bb_effective_max}張，請先移除幾張再加入新的")
             else:
                 to_add = new_imgs[:room_left]
                 for _f in to_add:
@@ -2707,30 +2743,70 @@ elif page == "手動籌碼分析":
 
     if st.button("🤖 AI 分析", type="primary", disabled=(not pending or not bb_code.strip())):
         from broker_branch_analyzer import (
-            analyze_broker_branch_screenshot, save_broker_branch_analysis, load_broker_branch_history,
+            analyze_broker_branch_screenshot, analyze_chart_pattern_screenshot,
+            save_broker_branch_analysis, load_broker_branch_history,
         )
 
         with st.spinner("Claude 正在判讀截圖，請稍候（圖片較多時可能需要30~60秒）..."):
             image_bytes_list = [item["bytes"] for item in pending]
             try:
                 _ss_for_history = get_spreadsheet()
-                _hist_df = load_broker_branch_history(_ss_for_history, stock_code=bb_code.strip())
+                _hist_df = load_broker_branch_history(
+                    _ss_for_history, stock_code=bb_code.strip(), analysis_type=bb_analysis_type
+                )
                 recent_history = _hist_df.head(3).iloc[::-1].to_dict("records") if not _hist_df.empty else None
             except Exception:
                 recent_history = None
-            analysis = analyze_broker_branch_screenshot(
-                image_bytes_list, bb_code.strip(), bb_name.strip(), recent_history=recent_history
-            )
+            if bb_analysis_type == ANALYSIS_TYPE_PATTERN:
+                analysis = analyze_chart_pattern_screenshot(
+                    image_bytes_list, bb_code.strip(), bb_name.strip(), recent_history=recent_history
+                )
+            else:
+                analysis = analyze_broker_branch_screenshot(
+                    image_bytes_list, bb_code.strip(), bb_name.strip(), recent_history=recent_history
+                )
 
         if not analysis:
             st.error("分析失敗，可能是AI回應逾時或圖片無法判讀，請重試一次；若持續失敗請確認上方的ANTHROPIC_API_KEY設定。")
         else:
             st.success("分析完成")
             st.markdown(analysis)
+
+            # 2026-10-01新增：型態辨識時，在AI判讀旁邊附上系統既有的技術面資料當
+            # 佐證（量能/KD/MACD/支撐壓力/K線型態），直接查「多方驗證名單」既有
+            # 欄位，不靠AI從截圖估測——這些資料只在該股票仍在「多方驗證名單」
+            # 追蹤範圍內才查得到，清單外的自選股查無資料時會明講，不會假裝有
+            if bb_analysis_type == ANALYSIS_TYPE_PATTERN:
+                try:
+                    _multi_df = load_sheet(SHEET_MULTI)
+                    _match = (_multi_df[_multi_df["股票代號"].astype(str) == bb_code.strip()]
+                              if not _multi_df.empty else pd.DataFrame())
+                except Exception:
+                    _match = pd.DataFrame()
+                if _match.empty:
+                    st.caption("📊 系統既有資料：不在「多方驗證名單」追蹤範圍內，查無現成資料可對照")
+                else:
+                    _row = _match.iloc[0]
+                    _snapshot_items = [
+                        ("量能訊號", _row.get("量能訊號")), ("量能比", _row.get("量能比")),
+                        ("KD訊號", _row.get("KD訊號")), ("MACD訊號", _row.get("MACD訊號")),
+                        ("支撐價", _row.get("支撐價")), ("壓力價", _row.get("壓力價")),
+                        ("價格位置", _row.get("價格位置")), ("K線型態", _row.get("K線型態")),
+                    ]
+                    _snapshot_text = "　".join(
+                        f"{k}: {v}" for k, v in _snapshot_items if str(v) not in ("None", "", "nan")
+                    )
+                    if _snapshot_text:
+                        st.caption(f"📊 系統既有資料（{_row.get('資料日期', '')}）：{_snapshot_text}")
+                    else:
+                        st.caption("📊 系統既有資料：目前沒有可顯示的技術面欄位")
+
             try:
                 ss = get_spreadsheet()
                 today_str = datetime.now().strftime("%Y-%m-%d")
-                save_broker_branch_analysis(ss, bb_code.strip(), bb_name.strip(), analysis, today_str)
+                save_broker_branch_analysis(
+                    ss, bb_code.strip(), bb_name.strip(), analysis, today_str, analysis_type=bb_analysis_type
+                )
                 st.caption("✅ 已存檔，可在下方「歷史分析紀錄」查看")
                 st.cache_data.clear()
             except Exception as e:
@@ -2742,17 +2818,25 @@ elif page == "手動籌碼分析":
 
     st.markdown("---")
     st.subheader("📜 歷史分析紀錄")
-    hist_filter = st.text_input("篩選股票代號（留空顯示全部）", placeholder="例如：2308", key="bb_hist_filter")
+    col_hf1, col_hf2 = st.columns(2)
+    with col_hf1:
+        hist_filter = st.text_input("篩選股票代號（留空顯示全部）", placeholder="例如：2308", key="bb_hist_filter")
+    with col_hf2:
+        hist_type_filter = st.selectbox(
+            "篩選分析類型", ["全部", ANALYSIS_TYPE_BROKER_BRANCH, ANALYSIS_TYPE_PATTERN], key="bb_hist_type_filter"
+        )
     try:
         from broker_branch_analyzer import load_broker_branch_history
         ss = get_spreadsheet()
-        hist_df = load_broker_branch_history(ss, stock_code=hist_filter.strip() or None)
+        _hist_type_arg = None if hist_type_filter == "全部" else hist_type_filter
+        hist_df = load_broker_branch_history(ss, stock_code=hist_filter.strip() or None, analysis_type=_hist_type_arg)
         if hist_df.empty:
             st.caption("尚無歷史分析紀錄")
         else:
             for _, r in hist_df.iterrows():
+                _type_label = r.get("分析類型", ANALYSIS_TYPE_BROKER_BRANCH)
                 with st.expander(f"📅 {r.get('日期','')}　{r.get('股票代號','')} {r.get('股票名稱','')}　"
-                                  f"（上傳於 {r.get('上傳時間','')}）"):
+                                  f"[{_type_label}]　（上傳於 {r.get('上傳時間','')}）"):
                     st.markdown(r.get("AI分析", ""))
     except Exception as e:
         st.caption(f"讀取歷史紀錄失敗: {e}")

@@ -67,6 +67,14 @@ MAX_IMAGE_DIMENSION = 1568
 # 固定月費。
 MAX_ANALYSIS_IMAGES = 8
 
+# 2026-10-01新增（技術分析課程缺口分析第5項：型態辨識）：型態辨識只需要乾淨的
+# K線走勢圖，不需要像籌碼分析那樣混合多種畫面類型，上限刻意設得比較低，一方面
+# 提醒使用者不需要截太多圖，一方面避免不小心上傳跟型態辨識無關的截圖
+MAX_PATTERN_IMAGES = 3
+
+ANALYSIS_TYPE_BROKER_BRANCH = "籌碼分析"
+ANALYSIS_TYPE_PATTERN = "型態辨識"
+
 
 def _prepare_image_for_claude(image_bytes: bytes) -> tuple:
     """
@@ -330,6 +338,130 @@ def build_broker_branch_prompt(
 「畫面資訊不足，無法判讀OOO」，不要編造。整體控制在600字以內，用上面1~4的標題分段。
 {history_block}"""
 
+def build_pattern_recognition_prompt(
+    stock_code: str, stock_name: str, recent_history: list = None, num_images: int = 1
+) -> str:
+    """
+    建立K線型態辨識的分析prompt（2026-10-01新增，技術分析課程缺口分析第5項）。
+
+    刻意跟build_broker_branch_prompt()分開、不合併成同一個自動偵測畫面類型的
+    prompt：這個函式只處理使用者在app.py明確選擇「型態辨識」模式時上傳的畫面，
+    專注辨識箱型整理突破／軌道線(通道)突破／頭肩頂/頭肩底／W底(雙重底)/M頭
+    (雙重頂)這幾種需要看「一段時間的價格走勢形狀」才能判斷的古典技術分析型態，
+    跟build_broker_branch_prompt()判讀的「分點買賣動向／籌碼總覽」是完全不同的
+    分析角度，硬塞進同一個prompt會讓兩種判斷互相干擾、篇幅也會超出合理長度。
+
+    畫面裁切風險（使用者提出）：型態判斷完全依賴「完整連續」的價格走勢，如果App
+    畫面本身把走勢圖跟指標面板切成分開區塊、或截圖只涵蓋部分時間範圍，AI很容易
+    把被截斷的局部誤判成完整型態。prompt明確要求：畫面看起來不連續/被裁切/時間
+    範圍不夠長時，要直接說明看不出完整型態，不可以自己腦補被截斷的部分去湊出
+    一個型態；多圖情境下也明講不能假設圖與圖之間能無縫精確銜接。
+
+    不需要技術指標／成交量截圖（使用者提出會逼近MAX_ANALYSIS_IMAGES上限）：
+    量能/KD/MACD這些系統本來就有即時結構化資料（price_fetcher.py），app.py
+    呼叫端會把這些既有欄位整理成文字跟AI的型態判讀並排顯示，不需要另外截圖讓
+    AI從圖片裡估測——估測本來就不如系統既有的精確計算準，這裡的prompt也明確
+    要求AI不要分析成交量/KD/MACD。
+    """
+    stock_label = f"{stock_code} {stock_name}".strip() or "（使用者未提供股票代號/名稱）"
+
+    if recent_history:
+        history_lines = [f"- {h.get('日期', '')}：{h.get('AI分析', '')[:200]}" for h in recent_history]
+        history_block = (
+            "\n\n【近期型態判讀歷史】（由舊到新，供你跨天比對型態是否有進展/改變）：\n"
+            + "\n".join(history_lines)
+        )
+        comparison_instruction = (
+            "比對這次看到的型態跟先前幾次的判讀是否一致、有沒有從「形成中」進展到"
+            "「已突破」、或型態本身有沒有改變。"
+        )
+    else:
+        history_block = "\n\n這是第一次對這檔股票做型態辨識，沒有歷史紀錄可比對。"
+        comparison_instruction = "這是第一次上傳，如實說明沒有歷史紀錄可比對，不臆測未來走勢。"
+
+    if num_images > 1:
+        image_note = (
+            f"\n\n這次收到{num_images}張畫面，可能是同一檔股票不同時間範圍/不同截取角度的"
+            "走勢圖（例如App一次裝不下太長的時間範圍，使用者分段截圖）。請把它們當成同一條"
+            "價格走勢的不同片段彼此對照，但**不要假設圖與圖之間的時間軸可以無縫精確銜接**——"
+            "你沒有辦法逐日對齊不同截圖的確切邊界，只能用「大致」「看起來」這類保留字眼描述"
+            "跨圖片的連續性，不要講得像看到了一條完整連續的走勢。"
+        )
+    else:
+        image_note = ""
+
+    prompt = f"""你是一位熟悉技術分析的資深營業員，請判讀使用者上傳的股票走勢圖截圖，
+專注辨識以下這幾種古典價格型態，不要分析成交量、KD、MACD等技術指標（這些系統已經有
+現成的即時資料，使用者會另外參考，不需要你從圖片裡判斷）：
+
+- 箱型整理突破：股價在一個相對窄的區間（箱型）來回整理一段時間後，向上或向下突破
+  箱型上緣/下緣
+- 軌道線(通道)突破：股價沿著一條上升或下降的趨勢通道（兩條平行線）移動，然後突破
+  通道上緣或下緣
+- 頭肩頂/頭肩底：三個波段高點(或低點)中，中間一個明顯高於(低於)左右兩個，且左右
+  兩個高度(低點)大致相近（頸線概念），是常見的反轉型態
+- W底(雙重底)/M頭(雙重頂)：股價兩次測試接近的低點(高點)後反轉，型態呈現W或M的形狀
+
+股票：{stock_label}
+
+請用以下架構回答，每段簡短扼要（總字數建議在400字以內）：
+
+【1. 目前辨識到的型態】
+說明畫面上是否看得出上述任一種型態正在形成中或已經成形，包含你判斷的依據。如果
+看不出任何明確型態，直接說「目前看不出明確的古典型態，走勢較為零散」，不要勉強
+套用一個型態硬解釋。
+
+【2. 型態完整度與確認狀態】
+這個型態目前是「已經突破確認」還是「仍在形成中、尚未突破」？如果已突破，大致的
+突破價位/時間點（用「大致」「看起來」等保留字眼，不要給精確到小數點的數字，除非
+畫面上有清楚標示）。如果畫面裁切、不連續、或可用的時間範圍不夠長，在這裡明講
+「畫面可能只涵蓋部分走勢，無法確認型態是否完整」，不要自己腦補看不到的部分。{image_note}
+
+【3. 與近期比較】
+{comparison_instruction}
+
+【4. 參考重點】
+用條件式語氣（例如「如果股價站穩在OO元之上，型態偏向...」），列出1~2個後續值得
+觀察的價位或條件，不要給「建議買進/賣出」這種直接的操作建議，也不要預測具體的
+進出場時間點——型態辨識只是提供觀察角度，最終判斷由使用者自己決定。
+{history_block}
+"""
+    return prompt
+
+
+def analyze_chart_pattern_screenshot(
+    image_bytes_list, stock_code: str, stock_name: str, recent_history: list = None
+) -> str:
+    """
+    上傳一張或多張走勢圖截圖 -> 呼叫Claude vision做K線型態辨識 -> 回傳分析文字
+    （失敗回傳空字串）。2026-10-01新增，技術分析課程缺口分析第5項。
+
+    刻意跟analyze_broker_branch_screenshot()保持平行但獨立的結構（同樣的圖片
+    前處理/呼叫Claude vision邏輯），差別只在呼叫build_pattern_recognition_
+    prompt()而不是build_broker_branch_prompt()、張數上限用MAX_PATTERN_IMAGES
+    而不是MAX_ANALYSIS_IMAGES——型態辨識是使用者在app.py明確選擇的獨立分析
+    模式，不是自動偵測畫面類型，不合併進同一個函式，避免兩種分析邏輯混在一起
+    難以各自調整。
+    """
+    from ai_analyzer import call_claude_vision
+
+    if isinstance(image_bytes_list, (bytes, bytearray)):
+        image_bytes_list = [image_bytes_list]
+    image_bytes_list = list(image_bytes_list)[:MAX_PATTERN_IMAGES]
+    if not image_bytes_list:
+        return ""
+
+    try:
+        prepared_images = [_prepare_image_for_claude(b) for b in image_bytes_list]
+    except Exception as e:
+        log.error(f"型態辨識截圖前處理失敗: {e}")
+        return ""
+
+    prompt = build_pattern_recognition_prompt(
+        stock_code, stock_name, recent_history=recent_history, num_images=len(prepared_images)
+    )
+    return call_claude_vision(prompt, prepared_images, max_tokens=1000)
+
 
 def analyze_broker_branch_screenshot(
     image_bytes_list, stock_code: str, stock_name: str, recent_history: list = None
@@ -367,12 +499,26 @@ def analyze_broker_branch_screenshot(
     return call_claude_vision(prompt, prepared_images, max_tokens=1000)
 
 
-def save_broker_branch_analysis(ss, stock_code: str, stock_name: str, analysis_text: str, trade_date: str):
+def save_broker_branch_analysis(ss, stock_code: str, stock_name: str, analysis_text: str, trade_date: str,
+                                 analysis_type: str = ANALYSIS_TYPE_BROKER_BRANCH):
     """
     存進Sheets留存歷史（2列格式：header+data，跟「盤後原始數據庫」同慣例——不像
     「多方驗證名單」那樣需要額外一列title，因為這張表不是每日job自動寫入，是使用者
     手動上傳時才新增一列，不需要「今日更新時間」這種整表層級的標記）。
     之後若要串進每日AI報告或列出某股票的歷史分析紀錄，直接讀這張表即可。
+
+    2026-10-01新增analysis_type參數（技術分析課程缺口分析第5項，型態辨識功能）：
+    區分這筆紀錄是「籌碼分析」還是「型態辨識」，預設值維持舊行為（籌碼分析），
+    呼叫端不傳這個參數時完全向下相容。
+
+    欄位遷移：這張表原本只有5欄（日期/股票代號/股票名稱/AI分析/上傳時間），表頭
+    只在第一次建立分頁時寫入一次、之後不會重寫，所以不能只改程式碼裡的header常數
+    （改了也不會回頭更新已經存在的舊表頭）。這裡改成：每次寫入前都檢查現有表頭
+    有沒有「分析類型」這個欄位，沒有的話自動補上去（擴充成6欄）。Google Sheets的
+    get_all_values()會自動把比較短的舊資料列用空字串補齊到跟最長列一樣的欄位數，
+    所以舊資料列讀進來後「分析類型」會是空字串，讀取端(load_broker_branch_
+    history())會把空字串正規化成ANALYSIS_TYPE_BROKER_BRANCH（因為這張表在這次
+    修改之前存的全部都是籌碼分析），不會讓舊資料消失或讀取出錯。
     """
     if not analysis_text:
         return
@@ -380,7 +526,7 @@ def save_broker_branch_analysis(ss, stock_code: str, stock_name: str, analysis_t
     existing = [ws.title for ws in ss.worksheets()]
     if SHEET_BROKER_ANALYSIS not in existing:
         ss.add_worksheet(title=SHEET_BROKER_ANALYSIS, rows=1000, cols=6)
-        header = [["日期", "股票代號", "股票名稱", "AI分析", "上傳時間"]]
+        header = [["日期", "股票代號", "股票名稱", "AI分析", "上傳時間", "分析類型"]]
 
         def _init():
             ss.worksheet(SHEET_BROKER_ANALYSIS).append_rows(header, value_input_option="USER_ENTERED")
@@ -388,19 +534,34 @@ def save_broker_branch_analysis(ss, stock_code: str, stock_name: str, analysis_t
         retry_sheets_write(_init, retries=2, label="券商分點分析表頭初始化")
 
     ws = ss.worksheet(SHEET_BROKER_ANALYSIS)
+    current_header = ws.row_values(1)
+    if "分析類型" not in current_header:
+        target_col = len(current_header) + 1 if current_header else 6
+
+        def _add_type_col():
+            ws.update_cell(1, target_col, "分析類型")
+
+        retry_sheets_write(_add_type_col, retries=2, label="券商分點分析表頭補分析類型欄")
+
     uploaded_at = datetime.now(TW_TZ).strftime("%Y-%m-%d %H:%M")
-    row = [[trade_date, stock_code, stock_name, analysis_text, uploaded_at]]
+    row = [[trade_date, stock_code, stock_name, analysis_text, uploaded_at, analysis_type]]
 
     def _do_write():
         ws.append_rows(row, value_input_option="USER_ENTERED")
 
     retry_sheets_write(_do_write, retries=2, label="券商分點分析寫入")
-    log.info(f"券商分點分析已存檔：{stock_code} {stock_name}")
+    log.info(f"{analysis_type}已存檔：{stock_code} {stock_name}")
 
 
-def load_broker_branch_history(ss, stock_code: str = None) -> pd.DataFrame:
-    """讀取歷史分析紀錄，可選擇篩選單一股票代號（最新在前）。找不到分頁（例如
-    使用者從沒上傳過任何截圖）回傳空DataFrame，不視為錯誤。"""
+def load_broker_branch_history(ss, stock_code: str = None, analysis_type: str = None) -> pd.DataFrame:
+    """讀取歷史分析紀錄，可選擇篩選單一股票代號、單一分析類型（最新在前）。找不到
+    分頁（例如使用者從沒上傳過任何截圖）回傳空DataFrame，不視為錯誤。
+
+    2026-10-01新增analysis_type篩選參數：舊資料列（這次改動之前存的）沒有「分析
+    類型」這個值，讀進來會是空字串——這裡統一正規化成ANALYSIS_TYPE_BROKER_BRANCH
+    （因為這張表在新增型態辨識功能之前，存的全部都是籌碼分析），確保篩選
+    analysis_type時舊資料不會因為欄位是空字串而被誤判成「不符合」篩選條件。
+    """
     try:
         ws = ss.worksheet(SHEET_BROKER_ANALYSIS)
         vals = ws.get_all_values()
@@ -411,13 +572,22 @@ def load_broker_branch_history(ss, stock_code: str = None) -> pd.DataFrame:
         log.info(f"讀取券商分點分析歷史（尚無資料或分頁不存在）: {e}")
         return pd.DataFrame()
 
+    if "分析類型" not in df.columns:
+        df["分析類型"] = ANALYSIS_TYPE_BROKER_BRANCH
+    else:
+        df["分析類型"] = df["分析類型"].replace("", ANALYSIS_TYPE_BROKER_BRANCH)
+
     if stock_code and "股票代號" in df.columns:
         df = df[df["股票代號"].astype(str) == str(stock_code)]
+
+    if analysis_type:
+        df = df[df["分析類型"] == analysis_type]
 
     return df.iloc[::-1].reset_index(drop=True)
 
 
-def get_latest_analysis_by_stock(ss, stock_codes: list, days_lookback: int = 7) -> pd.DataFrame:
+def get_latest_analysis_by_stock(ss, stock_codes: list, days_lookback: int = 7,
+                                  analysis_type: str = ANALYSIS_TYPE_BROKER_BRANCH) -> pd.DataFrame:
     """
     給定一批股票代號（例如當天「多方驗證名單」的全部代號），回傳這些股票裡「最近
     days_lookback天內有上傳過分點分析」的最新一筆紀錄，每檔股票最多一列。
@@ -431,11 +601,16 @@ def get_latest_analysis_by_stock(ss, stock_codes: list, days_lookback: int = 7) 
     days_lookback預設7天（比照專案裡其他地方常見的「近7日」窗口慣例），避免顯示
     太久以前、可能已經過時的分點判讀；找不到分頁或股票代號清單為空都安全回傳空
     DataFrame，不拋例外。
+
+    2026-10-01新增analysis_type參數，預設ANALYSIS_TYPE_BROKER_BRANCH——維持這個
+    函式原本的既有行為，app.py「多方驗證名單」頁面的「你上傳過的券商分點分析」
+    區塊只顯示籌碼分析，不會因為新增型態辨識功能而被不相干的紀錄混進來。傳None
+    表示不篩選類型（兩種都要）。
     """
     if not stock_codes:
         return pd.DataFrame()
 
-    all_hist = load_broker_branch_history(ss)  # 最新在前
+    all_hist = load_broker_branch_history(ss, analysis_type=analysis_type)  # 最新在前
     if all_hist.empty or "股票代號" not in all_hist.columns or "日期" not in all_hist.columns:
         return pd.DataFrame()
 
