@@ -24,7 +24,8 @@ position_manager.py
               或法人由買轉賣（三大合計轉負），
               或買超轉換率%跌破 SIGNAL_WEAKEN_CONVERSION_FLOOR
               （僅ETF追蹤範圍內股票適用，自選股沒有這些資料，此類條件會略過）
-  4. 技術面提早轉弱：KD/MACD醞釀死亡交叉、或出現頂部背離、或KD/MACD已經死亡交叉
+  4. 技術面提早轉弱：KD/MACD醞釀死亡交叉、或出現頂部背離、或KD/MACD已經死亡交叉、
+              或跌破近期支撐價位（2026-09-30新增，見price_fetcher.py的支撐壓力位置邏輯）
               （這組刻意設計成「提早」偵測，不等實際死叉發生才動作，見price_fetcher.py；
               自選股也適用，因為技術指標是即時抓取，不依賴ETF追蹤範圍）
 """
@@ -324,6 +325,9 @@ def evaluate_open_positions(ss, latest_cross_df: pd.DataFrame) -> pd.DataFrame:
             "KD訊號": None,
             "MACD訊號": None,
             "技術面共振": None,
+            "支撐價": None,
+            "壓力價": None,
+            "價格位置": None,
         }
 
         if latest is None or entry_price is None:
@@ -340,6 +344,9 @@ def evaluate_open_positions(ss, latest_cross_df: pd.DataFrame) -> pd.DataFrame:
         result["KD訊號"] = latest.get("KD訊號")
         result["MACD訊號"] = latest.get("MACD訊號")
         result["技術面共振"] = latest.get("技術面共振")
+        result["支撐價"] = latest.get("支撐價")
+        result["壓力價"] = latest.get("壓力價")
+        result["價格位置"] = latest.get("價格位置")
 
         if pd.notna(current_price) and entry_price:
             ret_pct = round((current_price - entry_price) / entry_price * 100, 2)
@@ -392,6 +399,14 @@ def evaluate_open_positions(ss, latest_cross_df: pd.DataFrame) -> pd.DataFrame:
             result["建議出場"] = True
             result["觸發原因"].append(f"🟠 {current_divergence}")
 
+        # 技術面提早轉弱（續）：跌破近期支撐（2026-09-30新增，見price_fetcher.py的
+        # 支撐壓力位置邏輯——支撐價是「時間上最近一個已確認的區域低點」，不是今天現算，
+        # 所以「今天收盤價 < 支撐價」是有意義的跌破判斷，不是同義反覆）
+        current_support = pd.to_numeric(latest.get("支撐價"), errors="coerce") if latest is not None else None
+        if pd.notna(current_support) and pd.notna(current_price) and current_price < current_support:
+            result["建議出場"] = True
+            result["觸發原因"].append(f"🟠 技術面轉弱（跌破近期支撐 {current_support}）")
+
         results.append(result)
 
         # 更新最後檢查日期
@@ -437,6 +452,12 @@ def get_entry_candidates(latest_cross_df: pd.DataFrame, max_positions: int = MAX
             notes.append(f"KD:{row.get('KD訊號')}")
         if str(row.get("MACD訊號", "")) in tech_strong_macd:
             notes.append(f"MACD:{row.get('MACD訊號')}")
+        # 2026-09-30新增：支撐壓力位置——「已突破近期壓力」或「接近支撐」都是值得留意的
+        # 進場時機參考（前者是轉強訊號，後者代表下檔相對有撐、風險相對較低），跟KD/MACD
+        # 一樣只是附加參考資訊，不影響上面已經篩完的候選名單本身。
+        price_pos = str(row.get("價格位置", ""))
+        if "已突破近期壓力" in price_pos or "接近支撐" in price_pos:
+            notes.append(f"位置:{price_pos}")
         return "、".join(notes)
 
     if "KD訊號" in candidates.columns or "MACD訊號" in candidates.columns:

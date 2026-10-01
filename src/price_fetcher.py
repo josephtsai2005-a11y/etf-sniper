@@ -78,6 +78,69 @@ KD_BEAR_SET = {"🔴 死亡交叉", "🍂 醞釀死亡交叉", "K<D"}
 # get_stock_price_single() 內的使用處與2026-09-03的緯穎(6669)案例說明。
 ABNORMAL_CHANGE_PCT_THRESHOLD = 20.0
 
+# 支撐壓力位置（2026-09-30新增）：用近期OHLC序列裡的「區域高低點」（swing high/low）
+# 當作支撐/壓力參考，回應「散戶技術分析課程」缺口分析裡「位置」這個選股步驟——判斷目前
+# 股價是接近/已跌破近期支撐（風險提高），還是接近/已突破近期壓力（可能是轉強訊號）。
+#
+# 區域高/低點定義：第i天的最高/最低價，如果在前後SWING_WINDOW天內都是最高/最低（含自己），
+# 就算一個區域高點/低點；取「時間上最近的一個」區域高點當壓力、區域低點當支撐——因為要求
+# 前後都要有SWING_WINDOW天可以確認，回傳的支撐/壓力一定是至少SWING_WINDOW個交易日前就已經
+# 走出來、確認過的價位，不是今天自己造出來的，這樣「今天價格相對這個價位的位置」才有意義
+# （包括「已經跌破/突破」這種情況，不是只有「價格永遠在支撐上方、壓力下方」這種同義反覆）。
+#
+# 已知限制：get_stock_price_single()目前只抓「當月+上月」（MACD不足26天才多抓上上月），
+# 大約40~90個交易日，不是完整半年/一年的歷史，這裡算出來的是「近期」支撐壓力，不是長期
+# 關鍵價位，沿用專案一貫「資料不足就明講」的原則，找不到時支撐/壓力留None，不硬湊數字。
+SWING_WINDOW = 3
+SUPPORT_RESISTANCE_NEAR_PCT = 3.0
+
+
+def _find_support_resistance(closes: list, highs: list, lows: list, window: int = SWING_WINDOW):
+    """
+    從近期OHLC序列找「時間上最近的一個區域低點」當支撐、「時間上最近的一個區域高點」當壓力，
+    見上方SWING_WINDOW常數旁的完整說明。回傳(support, resistance)，找不到時對應值為None
+    （序列太短、或高低價序列長度對不上時，兩者皆回傳None）。
+    """
+    n = len(closes)
+    if n < window * 2 + 1 or len(highs) != n or len(lows) != n:
+        return None, None
+
+    support, resistance = None, None
+    for i in range(n - window - 1, window - 1, -1):
+        window_highs = highs[i - window:i + window + 1]
+        window_lows = lows[i - window:i + window + 1]
+        if resistance is None and highs[i] == max(window_highs):
+            resistance = highs[i]
+        if support is None and lows[i] == min(window_lows):
+            support = lows[i]
+        if support is not None and resistance is not None:
+            break
+    return support, resistance
+
+
+def _price_position_label(latest_close, support, resistance) -> str:
+    """
+    把支撐/壓力價位轉成一句話的位置描述，供人直接看懂，不用自己算距離%。
+    優先判斷「已經跌破/突破」（比「接近」更值得注意），其次才是「接近但還沒到」，
+    兩者都沒有可用資料時回傳空字串（不是"區間中段"——那代表有資料但沒有特殊訊號，
+    跟「完全沒有支撐壓力資料可判斷」是不同情況，沿用專案一貫原則不混為一談）。
+    """
+    if support is not None and latest_close < support:
+        return f"🔴 已跌破近期支撐（{support}）"
+    if resistance is not None and latest_close > resistance:
+        return f"🟢 已突破近期壓力（{resistance}）"
+    if support is not None and latest_close > 0:
+        dist_pct = (latest_close - support) / latest_close * 100
+        if dist_pct <= SUPPORT_RESISTANCE_NEAR_PCT:
+            return f"🟡 接近支撐（{support}附近）"
+    if resistance is not None and latest_close > 0:
+        dist_pct = (resistance - latest_close) / latest_close * 100
+        if dist_pct <= SUPPORT_RESISTANCE_NEAR_PCT:
+            return f"🟡 接近壓力（{resistance}附近）"
+    if support is not None or resistance is not None:
+        return "區間中段"
+    return ""
+
 
 def get_trade_date() -> str:
     """跟institutional_fetcher.py／margin_fetcher.py用同一套判斷邏輯，避免各檔案各寫一份、標準不一致"""
@@ -524,6 +587,18 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
                 atr_val = round(sum(trs[-14:]) / 14, 2)
                 atr_pct = round(atr_val / latest_close * 100, 2) if latest_close else None
 
+        # ── 支撐壓力位置（2026-09-30新增）──────────────────────────
+        support_price, resistance_price, price_position = None, None, ""
+        if high_col and low_col and len(closes) >= SWING_WINDOW * 2 + 1:
+            highs_sr = df[high_col].tolist()
+            lows_sr = df[low_col].tolist()
+            support_price, resistance_price = _find_support_resistance(closes, highs_sr, lows_sr)
+            if support_price is not None:
+                support_price = round(support_price, 2)
+            if resistance_price is not None:
+                resistance_price = round(resistance_price, 2)
+            price_position = _price_position_label(latest_close, support_price, resistance_price)
+
         # ── 技術面共振燈號：把均線/MACD/KD三個不同週期指標的方向合成一個燈號 ──
         # 三個都同意才是「共振」；方向不一致時明確標示「分歧」，不強行合併成單一買賣訊號
         tech_score = 0
@@ -633,6 +708,9 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
             "布林壓縮": bb_signal,
             "ATR":      atr_val,
             "ATR%":     atr_pct,
+            "支撐價":   support_price,
+            "壓力價":   resistance_price,
+            "價格位置": price_position,
             "技術面共振": resonance_signal,
             "成交量":   volume,
             "成交金額": amount,
@@ -810,7 +888,8 @@ def enrich_with_prices(df: pd.DataFrame, top_n: Optional[int] = None) -> pd.Data
     price_cols = ["股票代號", "收盤價", "漲跌", "漲跌幅%", "資料日期", "MA5", "MA10", "MA20", "站上MA20",
               "均線排列", "連續站上月線天數", "量能比", "K值", "D值", "KD訊號",
               "DIF", "MACD", "MACD柱狀", "MACD訊號", "背離警示",
-              "布林上軌", "布林下軌", "布林位置", "布林壓縮", "ATR", "ATR%", "技術面共振",
+              "布林上軌", "布林下軌", "布林位置", "布林壓縮", "ATR", "ATR%",
+              "支撐價", "壓力價", "價格位置", "技術面共振",
               "成交量", "成交金額", "技術指標狀態"]
     price_df = price_df[[c for c in price_cols if c in price_df.columns]]
 
