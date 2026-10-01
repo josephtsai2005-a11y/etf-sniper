@@ -306,7 +306,7 @@ def cross_with_etf(
 
     merged = smart_df.merge(
         inst_df[["股票代號","外資買賣超","投信買賣超","自營買賣超","三大合計","買超法人數","法人訊號",
-                  "三大合計買進","三大合計賣出"]],
+                  "三大合計買進","三大合計賣出","抓取日期"]],
         on="股票代號", how="left",
     )
 
@@ -360,6 +360,27 @@ def cross_with_etf(
                 f"成交量={r['成交量']:.0f} → 換手強度={r['法人換手強度%']:.1f}%（理論上不應超過100%）"
             )
         log.warning(f"法人換手強度異常筆數：{over_100_mask.sum()}/{len(merged)}")
+
+        # 2026-10-01新增診斷：懷疑根因是法人資料(抓取日期)跟個股成交量資料(資料日期)
+        # 沒對齊到同一個交易日——get_stock_price_single()只拿TWSE STOCK_DAY目前抓得到
+        # 的最後一筆，不會主動比對是否等於法人資料用的trade_date；如果STOCK_DAY當下
+        # 還沒更新到當天，就會悄悄用到前一天（通常量較小）的成交量，除出來的比例就可能
+        # 超過100%。這裡先只加log驗證假設，不改變現有計算或顯示邏輯（維持原本comment
+        # 裡講的「先記log，確認根因後再決定是否要對顯示值加上限」）。
+        if "資料日期" in merged.columns:
+            mismatched = merged.loc[over_100_mask].copy()
+            mismatched["抓取日期"] = mismatched["抓取日期"].astype(str) if "抓取日期" in mismatched.columns else ""
+            mismatched["資料日期"] = mismatched["資料日期"].astype(str)
+            date_mismatch = mismatched[mismatched["資料日期"] != mismatched["抓取日期"]]
+            if not date_mismatch.empty:
+                for _, r in date_mismatch.head(10).iterrows():
+                    log.warning(
+                        f"法人換手強度異常根因疑似日期沒對齊：{r['股票代號']} {r['股票名稱']} "
+                        f"法人資料抓取日期={r['抓取日期']} vs 成交量資料日期={r['資料日期']}"
+                    )
+                log.warning(f"法人換手強度異常中，日期沒對齊的筆數：{len(date_mismatch)}/{over_100_mask.sum()}")
+            else:
+                log.warning("法人換手強度異常，但資料日期跟法人抓取日期一致——根因不是日期沒對齊，需要再查其他可能性（例如股票代號對應錯位）")
 
     # 買超轉換率%：淨買超佔法人總交易量比例，越接近100%代表訊號一致性越高
     merged["買超轉換率%"] = (

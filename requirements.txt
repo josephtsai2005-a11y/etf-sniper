@@ -7,7 +7,7 @@ google-auth==2.27.0
 google-auth-oauthlib==1.2.0
 beautifulsoup4==4.12.3
 lxml==5.2.2
-streamlit==1.35.0
+streamlit==1.41.0
 plotly==5.18.0
 pytz==2026.2
 feedparser==6.0.11

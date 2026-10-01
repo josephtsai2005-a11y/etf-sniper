@@ -349,6 +349,7 @@ def evaluate_open_positions(ss, latest_cross_df: pd.DataFrame) -> pd.DataFrame:
         result["壓力價"] = latest.get("壓力價")
         result["價格位置"] = latest.get("價格位置")
         result["K線型態"] = latest.get("K線型態")
+        result["量能訊號"] = latest.get("量能訊號")
 
         if pd.notna(current_price) and entry_price:
             ret_pct = round((current_price - entry_price) / entry_price * 100, 2)

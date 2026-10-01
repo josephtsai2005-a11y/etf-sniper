@@ -541,6 +541,9 @@ if page == "多方驗證名單":
         filtered[avail].reset_index(drop=True),
         use_container_width=True, height=520, hide_index=True,
         column_config={
+            "排名":       st.column_config.Column("排名", pinned=True),
+            "股票代號":   st.column_config.TextColumn("股票代號", pinned=True),
+            "股票名稱":   st.column_config.TextColumn("股票名稱", pinned=True),
             "持有ETF數":  st.column_config.ProgressColumn("ETF持有", min_value=0, max_value=34, format="%d"),
             "買超法人數": st.column_config.ProgressColumn("買超法人", min_value=0, max_value=3, format="%d"),
             "綜合評分":   st.column_config.NumberColumn("綜合評分", format="%.1f ⭐"),
@@ -2050,6 +2053,11 @@ elif page == "持倉監控":
                     f"KD：{row.get('KD訊號') or 'N/A'}｜MACD：{row.get('MACD訊號') or 'N/A'}｜"
                     f"技術面共振：{row.get('技術面共振') or 'N/A'}"
                 )
+                st.caption(
+                    f"支撐：{row.get('支撐價') or 'N/A'}｜壓力：{row.get('壓力價') or 'N/A'}｜"
+                    f"價格位置：{row.get('價格位置') or 'N/A'}｜K線型態：{row.get('K線型態') or '無'}｜"
+                    f"量能訊號：{row.get('量能訊號') or '無'}"
+                )
                 if row.get("資料來源") == "即時查詢備援":
                     st.caption("ℹ️ 此股不在ETF追蹤範圍，法人/評分相關的出場條件不適用，僅監控停損/停利/技術面")
 
@@ -2212,6 +2220,11 @@ elif page == "持倉監控":
         st.dataframe(
             candidates[[c for c in display_cols if c in candidates.columns]],
             use_container_width=True, hide_index=True,
+            column_config={
+                "排名":     st.column_config.Column("排名", pinned=True),
+                "股票代號": st.column_config.TextColumn("股票代號", pinned=True),
+                "股票名稱": st.column_config.TextColumn("股票名稱", pinned=True),
+            },
         )
 
     st.markdown("---")
