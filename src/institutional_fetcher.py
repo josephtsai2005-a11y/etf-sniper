@@ -306,7 +306,8 @@ def cross_with_etf(
 
     merged = smart_df.merge(
         inst_df[["股票代號","外資買賣超","投信買賣超","自營買賣超","三大合計","買超法人數","法人訊號",
-                  "三大合計買進","三大合計賣出","抓取日期"]],
+                  "三大合計買進","三大合計賣出","抓取日期",
+                  "外資買進","外資賣出","投信買進","投信賣出","自營買進","自營賣出"]],
         on="股票代號", how="left",
     )
 
@@ -386,6 +387,43 @@ def cross_with_etf(
     merged["買超轉換率%"] = (
         merged["三大合計"] / inst_volume.replace(0, pd.NA) * 100
     ).round(1).fillna(0)
+
+    # 2026-10-02新增診斷：驗證「三大法人彼此對作、互相抵銷」這個假設是否存在——
+    # 如果個別法人(外資/投信/自營)各自的買超轉換率%明顯比合計的買超轉換率%高，代表
+    # 個別法人自己其實買賣方向很乾淨、明確，只是三方方向不一致互相抵銷，導致合計後
+    # 看起來買超轉換率%很小；如果個別法人自己的比例也一樣很小，代表單純是每個法人
+    # 自己進出量就很大，拆分沒有額外資訊量。先只記log驗證，不新增顯示欄位，等累積
+    # 幾天log資料後再決定是否要正式拆成3個欄位呈現。
+    _diag_cols = []
+    for _name in ("外資", "投信", "自營"):
+        _buy = merged.get(f"{_name}買進")
+        _sell = merged.get(f"{_name}賣出")
+        _net = merged.get(f"{_name}買賣超")
+        if _buy is None or _sell is None or _net is None:
+            continue
+        _vol = (_buy + _sell).replace(0, pd.NA)
+        _col = f"_diag_{_name}買超轉換率%"
+        merged[_col] = (_net / _vol * 100).round(1).fillna(0)
+        _diag_cols.append(_col)
+
+    if _diag_cols:
+        _strong_individual = merged[_diag_cols].abs().max(axis=1)
+        _cancel_mask = (merged["買超轉換率%"].abs() < 1) & (_strong_individual >= 10)
+        if _cancel_mask.any():
+            _sample = merged.loc[_cancel_mask, ["股票代號", "股票名稱", "買超轉換率%"] + _diag_cols].head(10)
+            for _, r in _sample.iterrows():
+                log.warning(
+                    f"買超轉換率%疑似法人互相抵銷：{r['股票代號']} {r['股票名稱']} "
+                    f"合計買超轉換率%={r['買超轉換率%']}｜外資={r['_diag_外資買超轉換率%']}"
+                    f"｜投信={r['_diag_投信買超轉換率%']}｜自營={r['_diag_自營買超轉換率%']}"
+                )
+            log.warning(f"買超轉換率%疑似法人對作抵銷筆數：{_cancel_mask.sum()}/{len(merged)}")
+        else:
+            log.warning(
+                "買超轉換率%檢查：這批資料沒有發現法人互相抵銷造成合計買超轉換率%偏低的情況，"
+                "偏低可能單純是個別法人自己進出量就很大"
+            )
+        merged = merged.drop(columns=_diag_cols)
 
     # ── 融資融券整合：判斷「量多量少是換手還是誘多出貨」──────────
     if margin_df is not None and not margin_df.empty:
