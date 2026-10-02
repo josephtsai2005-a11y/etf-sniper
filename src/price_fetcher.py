@@ -367,6 +367,7 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
     prev2_month_date = (prev_month_first.replace(day=1) - timedelta(days=1)).strftime("%Y%m") + "01"
 
     url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
+    tpex_url = "https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock"
 
     def fetch_month(date_str):
         params = {"response": "json", "date": date_str, "stockNo": stock_code}
@@ -377,6 +378,51 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
         fields = data.get("fields", [])
         rows = data.get("data", [])
         return pd.DataFrame(rows, columns=fields)
+
+    # 2026-10-02新增：上櫃(TPEx)股票備援來源——像鈊象(3293)這類股票實際掛牌在證券
+    # 櫃檯買賣中心(TPEx)，不是台灣證券交易所(TWSE)，TWSE的STOCK_DAY本來就查不到這類
+    # 股票（回傳「沒有符合條件的資料」是正常、非暫時性的回應，不是bug也不需要重試）。
+    # 使用者確認這類股票仍然需要技術分析/資料收集來輔助判斷，所以改成TWSE查無資料時
+    # 自動改查TPEx。
+    # 用瀏覽器DevTools實際抓包確認過TPEx這個端點的真實格式：是POST、日期參數用西元年
+    # "YYYY/MM/01"（注意不是TWSE慣用的「YYYYMMDD」，也不是TPEx自己回傳資料列裡日期
+    # 本身的民國年格式「115/10/01」，三種日期格式分屬不同地方，容易搞混）。欄位名稱、
+    # 成交量單位（張 vs 股）都跟TWSE不同，這裡統一轉換成跟TWSE STOCK_DAY一樣的欄位
+    # 名稱（日期/開盤價/最高價/最低價/收盤價/漲跌價差/成交股數/成交金額）跟股數單位
+    # （張→股要×1000），讓後面所有技術指標計算程式碼完全不用改、直接共用。
+    def fetch_month_tpex(year, month):
+        date_str = f"{year:04d}/{month:02d}/01"
+        try:
+            resp = SESSION.post(
+                tpex_url,
+                data={"code": stock_code, "date": date_str, "response": "json"},
+                timeout=15,
+            )
+            data = resp.json()
+        except Exception:
+            return pd.DataFrame()
+        if data.get("stat") != "ok" or not data.get("tables"):
+            return pd.DataFrame()
+        table = data["tables"][0]
+        rows = table.get("data", [])
+        fields = table.get("fields", [])
+        if not rows or not fields:
+            return pd.DataFrame()
+        raw = pd.DataFrame(rows, columns=fields)
+        out = pd.DataFrame()
+        out["日期"] = raw.get("日 期", raw.iloc[:, 0])
+        out["開盤價"] = raw.get("開盤")
+        out["最高價"] = raw.get("最高")
+        out["最低價"] = raw.get("最低")
+        out["收盤價"] = raw.get("收盤")
+        out["漲跌價差"] = raw.get("漲跌")
+        _vol = raw.get("成交張數")
+        if _vol is not None:
+            out["成交股數"] = _vol.astype(str).str.replace(",", "").astype(float) * 1000
+        _amt = raw.get("成交仟元")
+        if _amt is not None:
+            out["成交金額"] = _amt.astype(str).str.replace(",", "").astype(float) * 1000
+        return out
 
     last_error = None
     for attempt in range(retries + 1):
@@ -397,8 +443,18 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
                     df = pd.concat([df_prev2, df], ignore_index=True)
 
             if df.empty:
-                # TWSE本身回傳「無資料」（例如真的還沒開始交易），重試沒有意義，直接放棄
-                return {}
+                # 2026-10-02新增：TWSE查無資料時，改試TPEx（該股票可能是上櫃股票）
+                tpex_this = fetch_month_tpex(today.year, today.month)
+                tpex_prev = fetch_month_tpex(prev_month_first.year, prev_month_first.month)
+                df = pd.concat([tpex_prev, tpex_this], ignore_index=True) if not tpex_prev.empty else tpex_this
+                if len(df) < 26:
+                    prev2_first = prev_month_first.replace(day=1) - timedelta(days=1)
+                    tpex_prev2 = fetch_month_tpex(prev2_first.year, prev2_first.month)
+                    if not tpex_prev2.empty:
+                        df = pd.concat([tpex_prev2, df], ignore_index=True)
+                if df.empty:
+                    # TWSE、TPEx都查無資料，代表真的查無此股票代號或今日尚無交易
+                    return {}
             break  # 成功拿到資料，跳出重試迴圈
         except Exception as e:
             last_error = e
