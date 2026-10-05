@@ -414,7 +414,7 @@ def evaluate_open_positions(ss, latest_cross_df: pd.DataFrame) -> pd.DataFrame:
         # K線型態判斷——上吊線/看跌吞噬都是短線反轉警訊，跟KD/MACD死叉醞釀屬於同一等級
         # 的「提早」訊號，不等實際跌破支撐才動作）
         candle_pattern_now = str(latest.get("K線型態", "")) if latest is not None else ""
-        if "上吊線" in candle_pattern_now or "看跌吞噬" in candle_pattern_now:
+        if any(p in candle_pattern_now for p in ("上吊線", "看跌吞噬", "烏雲蓋頂", "昏星", "黑三鴉")):
             result["建議出場"] = True
             result["觸發原因"].append(f"🟠 技術面轉弱（{candle_pattern_now}）")
 
@@ -472,7 +472,7 @@ def get_entry_candidates(latest_cross_df: pd.DataFrame, max_positions: int = MAX
         # 2026-10-01新增：K線出現轉強型態——鎚子線/看漲吞噬都是短線反轉訊號，
         # 同樣只是附加參考資訊，不影響篩選結果本身。
         candle_pos = str(row.get("K線型態", ""))
-        if "鎚子線" in candle_pos or "看漲吞噬" in candle_pos:
+        if any(p in candle_pos for p in ("鎚子線", "看漲吞噬", "刺穿線", "晨星", "紅三兵")):
             notes.append(f"K線:{candle_pos}")
         # 2026-10-01新增：量能萎縮築底——股價在近期低檔、量能明顯萎縮，是常見的落底
         # 訊號之一，同樣只是附加參考資訊，不影響篩選結果本身。

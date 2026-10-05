@@ -149,17 +149,31 @@ VOLUME_DIVERGENCE_LOOKBACK = 10  # 跟KD頂部背離用同一個回看天數，�
 VOLUME_DRY_UP_RATIO = 0.7        # 量能比(今量/近5日均量) <= 此值，視為「量縮」
 VOLUME_SPIKE_RATIO = 2.5         # 量能比 >= 此值，視為「異常爆量」
 VOLUME_BOTTOM_LOOKBACK = 20      # 判斷「量能萎縮築底」要回看的天數（股價是否在相對低檔）
+CANDLE_STAR_MAX_RATIO = 0.3      # 晨星/昏星：中間「星」K棒實體 ≤ 第一根實體的這個比例，才算夠小
+VOLUME_CONFIRM_MIN_RATIO = 1.0   # 型態量能確認門檻：成交量低於5日均量時，標註訊號偏弱
 
 
-def _detect_candlestick_pattern(opens: list, highs: list, lows: list, closes: list) -> str:
+def _detect_candlestick_pattern(opens: list, highs: list, lows: list, closes: list,
+                                 volume_ratio: float = None) -> str:
     """
-    判斷最新一根K棒屬於哪種基本型態（十字線/鎚子線/上吊線/吞噬），
-    回傳中文標籤字串；偵測不到型態、或資料不足時回傳空字串。
+    判斷最新K棒屬於哪種型態，回傳中文標籤字串；偵測不到型態、或資料不足時回傳空字串。
 
-    鎚子線/上吊線是同一種K棒形狀（小實體+長下影線），差別在出現之前
-    是下跌還是上漲（用 CANDLE_TREND_LOOKBACK 判斷盤前走勢）；
-    吞噬需要比對最新兩根K棒的實體關係，也用同一套前段趨勢來判斷
-    是看漲吞噬還是看跌吞噬。
+    涵蓋三類型態（依複雜度由高到低判斷，符合其一就回傳，不會重複判斷）：
+    - 3天型態（晨星/昏星/紅三兵/黑三鴉）：看最新3根K棒的組合
+    - 2天型態（吞噬/烏雲蓋頂/刺穿線）：看最新2根K棒的實體關係
+    - 1天型態（十字線/鎚子線/上吊線）：只看最新1根K棒的形狀
+
+    鎚子線/上吊線是同一種K棒形狀（小實體+長下影線），吞噬/烏雲蓋頂/刺穿線、
+    晨星/昏星則分別互為多空鏡像，差別都在「出現之前是下跌還是上漲」
+    （用 CANDLE_TREND_LOOKBACK 判斷盤前走勢）——型態本身只是買賣力道交戰
+    留下的結果，脫離趨勢背景單獨看沒有意義，所以每一種型態都會檢查前段走勢
+    方向是否吻合，不是只看K棒形狀就下結論。
+
+    volume_ratio（今日成交量/近5日均量，沿用price_fetcher.py既有算法）為選填：
+    有提供時，新增的6種型態如果量能不足（低於VOLUME_CONFIRM_MIN_RATIO），
+    會在標籤後面加註「量能不足」，提醒這個型態還沒有量能佐證、訊號強度較弱；
+    原本就有的十字線/鎚子線/上吊線/吞噬4種型態維持原樣不受影響，避免改變
+    既有判斷邏輯已經依賴這些字串做比對的地方（例如position_manager.py）。
     """
     n = len(closes)
     if n < CANDLE_TREND_LOOKBACK + 2 or len(opens) != n or len(highs) != n or len(lows) != n:
@@ -185,6 +199,60 @@ def _detect_candlestick_pattern(opens: list, highs: list, lows: list, closes: li
     else:
         prior_trend = "flat"
 
+    def _vol_note(label: str) -> str:
+        """新增的6種型態專用：量能不足時加註提醒，沒有volume_ratio資料時原樣回傳"""
+        if volume_ratio is not None and volume_ratio > 0 and volume_ratio < VOLUME_CONFIRM_MIN_RATIO:
+            return f"{label}（量能不足，訊號偏弱）"
+        return label
+
+    # ── 3天型態（晨星/昏星/紅三兵/黑三鴉，優先判斷，資料量足夠才檢查）──
+    if n >= CANDLE_TREND_LOOKBACK + 4:
+        o1, h1, l1, c1 = opens[-3], highs[-3], lows[-3], closes[-3]
+        o2, c2 = opens[-2], closes[-2]
+        if None not in (o1, h1, l1, c1, o2, c2) and h1 != l1:
+            body1 = abs(c1 - o1)
+            range1 = h1 - l1
+            body2 = abs(c2 - o2)
+
+            trend2_ref = closes[-4 - CANDLE_TREND_LOOKBACK]
+            trend2_base = closes[-4]
+            if trend2_ref is None or trend2_base is None:
+                trend_before_3day = "flat"
+            elif trend2_base > trend2_ref:
+                trend_before_3day = "up"
+            elif trend2_base < trend2_ref:
+                trend_before_3day = "down"
+            else:
+                trend_before_3day = "flat"
+
+            is_long_body1 = range1 > 0 and body1 / range1 > CANDLE_BODY_DOJI_PCT
+            is_long_body3 = rng > 0 and body / rng > CANDLE_BODY_DOJI_PCT
+            is_star = body1 > 0 and body2 <= body1 * CANDLE_STAR_MAX_RATIO
+
+            # 晨星：長黑 + 小實體跳空 + 長紅收回第一根實體之上 → 落底訊號
+            if (is_long_body1 and is_star and is_long_body3
+                    and c1 < o1 and max(o2, c2) < c1 and c > o
+                    and c > (o1 + c1) / 2 and trend_before_3day == "down"):
+                return _vol_note("🌅 晨星（落底訊號）")
+
+            # 昏星：長紅 + 小實體跳空 + 長黑收回第一根實體之下 → 見頂訊號
+            if (is_long_body1 and is_star and is_long_body3
+                    and c1 > o1 and min(o2, c2) > c1 and c < o
+                    and c < (o1 + c1) / 2 and trend_before_3day == "up"):
+                return _vol_note("🌆 昏星（見頂訊號）")
+
+            # 紅三兵：連3根長紅、收盤一天比一天高、每天開在前一天實體內 → 多頭續強
+            if (c1 > o1 and c2 > o2 and c > o
+                    and c1 < c2 < c
+                    and o1 < o2 < c1 and o2 < o < c2):
+                return _vol_note("🟩 紅三兵（多頭續強）")
+
+            # 黑三鴉：連3根長黑、收盤一天比一天低、每天開在前一天實體內 → 空頭續弱
+            if (c1 < o1 and c2 < o2 and c < o
+                    and c1 > c2 > c
+                    and o1 > o2 > c1 and o2 > o > c2):
+                return _vol_note("🟥 黑三鴉（空頭續弱）")
+
     # ── 吞噬（兩根K棒實體比較，優先判斷）──
     prev_o, prev_c = opens[-2], closes[-2]
     if prev_o is not None and prev_c is not None and body > 0:
@@ -196,6 +264,13 @@ def _detect_candlestick_pattern(opens: list, highs: list, lows: list, closes: li
                 return "🟢 看漲吞噬"
             if prev_c > prev_o and c < o and prior_trend != "down":
                 return "🔴 看跌吞噬"
+
+        # ── 烏雲蓋頂／刺穿線（兩根K棒部分穿入對方實體，但沒有完全吞噬）──
+        prev_mid = (prev_o + prev_c) / 2
+        if prev_c > prev_o and o > prev_c and prev_o < c < prev_mid and prior_trend == "up":
+            return _vol_note("☁️ 烏雲蓋頂（見頂訊號）")
+        if prev_c < prev_o and o < prev_c and prev_mid < c < prev_o and prior_trend == "down":
+            return _vol_note("🗡️ 刺穿線（落底訊號）")
 
     # ── 十字線 ──
     if rng > 0 and body / rng <= CANDLE_BODY_DOJI_PCT:
@@ -759,7 +834,8 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
             opens_cd = df[open_col].tolist()
             highs_cd = df[high_col].tolist()
             lows_cd = df[low_col].tolist()
-            candle_pattern = _detect_candlestick_pattern(opens_cd, highs_cd, lows_cd, closes)
+            candle_pattern = _detect_candlestick_pattern(opens_cd, highs_cd, lows_cd, closes,
+                volume_ratio=volume_ratio)
 
         # ── 技術面共振燈號：把均線/MACD/KD三個不同週期指標的方向合成一個燈號 ──
         # 三個都同意才是「共振」；方向不一致時明確標示「分歧」，不強行合併成單一買賣訊號
