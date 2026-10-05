@@ -2229,6 +2229,147 @@ elif page == "持倉監控":
 
     st.markdown("---")
 
+    # ── ④ 投資筆記 ──────────────────────────
+    st.subheader("④ 投資筆記 —— 記錄判斷，練習紀律")
+    st.caption("追蹤一檔股票從「觀察」到「持有」到「賣出」整個過程的心得，系統會自動依「我的持倉」"
+               "目前狀態判斷階段（持有中/已賣出/追蹤中），不用自己選。填了「預期方向」的筆記，"
+               "系統會即時比對目前股價，算出命中率，幫你回頭檢視自己的判斷準不準——這不是嚴謹回測，"
+               "純粹是給自己練習紀律跟自我檢視用的")
+
+    from investment_journal import (
+        add_journal_entry, delete_journal_entry, get_journal_by_code,
+        get_tracked_codes, evaluate_journal_accuracy, get_accuracy_summary,
+        determine_stage, STAGE_WATCHING, DIRECTION_UP, DIRECTION_DOWN,
+    )
+
+    journal_tab1, journal_tab2 = st.tabs(["🔍 追蹤筆記（尚未投資）", "📈 持倉筆記（已投資）"])
+
+    all_positions_for_journal = _load_positions(ss)
+    holding_codes = []
+    if not all_positions_for_journal.empty:
+        for _, r in all_positions_for_journal.drop_duplicates("股票代號").iterrows():
+            holding_codes.append((r["股票代號"], r["股票名稱"]))
+
+    journal_eval_df = evaluate_journal_accuracy(ss, cross_df)  # 整頁只算一次，下面三處都重複使用
+
+    with journal_tab2:
+        if not holding_codes:
+            st.info("目前沒有任何持倉紀錄（含已出場），請先在上方②新增持倉")
+        else:
+            code_options = {f"{c} {n}": c for c, n in holding_codes}
+            picked_label = st.selectbox("選擇股票", list(code_options.keys()), key="journal_holding_pick")
+            picked_code = code_options[picked_label]
+            picked_name = next(n for c, n in holding_codes if c == picked_code)
+            st.caption(f"目前階段：{determine_stage(ss, picked_code)}")
+
+            default_price = None
+            match_price = cross_df[cross_df["股票代號"].astype(str) == picked_code] if not cross_df.empty else pd.DataFrame()
+            if not match_price.empty:
+                default_price = pd.to_numeric(match_price.iloc[0].get("收盤價"), errors="coerce")
+
+            with st.form(f"journal_form_holding_{picked_code}"):
+                note_price = st.number_input(
+                    "當時股價（預設帶入今日收盤價，可自行修改成實際你看盤時的價格）",
+                    value=float(default_price) if default_price and pd.notna(default_price) else 0.0,
+                    key=f"journal_price_h_{picked_code}")
+                note_content = st.text_area("心得內容", key=f"journal_content_h_{picked_code}",
+                                             placeholder="例如：法人連續買超但股價還沒反應，我判斷接下來會補漲...")
+                note_direction = st.radio("預期方向（選填，填了才會被計入準確度統計）",
+                                           ["不填（純記錄）", DIRECTION_UP, DIRECTION_DOWN],
+                                           key=f"journal_dir_h_{picked_code}", horizontal=True)
+                nc1, nc2 = st.columns(2)
+                with nc1:
+                    note_target = st.number_input("目標價（選填）", min_value=0.0, step=0.1, key=f"journal_target_h_{picked_code}")
+                with nc2:
+                    note_stop = st.number_input("停損價（選填）", min_value=0.0, step=0.1, key=f"journal_stop_h_{picked_code}")
+
+                if st.form_submit_button("📝 新增筆記", type="primary"):
+                    if not note_content:
+                        st.error("請填寫心得內容")
+                    else:
+                        direction_val = "" if note_direction == "不填（純記錄）" else note_direction
+                        add_journal_entry(
+                            ss, picked_code, picked_name, note_price if note_price > 0 else None,
+                            note_content, direction_val,
+                            note_target if note_target > 0 else None,
+                            note_stop if note_stop > 0 else None,
+                        )
+                        st.success("已新增投資筆記！")
+                        st.rerun()
+
+            st.markdown("##### 歷史筆記")
+            hist = journal_eval_df[journal_eval_df["股票代號"] == picked_code] if not journal_eval_df.empty else pd.DataFrame()
+            if hist.empty:
+                st.caption("這檔股票還沒有任何筆記")
+            else:
+                for _, r in hist.sort_values("日期時間", ascending=False).iterrows():
+                    st.markdown(f"**{r['日期時間']}**｜{r['階段']}｜當時股價{r['當時股價']}"
+                                f"{'｜目前'+str(r.get('目前股價','')) if r.get('目前股價') else ''}｜{r.get('判定','')}")
+                    st.caption(r["心得內容"])
+                    if st.button("🗑️ 刪除", key=f"del_journal_h_{r.name}"):
+                        delete_journal_entry(ss, int(r.name))
+                        st.rerun()
+                    st.markdown("---")
+
+    with journal_tab1:
+        tracked = get_tracked_codes(ss, STAGE_WATCHING)
+        st.caption("追蹤中的股票清單直接從投資筆記本身累積，不需要另外維護自選股清單——"
+                   "第一次要追蹤一檔新股票，直接在下面輸入代號開始寫第一筆筆記就會自動出現在清單裡")
+
+        new_or_existing = st.text_input("股票代號（已追蹤過的股票會自動帶出名稱）", key="journal_watch_code")
+        if new_or_existing:
+            watch_name = next((n for c, n in tracked if c == new_or_existing), "")
+            match_price2 = cross_df[cross_df["股票代號"].astype(str) == new_or_existing] if not cross_df.empty else pd.DataFrame()
+            if not watch_name and not match_price2.empty:
+                watch_name = match_price2.iloc[0].get("股票名稱", "")
+
+            with st.form(f"journal_form_watch_{new_or_existing}"):
+                watch_final_name = st.text_input("股票名稱（查無資料時手動輸入）", value=watch_name,
+                                                  key=f"journal_watch_name_{new_or_existing}")
+                default_price2 = pd.to_numeric(match_price2.iloc[0].get("收盤價"), errors="coerce") if not match_price2.empty else None
+                note_price2 = st.number_input("當時股價", value=float(default_price2) if default_price2 and pd.notna(default_price2) else 0.0,
+                                               key=f"journal_price_w_{new_or_existing}")
+                note_content2 = st.text_area("心得內容", key=f"journal_content_w_{new_or_existing}",
+                                              placeholder="例如：題材剛發酵，先觀察法人會不會跟進，還沒想買...")
+                note_direction2 = st.radio("預期方向（選填）", ["不填（純記錄）", DIRECTION_UP, DIRECTION_DOWN],
+                                            key=f"journal_dir_w_{new_or_existing}", horizontal=True)
+
+                if st.form_submit_button("📝 新增追蹤筆記", type="primary"):
+                    if not note_content2:
+                        st.error("請填寫心得內容")
+                    else:
+                        direction_val2 = "" if note_direction2 == "不填（純記錄）" else note_direction2
+                        add_journal_entry(
+                            ss, new_or_existing, watch_final_name, note_price2 if note_price2 > 0 else None,
+                            note_content2, direction_val2,
+                        )
+                        st.success("已新增追蹤筆記！")
+                        st.rerun()
+
+        if not tracked:
+            st.caption("目前沒有追蹤中的股票筆記")
+        else:
+            st.markdown("##### 追蹤清單")
+            for code, name in tracked:
+                with st.expander(f"🔍 {code} {name}"):
+                    sub_hist = journal_eval_df[journal_eval_df["股票代號"] == code] if not journal_eval_df.empty else pd.DataFrame()
+                    for _, r in sub_hist.sort_values("日期時間", ascending=False).iterrows():
+                        st.markdown(f"**{r['日期時間']}**｜當時股價{r['當時股價']}"
+                                    f"{'｜目前'+str(r.get('目前股價','')) if r.get('目前股價') else ''}｜{r.get('判定','')}")
+                        st.caption(r["心得內容"])
+                        if st.button("🗑️ 刪除", key=f"del_journal_w_{r.name}"):
+                            delete_journal_entry(ss, int(r.name))
+                            st.rerun()
+
+    st.markdown("##### 準確度統計（依階段分組）")
+    summary_df = get_accuracy_summary(journal_eval_df)
+    if summary_df.empty:
+        st.caption("目前還沒有足夠的筆記可以統計（需要至少填過一筆「預期方向」，且漲跌幅超過1%才會列入結果）")
+    else:
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
     # ── 已出場歷史 ──────────────────────────
     with st.expander("📜 已出場歷史"):
         all_positions = _load_positions(ss)

@@ -257,6 +257,24 @@ def update_position(ss, row_index: int, **fields) -> bool:
     return True
 
 
+def get_position_status(ss, code: str):
+    """
+    查詢某股票代號目前在「我的持倉」的狀態，供其他模組（例如investment_journal.py）
+    判斷這檔股票現在算「持有中」還是「已出場」還是「從來沒有紀錄過」，
+    不用自己重新讀一次Sheet或動用底層的_load_positions()。
+    回傳：STATUS_OPEN（持有中）/ STATUS_CLOSED（已出場）/ None（完全沒有紀錄過）
+    """
+    df = _load_positions(ss)
+    if df.empty:
+        return None
+    rows = df[df["股票代號"] == str(code)]
+    if rows.empty:
+        return None
+    if (rows["狀態"] == STATUS_OPEN).any():
+        return STATUS_OPEN
+    return STATUS_CLOSED
+
+
 def evaluate_open_positions(ss, latest_cross_df: pd.DataFrame) -> pd.DataFrame:
     """
     每天比對最新資料，評估所有「持有中」的部位是否觸發出場條件
