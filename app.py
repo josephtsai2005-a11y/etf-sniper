@@ -2843,6 +2843,22 @@ elif page == "手動籌碼分析":
     # 一次塞很多張不相干的截圖進來
     bb_effective_max = MAX_PATTERN_IMAGES if bb_analysis_type == ANALYSIS_TYPE_PATTERN else MAX_ANALYSIS_IMAGES
 
+    # 2026-10-06新增：籌碼分析模式下，同一批上傳的圖片常常本來就會混到走勢圖截圖，
+    # 使用者不想為了型態辨識再重傳一次。勾選後會額外跑一次型態辨識，用同一批圖片，
+    # AI靠build_pattern_recognition_prompt()既有的保守設計自動忽略跟型態無關的
+    # 截圖（不強行分析），不需要使用者自己標記哪幾張是走勢圖。只在籌碼分析模式下
+    # 顯示這個勾選框——如果使用者本來就直接選「型態辨識」模式，代表上傳的本來就是
+    # 走勢圖，不需要反向勾選同時做籌碼分析。
+    bb_also_pattern = False
+    if bb_analysis_type == ANALYSIS_TYPE_BROKER_BRANCH:
+        bb_also_pattern = st.checkbox(
+            "☑️ 同時做型態辨識（用同一批圖片，不用重傳）",
+            key="bb_also_pattern",
+            help="如果這批截圖裡也包含走勢圖，勾選後會額外用這批圖片跑一次型態辨識，"
+                 "AI會自動忽略跟型態辨識無關的截圖（籌碼表格/技術指標數字等），兩種"
+                 "分析結果各自存成一筆歷史紀錄。會多呼叫一次AI，費用跟著加倍。",
+        )
+
     # 2026-09-23再追加：使用者反映截圖通常要分好幾次才截得齊（分點統計/走勢＋技術
     # 指標＋籌碼總覽近5日/近5週，一檔股票實測常常要準備到6~8張），一次file_uploader
     # 選取視窗不一定能一次選齊。改成「累積上傳清單」：每次選檔後按「加入清單」，
@@ -2901,7 +2917,7 @@ elif page == "手動籌碼分析":
             save_broker_branch_analysis, load_broker_branch_history,
         )
 
-        with st.spinner("Claude 正在判讀截圖，請稍候（圖片較多時可能需要30~60秒）..."):
+        with st.spinner("Claude 正在判讀截圖，請稍候（圖片較多時可能需要30~60秒，勾選同時型態辨識會更久）..."):
             image_bytes_list = [item["bytes"] for item in pending]
             try:
                 _ss_for_history = get_spreadsheet()
@@ -2915,22 +2931,51 @@ elif page == "手動籌碼分析":
                 analysis = analyze_chart_pattern_screenshot(
                     image_bytes_list, bb_code.strip(), bb_name.strip(), recent_history=recent_history
                 )
+                pattern_analysis = None
             else:
                 analysis = analyze_broker_branch_screenshot(
                     image_bytes_list, bb_code.strip(), bb_name.strip(), recent_history=recent_history
                 )
+                pattern_analysis = None
+                if bb_also_pattern:
+                    try:
+                        _pattern_hist_df = load_broker_branch_history(
+                            _ss_for_history, stock_code=bb_code.strip(), analysis_type=ANALYSIS_TYPE_PATTERN
+                        )
+                        _pattern_recent_history = (
+                            _pattern_hist_df.head(3).iloc[::-1].to_dict("records")
+                            if not _pattern_hist_df.empty else None
+                        )
+                    except Exception:
+                        _pattern_recent_history = None
+                    pattern_analysis = analyze_chart_pattern_screenshot(
+                        image_bytes_list, bb_code.strip(), bb_name.strip(),
+                        recent_history=_pattern_recent_history, max_images=MAX_ANALYSIS_IMAGES,
+                    )
 
         if not analysis:
             st.error("分析失敗，可能是AI回應逾時或圖片無法判讀，請重試一次；若持續失敗請確認上方的ANTHROPIC_API_KEY設定。")
         else:
             st.success("分析完成")
+            if bb_also_pattern:
+                st.markdown(f"**📊 {bb_analysis_type}**")
             st.markdown(analysis)
+
+            if bb_also_pattern:
+                st.markdown("---")
+                if pattern_analysis:
+                    st.markdown(f"**📐 {ANALYSIS_TYPE_PATTERN}（同時分析，使用同一批圖片）**")
+                    st.markdown(pattern_analysis)
+                else:
+                    st.caption("⚠️ 型態辨識未能產出結果（可能AI回應逾時，或這批圖片裡沒有找到可判讀的走勢圖），"
+                               "可以晚點單獨切換到「型態辨識」模式重新分析")
 
             # 2026-10-01新增：型態辨識時，在AI判讀旁邊附上系統既有的技術面資料當
             # 佐證（量能/KD/MACD/支撐壓力/K線型態），直接查「多方驗證名單」既有
             # 欄位，不靠AI從截圖估測——這些資料只在該股票仍在「多方驗證名單」
             # 追蹤範圍內才查得到，清單外的自選股查無資料時會明講，不會假裝有
-            if bb_analysis_type == ANALYSIS_TYPE_PATTERN:
+            # 2026-10-06調整：同時分析模式下，只要型態辨識真的有產出結果，也一併顯示
+            if bb_analysis_type == ANALYSIS_TYPE_PATTERN or (bb_also_pattern and pattern_analysis):
                 try:
                     _multi_df = load_sheet(SHEET_MULTI)
                     _match = (_multi_df[_multi_df["股票代號"].astype(str) == bb_code.strip()]
@@ -2961,6 +3006,11 @@ elif page == "手動籌碼分析":
                 save_broker_branch_analysis(
                     ss, bb_code.strip(), bb_name.strip(), analysis, today_str, analysis_type=bb_analysis_type
                 )
+                if bb_also_pattern and pattern_analysis:
+                    save_broker_branch_analysis(
+                        ss, bb_code.strip(), bb_name.strip(), pattern_analysis, today_str,
+                        analysis_type=ANALYSIS_TYPE_PATTERN,
+                    )
                 st.caption("✅ 已存檔，可在下方「歷史分析紀錄」查看")
                 st.cache_data.clear()
             except Exception as e:

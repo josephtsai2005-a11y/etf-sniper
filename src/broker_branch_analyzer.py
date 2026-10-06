@@ -362,6 +362,12 @@ def build_pattern_recognition_prompt(
     呼叫端會把這些既有欄位整理成文字跟AI的型態判讀並排顯示，不需要另外截圖讓
     AI從圖片裡估測——估測本來就不如系統既有的精確計算準，這裡的prompt也明確
     要求AI不要分析成交量/KD/MACD。
+
+    2026-10-06追加收斂型態（三角形/楔形）：使用者提出現有4種型態沒有涵蓋「兩條
+    趨勢線逐漸收斂」這類常見的變盤前兆型態，用同樣保守的條件式語氣（不預測方向，
+    只講突破後的慣例解讀），加為第5種。同時追加「完全沒有走勢圖時要明講」的指示，
+    配合app.py新增的「同時做型態辨識」合併分析模式（跟籌碼分析用同一批上傳圖片，
+    AI自行忽略不相關的籌碼截圖，不需要使用者額外標記）。
     """
     stock_label = f"{stock_code} {stock_name}".strip() or "（使用者未提供股票代號/名稱）"
 
@@ -401,6 +407,14 @@ def build_pattern_recognition_prompt(
 - 頭肩頂/頭肩底：三個波段高點(或低點)中，中間一個明顯高於(低於)左右兩個，且左右
   兩個高度(低點)大致相近（頸線概念），是常見的反轉型態
 - W底(雙重底)/M頭(雙重頂)：股價兩次測試接近的低點(高點)後反轉，型態呈現W或M的形狀
+- 收斂型態（三角形/楔形）：股價波動幅度逐漸收斂，高點一波比一波低、低點一波比一波高
+  （兩條趨勢線逐漸靠攏），通常視為變盤前兆；方向未定，需等實際突破上緣或下緣，才能
+  判斷後續是延續原趨勢還是反轉
+
+如果上傳的圖片裡完全沒有看到連續的價格走勢圖（例如只有籌碼數字表格、技術指標面板、
+分點統計這類跟走勢圖無關的畫面），請直接說明「這批圖片裡沒有找到可供型態判讀的走勢
+圖」，不要勉強從不相關的截圖湊出型態分析——這點在同時上傳籌碼分析與型態辨識用的
+混合截圖時特別重要，寧可明講沒看到，也不要硬套一個型態上去。
 
 股票：{stock_label}
 
@@ -430,7 +444,8 @@ def build_pattern_recognition_prompt(
 
 
 def analyze_chart_pattern_screenshot(
-    image_bytes_list, stock_code: str, stock_name: str, recent_history: list = None
+    image_bytes_list, stock_code: str, stock_name: str, recent_history: list = None,
+    max_images: int = MAX_PATTERN_IMAGES,
 ) -> str:
     """
     上傳一張或多張走勢圖截圖 -> 呼叫Claude vision做K線型態辨識 -> 回傳分析文字
@@ -438,16 +453,25 @@ def analyze_chart_pattern_screenshot(
 
     刻意跟analyze_broker_branch_screenshot()保持平行但獨立的結構（同樣的圖片
     前處理/呼叫Claude vision邏輯），差別只在呼叫build_pattern_recognition_
-    prompt()而不是build_broker_branch_prompt()、張數上限用MAX_PATTERN_IMAGES
+    prompt()而不是build_broker_branch_prompt()、張數上限預設用MAX_PATTERN_IMAGES
     而不是MAX_ANALYSIS_IMAGES——型態辨識是使用者在app.py明確選擇的獨立分析
     模式，不是自動偵測畫面類型，不合併進同一個函式，避免兩種分析邏輯混在一起
     難以各自調整。
+
+    max_images：2026-10-06新增。單獨使用「型態辨識」模式時維持預設的
+    MAX_PATTERN_IMAGES(3)上限（此時使用者只會上傳走勢圖，3張已經足夠，也避免
+    不小心上傳太多無關截圖）。app.py「同時做型態辨識」的合併分析模式下，呼叫端
+    會傳入跟籌碼分析相同的完整圖片清單（可能混雜籌碼截圖），這裡允許呼叫端傳入
+    較高的上限（例如MAX_ANALYSIS_IMAGES），讓AI有機會看到混合上傳裡真正的走勢圖，
+    不會因為走勢圖剛好排在上傳順序較後面就被截斷在前3張之外——
+    build_pattern_recognition_prompt()本身已經要求AI自動忽略跟型態辨識無關的
+    截圖，不會因為圖片變多就降低判讀品質。
     """
     from ai_analyzer import call_claude_vision
 
     if isinstance(image_bytes_list, (bytes, bytearray)):
         image_bytes_list = [image_bytes_list]
-    image_bytes_list = list(image_bytes_list)[:MAX_PATTERN_IMAGES]
+    image_bytes_list = list(image_bytes_list)[:max_images]
     if not image_bytes_list:
         return ""
 
