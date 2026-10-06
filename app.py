@@ -2269,6 +2269,8 @@ elif page == "持倉監控":
             c3.metric("累計損益", f"{total_pnl:+,.0f} 元")
 
 elif page == "投資筆記":
+    from position_manager import _load_positions
+
     st.header("📝 投資筆記 —— 記錄判斷，練習紀律")
     st.caption("追蹤一檔股票從「觀察」到「持有」到「賣出」整個過程的心得，系統會自動依「我的持倉」"
                "目前狀態判斷階段（持有中/已賣出/追蹤中），不用自己選。填了「預期方向」的筆記，"
