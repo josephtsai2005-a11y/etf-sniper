@@ -7,6 +7,26 @@ TW_TZ = pytz.timezone("Asia/Taipei")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 MODEL = "claude-sonnet-4-6"
 
+def _append_truncation_warning(text: str, data: dict) -> str:
+    """
+    如果Claude API回應是因為撞到max_tokens上限被截斷（stop_reason == "max_tokens"），
+    在文字結尾加上明顯警示，讓呼叫端/UI/Sheets存檔都能看到，不會讓使用者誤以為這是
+    一份完整、AI自然結束的分析。
+
+    2026-10-06新增：使用者反映一份籌碼分析報告在小節「3.」標題後面整段消失，但畫面
+    照常顯示「分析完成」、照常存檔——查出來是call_claude_vision()的max_tokens設太低
+    （1000），AI寫到一半被截斷，但回傳的文字本身看起來就是正常字串，程式完全無從
+    分辨「AI本來就寫這麼短」跟「AI被攔腰截斷」，使用者也無從察覺。改成讀取API回應的
+    stop_reason欄位（Anthropic官方文件：撞到max_tokens上限時固定回傳"max_tokens"），
+    偵測到就附加警示，call_claude()跟call_claude_vision()共用這個helper，兩邊都有
+    同樣的截斷風險（結構完全相同，差別只在有沒有帶圖片）。
+    """
+    if data.get("stop_reason") == "max_tokens":
+        log.warning("Claude API 回應被 max_tokens 截斷，已於文字結尾附加警示")
+        return text + "\n\n⚠️ **（以上內容因長度限制被截斷，可能沒有寫完，建議重新分析一次）**"
+    return text
+
+
 def call_claude(prompt, system="", max_tokens=2000, retries=2):
     """
     呼叫Claude API，含重試機制。
@@ -46,7 +66,7 @@ def call_claude(prompt, system="", max_tokens=2000, retries=2):
                     _time.sleep(wait)
                     continue
                 return ""
-            return data["content"][0]["text"]
+            return _append_truncation_warning(data["content"][0]["text"], data)
         except Exception as e:
             last_error = e
             if attempt < retries:
@@ -109,7 +129,7 @@ def call_claude_vision(prompt, images, system="", max_tokens=1000, retries=2):
                     _time.sleep(wait)
                     continue
                 return ""
-            return data["content"][0]["text"]
+            return _append_truncation_warning(data["content"][0]["text"], data)
         except Exception as e:
             last_error = e
             if attempt < retries:

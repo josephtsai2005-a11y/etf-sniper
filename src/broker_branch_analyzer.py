@@ -484,7 +484,7 @@ def analyze_chart_pattern_screenshot(
     prompt = build_pattern_recognition_prompt(
         stock_code, stock_name, recent_history=recent_history, num_images=len(prepared_images)
     )
-    return call_claude_vision(prompt, prepared_images, max_tokens=1000)
+    return call_claude_vision(prompt, prepared_images, max_tokens=2500)
 
 
 def analyze_broker_branch_screenshot(
@@ -520,7 +520,7 @@ def analyze_broker_branch_screenshot(
     prompt = build_broker_branch_prompt(
         stock_code, stock_name, recent_history=recent_history, num_images=len(prepared_images)
     )
-    return call_claude_vision(prompt, prepared_images, max_tokens=1000)
+    return call_claude_vision(prompt, prepared_images, max_tokens=2500)
 
 
 def save_broker_branch_analysis(ss, stock_code: str, stock_name: str, analysis_text: str, trade_date: str,
