@@ -75,7 +75,8 @@ def determine_stage(ss, code: str) -> str:
 
 
 def add_journal_entry(ss, code: str, name: str, current_price, content: str,
-                       direction: str = "", target_price=None, stop_price=None) -> bool:
+                       direction: str = "", target_price=None, stop_price=None,
+                       entry_date=None) -> bool:
     """
     新增一筆投資筆記。階段由determine_stage()自動判斷，不是使用者手動選的，
     確保「階段」永遠反映真實持倉狀態，不會因為使用者選錯而失真。
@@ -87,6 +88,12 @@ def add_journal_entry(ss, code: str, name: str, current_price, content: str,
     direction: DIRECTION_UP/DIRECTION_DOWN其中之一，或留空""代表純記錄心得、
                不做方向預測（這種筆記之後在準確度比對會被標記「未填預期方向」，
                不計入命中率統計，不是錯誤)
+
+    entry_date: 2026-10-06新增。date物件，預設None代表用「現在」的日期（維持原本
+                行為）。投資筆記獨立成頁面後，使用者可能會在另一個分頁同步看其他
+                資料，事後才回來補寫某一天的心得，這裡讓日期可以指定成實際想記錄
+                的那一天，不被系統當下的日期綁死。時間部分固定用「送出當下」的
+                時間，純粹是為了同一天多筆筆記之間還能排序，沒有特別意義。
     """
     stage = determine_stage(ss, code)
 
@@ -99,8 +106,10 @@ def add_journal_entry(ss, code: str, name: str, current_price, content: str,
             ws = ss.worksheet(SHEET_JOURNAL)
             if not ws.row_values(1):
                 ws.append_row(JOURNAL_COLS)
+        now = datetime.now(TW_TZ)
+        date_part = entry_date.strftime("%Y-%m-%d") if entry_date is not None else now.strftime("%Y-%m-%d")
         row = [
-            datetime.now(TW_TZ).strftime("%Y-%m-%d %H:%M"),
+            f"{date_part} {now.strftime('%H:%M')}",
             str(code), name, stage,
             current_price if current_price is not None else "",
             content, direction,
