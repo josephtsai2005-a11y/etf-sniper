@@ -130,15 +130,22 @@ def _load_positions(ss) -> pd.DataFrame:
 def _write_positions(ss, df: pd.DataFrame):
     """整表覆寫回Sheets"""
     def _do_write():
+        # 先把資料轉成Sheets API能接受的格式（統一轉字串，避開numpy
+        # int64/float64等型別無法JSON序列化的問題），確認資料準備好了
+        # 才清空舊資料——避免ws.clear()之後才發現這批資料寫不進去，
+        # 造成資料整個消失、且沒有任何東西能補回去。
+        header = df.columns.tolist()
+        rows = df.fillna("").astype(str).values.tolist()
+
         existing = [ws.title for ws in ss.worksheets()]
         if SHEET_POSITIONS not in existing:
             ws = ss.add_worksheet(title=SHEET_POSITIONS, rows=500, cols=15)
         else:
             ws = ss.worksheet(SHEET_POSITIONS)
         ws.clear()
-        ws.append_row(df.columns.tolist())
-        if not df.empty:
-            ws.append_rows(df.fillna("").values.tolist(), value_input_option="USER_ENTERED")
+        ws.append_row(header)
+        if rows:
+            ws.append_rows(rows, value_input_option="USER_ENTERED")
 
     try:
         _with_retry(_do_write)
