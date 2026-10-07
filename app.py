@@ -2289,7 +2289,18 @@ elif page == "投資筆記":
     ss = get_spreadsheet()
     cross_df = load_sheet(SHEET_MULTI)
 
-    journal_tab1, journal_tab2 = st.tabs(["🔍 追蹤筆記（尚未投資）", "📈 持倉筆記（已投資）"])
+    JOURNAL_TAB_WATCH = "🔍 追蹤筆記（尚未投資）"
+    JOURNAL_TAB_HOLD = "📈 持倉筆記（已投資）"
+    if "journal_active_tab" not in st.session_state:
+        st.session_state.journal_active_tab = JOURNAL_TAB_WATCH
+    # 用session_state記住的radio取代st.tabs()——st.tabs()選到的分頁只存在前端，
+    # 不會存進session_state，表單送出/刪除筆記呼叫st.rerun()後st.tabs()會重置回
+    # 第一個分頁，導致畫面從「持倉筆記」跳回「追蹤筆記」。改用radio+session_state
+    # 綁定key，st.rerun()後能正確記住使用者原本停留的分頁。
+    st.radio(
+        "筆記類型", [JOURNAL_TAB_WATCH, JOURNAL_TAB_HOLD],
+        key="journal_active_tab", horizontal=True, label_visibility="collapsed",
+    )
 
     all_positions_for_journal = _load_positions(ss)
     holding_codes = []
@@ -2299,7 +2310,7 @@ elif page == "投資筆記":
 
     journal_eval_df = evaluate_journal_accuracy(ss, cross_df)  # 整頁只算一次，下面三處都重複使用
 
-    with journal_tab2:
+    if st.session_state.journal_active_tab == JOURNAL_TAB_HOLD:
         if not holding_codes:
             st.info("目前沒有任何持倉紀錄（含已出場），請先在「持倉監控」頁面新增持倉")
         else:
@@ -2362,7 +2373,7 @@ elif page == "投資筆記":
                         st.rerun()
                     st.markdown("---")
 
-    with journal_tab1:
+    else:
         tracked = get_tracked_codes(ss, STAGE_WATCHING)
         st.caption("追蹤中的股票清單直接從投資筆記本身累積，不需要另外維護自選股清單——"
                    "第一次要追蹤一檔新股票，直接在下面輸入代號開始寫第一筆筆記就會自動出現在清單裡")
