@@ -2022,11 +2022,51 @@ elif page == "持倉監控":
         add_position, close_position, delete_position, update_position,
         evaluate_open_positions, get_entry_candidates,
         _load_positions, STATUS_OPEN, STATUS_CLOSED, DATA_SOURCE_ETF, DATA_SOURCE_ADHOC,
+        get_closed_trades, get_monthly_net_income,
         MAX_POSITIONS, ENTRY_MIN_SCORE, ENTRY_MIN_CONVERSION, ENTRY_MAX_PRICE,
         DEFAULT_STOP_LOSS_PCT, DEFAULT_TAKE_PROFIT_PCT, suggest_stop_loss_from_atr,
     )
 
     cross_df = load_sheet("多方驗證名單")
+
+    # ── 💰 損益總表（已實現，含0.3%證券交易稅）──────────────
+    st.subheader("💰 損益總表")
+    st.caption("只計算「已出場」的已實現交易（分批賣出的每一筆都獨立列出），已扣除0.3%證券交易稅（賣出金額×0.3%，不含券商手續費）")
+
+    closed_trades = get_closed_trades(ss)
+    if closed_trades.empty:
+        st.info("目前還沒有任何已出場的交易紀錄")
+    else:
+        total_net = closed_trades["淨損益"].sum()
+        total_tax = closed_trades["交易稅"].sum()
+        win_count = int((closed_trades["淨損益"] > 0).sum())
+        win_rate = win_count / len(closed_trades) * 100
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("累計淨損益（稅後）", f"{total_net:+,.0f} 元")
+        m2.metric("累計交易稅", f"{total_tax:,.0f} 元")
+        m3.metric("交易筆數", f"{len(closed_trades)} 筆")
+        m4.metric("勝率", f"{win_rate:.1f}%（{win_count}賺/{len(closed_trades)-win_count}賠）")
+
+        monthly = get_monthly_net_income(ss)
+        if not monthly.empty:
+            st.markdown("**📅 每月淨收入**")
+            mc1, mc2 = st.columns([2, 3])
+            with mc1:
+                st.dataframe(monthly, use_container_width=True, hide_index=True)
+            with mc2:
+                chart_df = monthly.sort_values("年月").set_index("年月")[["淨損益"]]
+                st.bar_chart(chart_df, use_container_width=True)
+
+        st.markdown("**📋 交易明細**")
+        detail_cols = ["股票代號", "股票名稱", "進場日期", "進場價", "累計股數",
+                        "出場日期", "出場價", "實際報酬率%", "損益金額", "交易稅", "淨損益", "出場原因"]
+        st.dataframe(
+            closed_trades.sort_values("出場日期", ascending=False)[[c for c in detail_cols if c in closed_trades.columns]],
+            use_container_width=True, hide_index=True,
+        )
+
+    st.markdown("---")
 
     # ── ① 目前持倉出場評估 ──────────────────────────
     st.subheader("① 目前持倉 —— 出場訊號檢查")
@@ -2069,7 +2109,7 @@ elif page == "持倉監控":
                 ridx = int(row["row_index"])
 
                 if row["建議出場"]:
-                    c1, c2 = st.columns(2)
+                    c1, c2, c3 = st.columns(3)
                     with c1:
                         exit_price = st.number_input(
                             "出場價",
@@ -2077,11 +2117,25 @@ elif page == "持倉監控":
                             key=f"exit_price_{ridx}"
                         )
                     with c2:
+                        max_sell_shares = float(shares_val) if shares_val and shares_val > 0 else None
+                        exit_shares = st.number_input(
+                            "股數（可分批賣出，預設全部）",
+                            value=float(shares_val) if shares_val else 0.0,
+                            min_value=0.0, max_value=max_sell_shares, step=1.0,
+                            key=f"exit_shares_{ridx}"
+                        )
+                    with c3:
                         if st.button("✅ 確認出場", key=f"close_{ridx}", type="primary"):
-                            today_str = datetime.now().strftime("%Y-%m-%d")
-                            close_position(ss, ridx, today_str, exit_price, "; ".join(row["觸發原因"]))
-                            st.success("已記錄出場！")
-                            st.rerun()
+                            if exit_shares <= 0:
+                                st.warning("請輸入要賣出的股數")
+                            else:
+                                today_str = datetime.now().strftime("%Y-%m-%d")
+                                close_position(ss, ridx, today_str, exit_price, "; ".join(row["觸發原因"]), exit_shares=exit_shares)
+                                if shares_val and exit_shares < shares_val:
+                                    st.success(f"已記錄分批出場！賣出{exit_shares:.0f}股，剩餘{shares_val - exit_shares:.0f}股繼續持有")
+                                else:
+                                    st.success("已記錄出場！")
+                                st.rerun()
 
                 st.markdown("---")
                 st.caption("✏️ 修改或刪除這筆持倉")

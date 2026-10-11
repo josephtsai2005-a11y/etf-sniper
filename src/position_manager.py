@@ -222,17 +222,99 @@ def add_position(ss, code: str, name: str, entry_date: str, entry_price: float, 
     return "新增"
 
 
-def close_position(ss, row_index: int, exit_date: str, exit_price: float, exit_reason: str):
-    """手動關閉一筆持倉（使用者實際賣出時呼叫，會保留歷史紀錄，狀態改為已出場）"""
+def close_position(ss, row_index: int, exit_date: str, exit_price: float, exit_reason: str,
+                    exit_shares: float = None):
+    """
+    手動關閉一筆持倉（使用者實際賣出時呼叫，會保留歷史紀錄，狀態改為已出場）
+
+    2026-10-10新增exit_shares（支援分批賣出）：預設None（或0/空值）代表全部出場，
+    沿用原本行為——這筆紀錄直接轉為「已出場」。若指定股數小於目前「累計股數」，
+    視為分批賣出：原紀錄保留「持有中」狀態、累計股數扣減為賣出後的剩餘股數；另外
+    新增一筆獨立的「已出場」紀錄代表這次賣出的部分（進場價沿用原加權平均成本、
+    累計股數＝這次賣出股數），讓損益總表／已出場歷史能各自列出每一次分批賣出的
+    損益，不會互相覆蓋或遺漏。若輸入股數超過目前累計股數（例如打錯），自動以目前
+    累計股數為準，避免賣出股數比持有股數還多的錯誤資料。
+    """
     df = _load_positions(ss)
     if row_index >= len(df):
         return False
-    df.at[row_index, "狀態"] = STATUS_CLOSED
-    df.at[row_index, "出場日期"] = exit_date
-    df.at[row_index, "出場價"] = exit_price
-    df.at[row_index, "出場原因"] = exit_reason
+
+    current_shares = float(df.at[row_index, "累計股數"] or 0)
+    sell_shares = float(exit_shares) if exit_shares not in (None, "", 0) else current_shares
+    if sell_shares <= 0:
+        return False
+    sell_shares = min(sell_shares, current_shares)
+
+    if sell_shares >= current_shares:
+        df.at[row_index, "狀態"] = STATUS_CLOSED
+        df.at[row_index, "出場日期"] = exit_date
+        df.at[row_index, "出場價"] = exit_price
+        df.at[row_index, "出場原因"] = exit_reason
+        _write_positions(ss, df)
+        return True
+
+    remaining_shares = current_shares - sell_shares
+    sold_row = df.loc[row_index].copy()
+    sold_row["累計股數"] = sell_shares
+    sold_row["狀態"] = STATUS_CLOSED
+    sold_row["出場日期"] = exit_date
+    sold_row["出場價"] = exit_price
+    sold_row["出場原因"] = exit_reason
+    df.at[row_index, "累計股數"] = remaining_shares
+    df = pd.concat([df, pd.DataFrame([sold_row])], ignore_index=True)
     _write_positions(ss, df)
+    log.info(f"分批出場：{df.at[row_index,'股票代號']} 賣出{sell_shares}股，剩餘{remaining_shares}股持有中")
     return True
+
+
+
+
+TRANSACTION_TAX_RATE = 0.003  # 證券交易稅：現股賣出金額的0.3%，由賣方負擔
+
+
+def get_closed_trades(ss) -> pd.DataFrame:
+    """
+    取得所有「已出場」的交易紀錄，並計算每筆的實際報酬率%／損益金額（稅前）／
+    交易稅／淨損益（稅後）。
+
+    2026-10-10新增：分批賣出時，close_position()會把每次賣出拆成獨立的一列
+    「已出場」紀錄，所以這裡回傳的每一列就是一次完整的「交易結果」（不管賺或賠），
+    可以直接用來做損益總表／每月淨收入統計。交易稅只算「證券交易稅0.3%」（賣出
+    金額×0.3%），不含券商手續費（每人折數不同，無法用單一數字計算，如果之後要
+    加，需要讓使用者自訂費率）。
+    """
+    df = _load_positions(ss)
+    if df.empty:
+        return pd.DataFrame()
+    closed = df[df["狀態"] == STATUS_CLOSED].copy()
+    if closed.empty:
+        return pd.DataFrame()
+    closed["進場價"] = pd.to_numeric(closed["進場價"], errors="coerce")
+    closed["出場價"] = pd.to_numeric(closed["出場價"], errors="coerce")
+    closed["累計股數"] = pd.to_numeric(closed.get("累計股數"), errors="coerce")
+    closed["實際報酬率%"] = ((closed["出場價"] - closed["進場價"]) / closed["進場價"] * 100).round(2)
+    closed["損益金額"] = ((closed["出場價"] - closed["進場價"]) * closed["累計股數"]).round(0)
+    closed["交易稅"] = (closed["出場價"] * closed["累計股數"] * TRANSACTION_TAX_RATE).round(0)
+    closed["淨損益"] = closed["損益金額"] - closed["交易稅"]
+    return closed
+
+
+def get_monthly_net_income(ss) -> pd.DataFrame:
+    """
+    依「出場日期」的年-月分組，加總每個月的淨損益（已扣除0.3%證券交易稅）與交易筆數。
+    回傳欄位：年月、交易筆數、淨損益，依月份新到舊排序。沒有任何已出場紀錄時回傳空表。
+    """
+    closed = get_closed_trades(ss)
+    if closed.empty:
+        return pd.DataFrame()
+    closed = closed.copy()
+    closed["年月"] = closed["出場日期"].astype(str).str[:7]
+    monthly = closed.groupby("年月").agg(
+        交易筆數=("股票代號", "count"),
+        淨損益=("淨損益", "sum"),
+    ).reset_index()
+    monthly["淨損益"] = monthly["淨損益"].round(0)
+    return monthly.sort_values("年月", ascending=False).reset_index(drop=True)
 
 
 def delete_position(ss, row_index: int) -> bool:
