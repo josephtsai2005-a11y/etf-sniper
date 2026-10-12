@@ -2042,11 +2042,12 @@ elif page == "持倉監控":
         win_count = int((closed_trades["淨損益"] > 0).sum())
         win_rate = win_count / len(closed_trades) * 100
 
-        m1, m2, m3, m4 = st.columns(4)
+        m1, m2, m3, m4 = st.columns(4, gap="small")
         m1.metric("累計淨損益（稅後）", f"{total_net:+,.0f} 元")
         m2.metric("累計交易稅", f"{total_tax:,.0f} 元")
         m3.metric("交易筆數", f"{len(closed_trades)} 筆")
-        m4.metric("勝率", f"{win_rate:.1f}%（{win_count}賺/{len(closed_trades)-win_count}賠）")
+        m4.metric("勝率", f"{win_rate:.1f}%")
+        st.caption(f"💰 {win_count} 賺／{len(closed_trades) - win_count} 賠")
 
         monthly = get_monthly_net_income(ss)
         if not monthly.empty:
