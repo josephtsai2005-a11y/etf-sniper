@@ -2075,9 +2075,14 @@ elif page == "持倉監控":
         monthly = get_monthly_net_income(ss)
         if not monthly.empty:
             st.markdown("**📅 每月淨收入**")
+            if len(monthly) >= 2 and monthly.iloc[0]["較上月"]:
+                st.caption(f"📈 {monthly.iloc[0]['年月']} 較上月：{monthly.iloc[0]['較上月']}")
+            if len(monthly) < 3:
+                st.caption(f"⚠️ 目前只累積{len(monthly)}個月的資料，月增率波動本來就大，僅供參考，建議累積3個月以上再判斷趨勢是否穩定")
             mc1, mc2 = st.columns([2, 3])
             with mc1:
-                st.dataframe(monthly, use_container_width=True, hide_index=True)
+                display_cols = [c for c in ["年月", "交易筆數", "淨損益", "較上月"] if c in monthly.columns]
+                st.dataframe(monthly[display_cols], use_container_width=True, hide_index=True)
             with mc2:
                 chart_df = monthly.sort_values("年月").set_index("年月")[["淨損益"]]
                 st.bar_chart(chart_df, use_container_width=True)

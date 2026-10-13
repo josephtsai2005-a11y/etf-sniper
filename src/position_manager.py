@@ -302,7 +302,22 @@ def get_closed_trades(ss) -> pd.DataFrame:
 def get_monthly_net_income(ss) -> pd.DataFrame:
     """
     依「出場日期」的年-月分組，加總每個月的淨損益（已扣除0.3%證券交易稅）與交易筆數。
-    回傳欄位：年月、交易筆數、淨損益，依月份新到舊排序。沒有任何已出場紀錄時回傳空表。
+    回傳欄位：年月、交易筆數、淨損益、較上月、成長率%，依月份新到舊排序。
+    沒有任何已出場紀錄時回傳空表。
+
+    2026-10-13新增「較上月」「成長率%」：使用者目前沒有在系統裡登記本金，沒辦法算出
+    有意義的月報酬率%（報酬率的分母本來就该是本金，不是損益金額本身），改成比較
+    「這個月淨損益 vs 上個月淨損益」的月增率，概念上比照看一間公司的月營收成長率，
+    不需要知道本金，也能看出獲利是不是在加速成長。
+
+    成長率刻意不是單純的pd.Series.pct_change()，因為損益有正有負，直接做百分比變化
+    在「由虧轉盈」「由盈轉虧」「虧損縮小/擴大」這幾種情況下，算出來的數字會誤導人
+    （例如上月虧損100、本月獲利50，pct_change()算出來是-150%，看起來像變差，其實是
+    轉虧為盈）。改成依上月/本月的正負號分四種情況，分別給清楚的文字描述：
+    - 上月為正、本月為正：正常的成長率%（成長率%欄位也會填入這個數字，其餘情況為None）
+    - 上月<=0、本月>0：「🔄 轉虧為盈」
+    - 上月>0、本月<=0：「⚠️ 由盈轉虧」
+    - 上月<=0、本月<=0：比較虧損金額的絕對值是縮小還是擴大，避免正負號造成誤導
     """
     closed = get_closed_trades(ss)
     if closed.empty:
@@ -314,6 +329,40 @@ def get_monthly_net_income(ss) -> pd.DataFrame:
         淨損益=("淨損益", "sum"),
     ).reset_index()
     monthly["淨損益"] = monthly["淨損益"].round(0)
+    monthly = monthly.sort_values("年月").reset_index(drop=True)  # 先升序才能算月增率
+
+    growth_labels = [""]
+    growth_values = [None]
+    for i in range(1, len(monthly)):
+        prev = monthly.at[i - 1, "淨損益"]
+        curr = monthly.at[i, "淨損益"]
+        if prev > 0 and curr > 0:
+            pct = (curr - prev) / prev * 100
+            growth_labels.append(f"{pct:+.1f}%")
+            growth_values.append(round(pct, 1))
+        elif prev <= 0 and curr > 0:
+            growth_labels.append("🔄 轉虧為盈")
+            growth_values.append(None)
+        elif prev > 0 and curr <= 0:
+            growth_labels.append("⚠️ 由盈轉虧")
+            growth_values.append(None)
+        else:
+            prev_loss, curr_loss = abs(prev), abs(curr)
+            if prev_loss == 0:
+                growth_labels.append("")
+                growth_values.append(None)
+            elif curr_loss < prev_loss:
+                pct = (prev_loss - curr_loss) / prev_loss * 100
+                growth_labels.append(f"虧損縮小{pct:.1f}%")
+                growth_values.append(None)
+            else:
+                pct = (curr_loss - prev_loss) / prev_loss * 100
+                growth_labels.append(f"虧損擴大{pct:.1f}%")
+                growth_values.append(None)
+
+    monthly["較上月"] = growth_labels
+    monthly["成長率%"] = growth_values
+
     return monthly.sort_values("年月", ascending=False).reset_index(drop=True)
 
 
