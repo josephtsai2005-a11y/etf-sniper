@@ -449,3 +449,96 @@ def compute_consecutive_distribution(ss, lookback_days: int = 15, min_streak: in
     張數）、最新持股數(張)
     """
     return _compute_consecutive_streak(ss, lookback_days, min_streak, direction="down")
+
+
+
+def compute_first_holding_dates(ss, max_lookback_days: int = 200) -> pd.DataFrame:
+    """
+    題材ETF布局追蹤：對每一組目前仍持有中的(股票代號, ETF代碼)，往回找「連續不中斷持有」
+    的起始日——不像_compute_consecutive_streak()只看漲跌方向，這裡只要持股數>0就算持有中，
+    中間有加碼、減碼都不影響，只要沒有變成0（或完全消失）就算連續。
+
+    用途：找出「哪一檔ETF、布局了哪個題材裡的哪一檔股票、布局了多久/從哪天開始」——比單純的
+    今日訊號更能看出是不是有意識的長期卡位動作，用於題材總覽的「ETF布局明細」。
+
+    資料來源：「盤後原始數據庫」（跟_compute_consecutive_streak同一份資料）。
+    max_lookback_days預設200個交易日（這個專案資料庫從2026-06下旬開始累積，200天涵蓋
+    得到目前所有歷史，且get_all_values()本來就會抓回整張表，不會因為lookback_days加大
+    而多耗Sheets API額度）。
+
+    回傳欄位：股票代號、股票名稱、ETF代碼、布局天數、首次布局日期、資料不足（bool，True代表
+    這組合從資料庫最早一天就已經持有，無法判斷真正起始日，布局天數只是「資料庫涵蓋範圍內的
+    下限」，不是真正天數）。
+
+    沿用期貨代號過濾（_looks_like_futures_or_invalid()）跟股票分割保護（±50%單日跳動視為
+    分割，從分割後重新起算），跟_compute_consecutive_streak()同一套判斷邏輯。
+    """
+    history_df = load_history_from_sheets(ss, days=max_lookback_days)
+    if history_df.empty:
+        log.warning("題材ETF布局追蹤：無歷史資料可分析")
+        return pd.DataFrame()
+
+    code_col, name_col, etf_col, share_col = "股票代號", "股票名稱", "ETF代碼", "持股數"
+    date_col = next((c for c in history_df.columns if "日期" in c or "抓取" in c), None)
+    if not date_col:
+        log.warning("題材ETF布局追蹤：找不到日期欄")
+        return pd.DataFrame()
+
+    history_df = history_df.copy()
+    history_df[code_col] = history_df[code_col].astype(str).str.strip()
+    history_df[share_col] = pd.to_numeric(
+        history_df[share_col].astype(str).str.replace(",", ""), errors="coerce"
+    ).fillna(0)
+
+    codes_all = history_df[code_col].unique().tolist()
+    valid_codes = {c for c in codes_all if not _looks_like_futures_or_invalid(c)}
+    history_df = history_df[history_df[code_col].isin(valid_codes)]
+
+    dates_sorted = sorted(history_df[date_col].unique())
+    if not dates_sorted:
+        return pd.DataFrame()
+    latest_date = dates_sorted[-1]
+
+    records = []
+    grouped = history_df.groupby([code_col, etf_col])
+    for (code, etf), g in grouped:
+        g = g.sort_values(date_col)
+        latest_row = g[g[date_col] == latest_date]
+        if latest_row.empty or float(latest_row[share_col].iloc[0]) <= 0:
+            continue  # 已出清/今天沒有持有，不算「目前布局中」
+
+        shares_series = g[share_col].tolist()
+        dates_series = g[date_col].tolist()
+
+        # 股票分割保護：單日比例變化超過±50%視為分割/減資，只從分割後重新起算
+        split_idx = 0
+        for i in range(1, len(shares_series)):
+            prev, curr = shares_series[i - 1], shares_series[i]
+            if prev > 0 and abs(curr - prev) / prev > 0.5:
+                split_idx = i
+
+        # 從最新一天往回找，只要持股數>0就算連續持有，直到遇到0或回到split_idx為止
+        streak = 1
+        for i in range(len(shares_series) - 2, split_idx - 1, -1):
+            if shares_series[i] > 0:
+                streak += 1
+            else:
+                break
+
+        start_idx = len(shares_series) - streak
+        data_insufficient = (start_idx == 0)  # 回推到資料庫最早一天仍是持有中，真正起始日可能更早
+
+        records.append({
+            "股票代號": code,
+            "股票名稱": g[name_col].iloc[-1] if name_col in g.columns else "",
+            "ETF代碼": etf,
+            "布局天數": streak,
+            "首次布局日期": dates_series[start_idx],
+            "資料不足": data_insufficient,
+        })
+
+    result = pd.DataFrame(records)
+    if not result.empty:
+        result = result.sort_values("布局天數", ascending=False).reset_index(drop=True)
+        log.info(f"題材ETF布局追蹤：找到 {len(result)} 組(股票,ETF)目前持有中的組合")
+    return result

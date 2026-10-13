@@ -137,7 +137,126 @@ def ai_analyze_topic_overview(overview_df: pd.DataFrame, trade_date: str) -> str
 
     return call_claude(prompt, max_tokens=800)
 
+def build_topic_etf_detail(ss, topic_df: pd.DataFrame, smart_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    題材ETF布局明細：展開topic_df裡每個題材底下所有(股票,ETF)組合的布局天數/首次布局日期，
+    回答「哪一檔ETF、布局了哪個題材裡的哪一檔股票、布局了多久/從哪天開始」——
+    比題材總覽裡的「ETF相關持股」「ETF布局數」更細，是逐筆明細版（比照「今日訊號」vs
+    「持股異動明細」的彙總表+明細表分層方式）。
 
+    欄位順序刻意設計成「題材→ETF→股票→天數」，排序先依題材、同題材內先依ETF代碼、
+    同ETF內再依布局天數（大到小）——讓使用者先看到「這個題材有哪些ETF在布局」，
+    再往下看「同一檔ETF布局了哪些股票、各布局多久」。
+
+    2026-10-13：題材→股票清單的比對邏輯跟build_topic_overview()重複了一份（新機制
+    ai_theme_map + 舊機制DEFAULT_MAP_REVERSE），沒有直接重用build_topic_overview()
+    輸出的「ETF相關持股」欄位，因為那裡做了取前3檔的截斷（[:3]），會漏掉題材下第4檔以後
+    的股票，明細表不該比總覽表的股票清單還少，所以這裡重新跑一次完整比對。
+
+    回傳欄位：題材、ETF代碼、ETF名稱、股票代號、股票名稱、布局天數、首次布局日期、備註
+    """
+    from diff_analyzer import compute_first_holding_dates
+
+    if topic_df.empty:
+        return pd.DataFrame()
+
+    holding_df = compute_first_holding_dates(ss)
+    if holding_df.empty:
+        return pd.DataFrame()
+
+    # ETF代碼→名稱對照（讀「ETF清單管理」，查不到就用代碼本身當名稱）
+    etf_name_map = {}
+    try:
+        ws = ss.worksheet("ETF清單管理")
+        vals = ws.get_all_values()
+        if len(vals) >= 3:
+            reg_df = pd.DataFrame(vals[2:], columns=vals[1])
+            if "ETF代碼" in reg_df.columns and "ETF名稱" in reg_df.columns:
+                etf_name_map = dict(zip(
+                    reg_df["ETF代碼"].astype(str).str.strip(),
+                    reg_df["ETF名稱"].astype(str).str.strip(),
+                ))
+    except Exception as e:
+        log.warning(f"讀取ETF清單管理失敗，布局明細的ETF名稱將以代碼顯示: {e}")
+
+    holding_df = holding_df.copy()
+    holding_df["ETF名稱"] = holding_df["ETF代碼"].map(etf_name_map).fillna(holding_df["ETF代碼"])
+    holding_by_code = {}
+    for _, row in holding_df.iterrows():
+        holding_by_code.setdefault(str(row["股票代號"]), []).append(row)
+
+    from trend_analyzer import DEFAULT_MAP_REVERSE
+    try:
+        from theme_manager import get_keyword_theme_map
+        ai_theme_map = get_keyword_theme_map(ss)
+    except Exception:
+        ai_theme_map = {}
+
+    records = []
+    for _, trow in topic_df.iterrows():
+        keyword = trow.get("題材", "")
+        if not keyword:
+            continue
+
+        seen_codes = set()
+        stock_codes = []
+        if keyword in ai_theme_map:
+            for code, _sname in ai_theme_map[keyword]:
+                if code not in seen_codes:
+                    stock_codes.append(code)
+                    seen_codes.add(code)
+        if not smart_df.empty:
+            for code in DEFAULT_MAP_REVERSE.get(keyword, []):
+                if code in seen_codes:
+                    continue
+                match_s = smart_df[smart_df["股票代號"].astype(str) == str(code)]
+                if not match_s.empty:
+                    stock_codes.append(code)
+                    seen_codes.add(code)
+
+        for code in stock_codes:
+            for hrow in holding_by_code.get(str(code), []):
+                records.append({
+                    "題材": keyword,
+                    "ETF代碼": hrow["ETF代碼"],
+                    "ETF名稱": hrow["ETF名稱"],
+                    "股票代號": hrow["股票代號"],
+                    "股票名稱": hrow["股票名稱"],
+                    "布局天數": hrow["布局天數"],
+                    "首次布局日期": hrow["首次布局日期"],
+                    "備註": "⚠️ 資料不足，實際布局可能更早" if hrow.get("資料不足") else "",
+                })
+
+    detail_df = pd.DataFrame(records)
+    if not detail_df.empty:
+        detail_df = detail_df.sort_values(
+            ["題材", "ETF代碼", "布局天數"], ascending=[True, True, False]
+        ).reset_index(drop=True)
+        log.info(f"題材ETF布局明細完成：{len(detail_df)} 筆")
+    return detail_df
+
+
+def write_topic_etf_detail_to_sheets(ss, df: pd.DataFrame, trade_date: str):
+    """寫入題材ETF布局明細到Sheets（含重試保護，比照write_topic_overview_to_sheets同樣的
+    清空+標題+寫入模式）"""
+    SHEET = "題材ETF布局明細"
+    existing = [ws.title for ws in ss.worksheets()]
+    if SHEET not in existing:
+        ss.add_worksheet(title=SHEET, rows=2000, cols=10)
+    ws = ss.worksheet(SHEET)
+
+    all_rows = [[f"題材ETF布局明細 {trade_date}"]]
+    if not df.empty:
+        all_rows.append(df.columns.tolist())
+        all_rows.extend(df.fillna("").values.tolist())
+
+    def _do_write():
+        ws.clear()
+        ws.append_rows(all_rows, value_input_option="USER_ENTERED")
+
+    retry_sheets_write(_do_write, retries=2, label="題材ETF布局明細寫入")
+    log.info(f"題材ETF布局明細寫入完成：{len(df)} 筆")
+    
 def write_topic_overview_to_sheets(ss, df: pd.DataFrame, ai_insight: str, trade_date: str):
     """寫入題材總覽到 Sheets（含重試保護——這裡整合了AI分析結果，重跑一次要重新呼叫Claude API，
     成本比純資料寫入高，值得多花點時間重試）"""

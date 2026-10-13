@@ -758,6 +758,16 @@ def main():
                           _tt.sleep(5)
                           write_topic_overview_to_sheets(ss2, topic_df, ai_insight, TRADE_DATE)
                           log.info(f"題材總覽完成：{len(topic_df)} 個題材")
+
+                          # 題材ETF布局明細（哪一檔ETF布局了哪個題材裡的哪一檔股票、布局多久）
+                          # ──獨立包一層try/except，失敗不影響已經成功寫入的題材總覽
+                          try:
+                              from topic_analyzer import build_topic_etf_detail, write_topic_etf_detail_to_sheets
+                              detail_df = build_topic_etf_detail(ss2, topic_df, smart_df)
+                              write_topic_etf_detail_to_sheets(ss2, detail_df, TRADE_DATE)
+                              log.info(f"題材ETF布局明細完成：{len(detail_df)} 筆")
+                          except Exception as e:
+                              log.warning(f"題材ETF布局明細失敗（不影響題材總覽）: {e}")
                   except Exception as e:
                       log.warning(f"題材總覽失敗: {e}")
 

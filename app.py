@@ -998,6 +998,29 @@ elif page == "題材總覽":
                     "ETF布局數":  st.column_config.NumberColumn("ETF布局數", format="%.0f"),
                 }
             )
+
+            # 2026-10-13新增：逐題材展開「哪一檔ETF布局了哪一檔股票、布局多久」明細——
+            # 題材總覽表只看得到「幾檔ETF有布局」，看不出是哪一檔ETF、布局哪檔股票多久，
+            # 這裡從獨立的「題材ETF布局明細」分頁撈出來，依題材篩選後展開顯示
+            detail_df = load_sheet("題材ETF布局明細")
+            if not detail_df.empty and "題材" in detail_df.columns:
+                num_cols(detail_df, ["布局天數"])
+                st.caption("👇 展開看每個題材底下，哪一檔ETF布局了哪一檔股票、布局多久（依ETF分組，同ETF內布局天數大到小排序）")
+                for _, trow in etf_df.iterrows():
+                    theme_name = trow["題材"]
+                    theme_detail = detail_df[detail_df["題材"] == theme_name]
+                    if theme_detail.empty:
+                        continue
+                    with st.expander(f"📂 {theme_name}　布局明細（{len(theme_detail)} 組）"):
+                        detail_cols = ["ETF代碼","ETF名稱","股票代號","股票名稱","布局天數","首次布局日期","備註"]
+                        detail_avail = [c for c in detail_cols if c in theme_detail.columns]
+                        st.dataframe(
+                            theme_detail[detail_avail].reset_index(drop=True),
+                            use_container_width=True, hide_index=True,
+                            column_config={
+                                "布局天數": st.column_config.NumberColumn("布局天數", format="%.0f 天"),
+                            }
+                        )
         st.divider()
         st.subheader("所有題材")
         avail = [c for c in ["題材","階段","今日篇數","近3日均","趨勢","散戶關注","進場訊號"] if c in df.columns]
