@@ -13,7 +13,10 @@ position_manager.py
 
 進場規則（給候選名單參考，非強制，僅適用ETF追蹤範圍內的股票）：
   - 綜合評分 >= ENTRY_MIN_SCORE
-  - 買超轉換率% >= ENTRY_MIN_CONVERSION（法人方向要夠一致）
+  - 買超轉換率% >= ENTRY_MIN_CONVERSION（法人整體要是淨買超，不是淨賣超。
+    2026-10-13修正：原本門檻60.0是錯誤校正——這個比例的分母是法人總交易量而非
+    淨部位，實際數值幾乎都落在正負1%內的窄幅區間，60%這種門檻幾乎不可能有股票
+    達到，已下修為0.0，只要求方向是淨買超即可）
   - 候選過多時，取評分最高的前 MAX_POSITIONS 檔
 
 出場規則（四重條件）：
@@ -21,9 +24,13 @@ position_manager.py
               也可依 ATR 動態計算建議值，見 suggest_stop_loss_from_atr()）
   2. 停利：報酬率 >= +停利%（每次進場可自訂，預設 DEFAULT_TAKE_PROFIT_PCT）
   3. 訊號轉弱：評分較進場時下降超過 SIGNAL_WEAKEN_SCORE_DROP，
-              或法人由買轉賣（三大合計轉負），
-              或買超轉換率%跌破 SIGNAL_WEAKEN_CONVERSION_FLOOR
-              （僅ETF追蹤範圍內股票適用，自選股沒有這些資料，此類條件會略過）
+              或法人由買轉賣（三大合計轉負）
+              （僅ETF追蹤範圍內股票適用，自選股沒有這些資料，此類條件會略過。
+              2026-10-13移除「買超轉換率%跌破門檻」這條子規則——這個比例的正負號
+              天生就跟三大合計完全一致，用任何正數當門檻在數學上幾乎等同於
+              「還沒轉負」，加上這個比例實際數值窄幅集中在0%附近，用40%當門檻
+              會讓幾乎每一檔股票永遠觸發，等於失效的規則；上面「三大合計轉負」
+              已經完整涵蓋這個情境，不需要重複判斷）
   4. 技術面提早轉弱：KD/MACD醞釀死亡交叉、或出現頂部背離、或KD/MACD已經死亡交叉、
               或跌破近期支撐價位（2026-09-30新增，見price_fetcher.py的支撐壓力位置邏輯）
               （這組刻意設計成「提早」偵測，不等實際死叉發生才動作，見price_fetcher.py；
@@ -52,14 +59,16 @@ DATA_SOURCE_ADHOC = "自選股(即時查詢)"
 # ── 進場規則預設參數（可依回測資料校正）──────────────────────
 MAX_POSITIONS = 3
 ENTRY_MIN_SCORE = 7.0
-ENTRY_MIN_CONVERSION = 60.0
+ENTRY_MIN_CONVERSION = 0.0  # 2026-10-13修正：原本60.0是錯誤校正，這個比例的分母是法人
+                            # 總交易量、不是淨部位，實際數值幾乎都落在正負1%窄幅內，
+                            # 60%幾乎不可能達到；改成0.0，只要求法人整體是淨買超
 ENTRY_MAX_PRICE = 1000.0  # 資金有限，優先篩選股價1000元以下的標的（零股操作，股價太高單股成本負擔重）
 
 # ── 出場規則預設參數 ──────────────────────────────────────
 DEFAULT_STOP_LOSS_PCT = 10.0     # 預設停損 -10%（使用者可在新增持倉時自訂到8~20%）
 DEFAULT_TAKE_PROFIT_PCT = 25.0   # 預設停利 +25%（未來可用回測「T20內平均最大報酬%」校正）
 SIGNAL_WEAKEN_SCORE_DROP = 2.0   # 評分較進場時下降超過此值 → 判定訊號轉弱
-SIGNAL_WEAKEN_CONVERSION_FLOOR = 40.0  # 買超轉換率%跌破此值 → 判定法人開始分歧
+
 
 # 技術面提早轉弱訊號（來自price_fetcher.py的KD訊號/MACD訊號/背離警示欄位）
 TECH_WEAKEN_KD_SIGNALS = {"🔴 死亡交叉", "🍂 醞釀死亡交叉"}
@@ -536,10 +545,6 @@ def evaluate_open_positions(ss, latest_cross_df: pd.DataFrame) -> pd.DataFrame:
             result["建議出場"] = True
             result["觸發原因"].append(f"🟡 法人轉為淨賣超（三大合計{current_total}張）")
 
-        # ③ 訊號轉弱：買超轉換率大幅下滑
-        if pd.notna(current_conversion) and current_conversion < SIGNAL_WEAKEN_CONVERSION_FLOOR:
-            result["建議出場"] = True
-            result["觸發原因"].append(f"🟡 法人方向分歧（買超轉換率{current_conversion}% < {SIGNAL_WEAKEN_CONVERSION_FLOOR}%）")
 
         # ④ 技術面提早轉弱：KD/MACD醞釀或已死亡交叉、頂部背離（不等確認訊號完全成形，提早示警）
         current_kd_signal = str(latest.get("KD訊號", "")) if latest is not None else ""
