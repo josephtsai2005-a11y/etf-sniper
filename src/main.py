@@ -864,6 +864,53 @@ def main():
             us_summary = get_market_sentiment_summary(us_data)
             log.info(f"[AI] 美股摘要：{us_summary}")
 
+            # 國際大型公司財報/重大消息影響分析（2026-10-15新增）：獨立重新抓一次
+            # 「涵蓋到當下」的最新新聞，不是只靠21:00那次的舊資料——美股大公司通常是
+            # 美股收盤後才公布財報，換算台灣時間剛好落在21:00 news job執行「之後」、
+            # 這個05:00 AI job執行「之前」這段空窗期，21:00那次抓的新聞完全來不及
+            # 涵蓋，所以這裡必須獨立重抓一次。
+            major_company_text = ""
+            try:
+                from ai_analyzer import analyze_major_company_impact
+
+                log.info("[AI] 抓取隔夜最新新聞（含美股盤後財報）...")
+                news_df_ai = fetch_all_news(hours_back=12)
+                if not news_df_ai.empty:
+                    news_df_ai = tag_articles(news_df_ai)
+
+                    def _read_3row_sheet_ai(sheet_name):
+                        """讀取「標題列+表頭列+資料列」三列慣例的分頁，回傳DataFrame"""
+                        ws = ss2.worksheet(sheet_name)
+                        vals = ws.get_all_values()
+                        if len(vals) < 2:
+                            return pd.DataFrame()
+                        return pd.DataFrame(vals[2:], columns=vals[1])
+
+                    smart_df_ai = _read_3row_sheet_ai("聰明錢名單")
+
+                    if not smart_df_ai.empty:
+                        impact_df, major_company_text = analyze_major_company_impact(news_df_ai, smart_df_ai)
+                        if not impact_df.empty:
+                            SHEET_CROSS = "新聞×籌碼交叉"
+                            _ex_ai = [ws.title for ws in ss2.worksheets()]
+                            if SHEET_CROSS not in _ex_ai:
+                                ss2.add_worksheet(title=SHEET_CROSS, rows=500, cols=10)
+                            ws_cross_ai = ss2.worksheet(SHEET_CROSS)
+                            append_rows_ai = impact_df.fillna("").values.tolist()
+
+                            def _do_append_cross():
+                                ws_cross_ai.append_rows(append_rows_ai, value_input_option="USER_ENTERED")
+
+                            retry_sheets_write(_do_append_cross, retries=2, label="新聞×籌碼交叉附加寫入（大型公司財報）")
+                            log.info(f"[AI] 大型公司財報影響分析：{len(impact_df)} 筆附加到新聞×籌碼交叉")
+                        log.info(f"[AI] 大型公司財報摘要：{major_company_text[:50]}...")
+                    else:
+                        log.warning("[AI] 大型公司財報影響分析：讀不到聰明錢名單，跳過")
+                else:
+                    log.info("[AI] 大型公司財報影響分析：這次沒抓到新聞，跳過")
+            except Exception as e:
+                log.warning(f"大型公司財報影響分析失敗（不影響主報告）: {e}")
+
             # 回填融資融券：TWSE融資融券日報約晚上9:30才公布，比16:45的daily job時間晚，
             # 16:45當下抓到的一定是空的，這裡（RUN_MODE=="ai"，2026-09-03起改成隔日05:00
             # 台股開盤前執行，原本是23:00，確定已過公布時間）重新抓一次真正的資料，
@@ -984,7 +1031,7 @@ def main():
             report = generate_investment_report(
                 ss2, TRADE_DATE, us_text,
                 market_margin=market_margin, benchmark_price_change=benchmark_change,
-                alert_text=alert_text,
+                alert_text=alert_text, major_company_text=major_company_text,
             )
 
             if report:

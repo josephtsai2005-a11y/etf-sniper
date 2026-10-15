@@ -602,7 +602,7 @@ def generate_premarket_watch(cross_df: pd.DataFrame, us_market_text: str = "", t
 
 def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.DataFrame = None,
                                  market_margin: dict = None, benchmark_price_change: float = None,
-                                 alert_text: str = ""):
+                                 alert_text: str = "", major_company_text: str = ""):
     log.info("收集所有分頁資料...")
     data = collect_all_data(ss)
     data_text = format_data_for_ai(data, trade_date)
@@ -731,6 +731,14 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
             + alert_text
         )
 
+    # 國際大型公司財報/重大消息影響（2026-10-15新增，見main.py的analyze_major_company_impact()）
+    major_company_section = ""
+    if major_company_text:
+        major_company_section = (
+            "\n\n### 🏢 國際大型公司財報/重大消息影響\n\n"
+            + major_company_text
+        )
+
     # 2026-09-24移除：原本這裡會把你上傳過的「券商分點分析」附加在AI報告最後（見
     # 2026-09-16的決策），但這份資料是手動、選擇性截圖上傳的，沒有固定更新頻率——
     # 如果沒有每天/常常上傳，AI報告裡看到的永遠是同一批舊分析，時效性反而造成誤導
@@ -752,8 +760,123 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
         final_report += premarket_section
     if market_sentiment_section:
         final_report += market_sentiment_section
+    if major_company_section:
+        final_report += major_company_section
 
     return final_report
+
+
+def analyze_major_company_impact(news_df, smart_df):
+    """
+    2026-10-15新增：針對「國際大型公司財報/重大消息」情境的聚焦版新聞影響分析。
+    跟analyze_news_impact()的差異：
+    ①只篩MAJOR_COMPANY_KEYWORDS命中的新聞（半導體/AI運算、消費電子/雲端平台、
+      電動車/車用這幾個產業指標性公司的財報/法說/展望/評等調整），不是不分類
+      取前80則，寧可筆數少也不要雜訊。
+    ②同一次AI呼叫除了結構化的「新聞→受影響股票」清單之外，也直接產生一段narrative
+      摘要，給AI報告新增的「國際大型公司財報/重大消息影響」段落直接使用。
+    ③如果這次新聞裡沒有符合資格的大型公司消息，摘要會誠實寫「隔夜無重大公司財報/
+      消息」，不會為了有內容硬湊。
+
+    回傳：(impact_df, summary_text)
+      impact_df：結構類似analyze_news_impact()的輸出，寫入「新聞×籌碼交叉」頁面用。
+      summary_text：給AI報告段落直接使用的narrative文字。
+    """
+    if news_df.empty or smart_df.empty:
+        return pd.DataFrame(), ""
+
+    from news_fetcher import MAJOR_COMPANY_KEYWORDS
+    all_patterns = []
+    for _industry, companies in MAJOR_COMPANY_KEYWORDS.items():
+        for _company, patterns in companies.items():
+            all_patterns.extend(patterns)
+
+    title_col = news_df["標題"].fillna("")
+    summary_col = news_df.get("摘要", pd.Series("", index=news_df.index)).fillna("")
+    full_text = title_col + " " + summary_col
+    mask = full_text.apply(lambda t: any(p.lower() in t.lower() for p in all_patterns))
+    matched_df = news_df[mask]
+
+    if matched_df.empty:
+        return pd.DataFrame(), "隔夜無重大公司財報/消息，相關供應鏈持股維持原趨勢觀察。"
+
+    titles = matched_df["標題"].dropna().head(30).tolist()
+    news_str = "\n".join([f"- {t}" for t in titles])
+
+    stocks = smart_df[["股票代號","股票名稱"]].head(30).drop_duplicates()
+    stock_str = "\n".join([f"{r['股票代號']} {r['股票名稱']}" for _, r in stocks.iterrows()])
+
+    prompt = f"""你是台灣股市分析師，專門分析國際大型公司（半導體/AI運算、消費電子/雲端平台、
+電動車/車用這幾個產業的指標性公司，例如NVIDIA、AMD、台積電ADR、美光、博通、高通、ASML、
+Apple、Microsoft、Tesla等）的財報/法說/重大消息，對台股供應鏈個股的影響。
+
+以下新聞是已經篩選過、確定提到這些大型公司的新聞標題：
+{news_str}
+
+ETF重倉股票清單（只在這份清單裡找受影響股票）：
+{stock_str}
+
+請完成兩件事，只回傳JSON，格式如下：
+{{
+  "摘要": "150字內，繁體中文，給隔日開盤操盤參考用的narrative摘要，說明這次主要是
+          哪家大型公司的什麼消息、大致方向是正面還是負面。如果新聞內容其實都是瑣碎、
+          非重大的消息（沒有真正的財報/法說/展望/評等調整），就誠實寫『隔夜無重大
+          公司財報/消息，相關供應鏈持股維持原趨勢觀察』，不要牽強附會。",
+  "影響清單": [
+    {{"新聞摘要": "20字內", "影響股票": [{{"code": "代號", "reason": "30字內，需具體
+      說明該股票是這家大型公司的供應商/客戶/同業競爭者的哪一種角色"}}],
+      "影響方向": "正面/負面/中性", "影響程度": "高/中/低"}}
+  ]
+}}
+
+規則：
+- 只有真正重大的消息（財報、法說會重點、展望調整、評等調升/調降）才列入「影響清單」，
+  單純的股價漲跌新聞不算
+- 影響股票只列清單內代號，最多10則
+- 只回傳JSON"""
+
+    result = call_claude(prompt, max_tokens=2500)
+    if not result:
+        return pd.DataFrame(), ""
+
+    try:
+        result = result.strip().replace("```json", "").replace("```", "")
+        data = json.loads(result)
+        summary_text = data.get("摘要", "")
+        impacts = data.get("影響清單", [])
+
+        rows = []
+        for item in impacts:
+            affected = item.get("影響股票", [])
+            news_summary = item.get("新聞摘要", "")
+            direction = item.get("影響方向", "中性")
+            degree = item.get("影響程度", "中")
+
+            for stock in affected:
+                if isinstance(stock, dict):
+                    code = str(stock.get("code", ""))
+                    reason = stock.get("reason", "")
+                else:
+                    code = str(stock)
+                    reason = ""
+
+                name_match = smart_df[smart_df["股票代號"].astype(str) == code]["股票名稱"].values
+                stock_name = name_match[0] if len(name_match) > 0 else ""
+
+                rows.append({
+                    "新聞摘要": news_summary,
+                    "股票代號": code,
+                    "股票名稱": stock_name,
+                    "原因": reason,
+                    "影響方向": direction,
+                    "影響程度": degree,
+                })
+
+        impact_df = pd.DataFrame(rows)
+        return impact_df, summary_text
+    except Exception as e:
+        log.warning(f"大型公司財報影響分析JSON解析失敗: {e}")
+        return pd.DataFrame(), ""
 
 def write_ai_report_to_sheets(ss, report, trade_date, retries=2):
     """
