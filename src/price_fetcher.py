@@ -94,6 +94,15 @@ ABNORMAL_CHANGE_PCT_THRESHOLD = 20.0
 SWING_WINDOW = 3
 SUPPORT_RESISTANCE_NEAR_PCT = 3.0
 
+# 距離N日低點漲幅%（2026-10-20新增）：判斷ETF加碼/新增訊號出現時，是「波段剛起漲」還是
+# 「已經漲一大段才被偵測到」——用60個交易日（約3個月）當回溯窗口，比30天更不容易被最近
+# 一小段漲勢誤導（使用者觀察：目前推薦的股票大多都在30天內就已經漲了，代表30天這個窗口
+# 幾乎對每一檔都會顯示「已經漲了」，沒有鑑別力）。
+# 已知限制：如果這一波真正的起漲點發生在60天以前，這個窗口看不到，算出來的漲幅會被低估——
+# 遇到這種情況（最低點剛好落在窗口最前面）誠實標註提示文字，不假裝這個數字是精確的全波段
+# 漲幅，沿用專案一貫「資料不足就明講」的原則。
+LOW_DISTANCE_LOOKBACK_DAYS = 60
+
 
 def _find_support_resistance(closes: list, highs: list, lows: list, window: int = SWING_WINDOW):
     """
@@ -919,6 +928,23 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
         volume = float(df[vol_col].iloc[-1]) if vol_col else 0
         amount = float(df[amt_col].iloc[-1]) if amt_col else 0
 
+        # 距離N日低點漲幅%（見上方LOW_DISTANCE_LOOKBACK_DAYS常數說明）
+        low_distance_pct = None
+        low_distance_note = ""
+        if closes:
+            actual_window = min(LOW_DISTANCE_LOOKBACK_DAYS, len(closes))
+            window_closes = closes[-actual_window:]
+            window_low = min(window_closes)
+            if window_low > 0:
+                low_distance_pct = round((latest_close - window_low) / window_low * 100, 2)
+                low_idx = window_closes.index(window_low)
+                near_window_start = low_idx <= max(1, int(actual_window * 0.1))
+                if near_window_start:
+                    if actual_window < LOW_DISTANCE_LOOKBACK_DAYS:
+                        low_distance_note = f"⚠️ 資料僅{actual_window}個交易日，可能看不到完整起漲段，實際漲幅可能更高"
+                    else:
+                        low_distance_note = f"⚠️ 可能已上漲超過{LOW_DISTANCE_LOOKBACK_DAYS}個交易日，實際漲幅可能更高（受限於回溯窗口）"
+
         return {
             "股票代號": stock_code,
             "收盤價":   latest_close,
@@ -955,6 +981,8 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
             "成交量":   volume,
             "成交金額": amount,
             "技術指標狀態": split_note,
+            "距離60日低點漲幅%": low_distance_pct,
+            "低點回溯提示": low_distance_note,
         }
 
     except Exception as e:
@@ -1130,6 +1158,7 @@ def enrich_with_prices(df: pd.DataFrame, top_n: Optional[int] = None) -> pd.Data
               "DIF", "MACD", "MACD柱狀", "MACD訊號", "背離警示", "量能訊號",
               "布林上軌", "布林下軌", "布林位置", "布林壓縮", "ATR", "ATR%",
               "支撐價", "壓力價", "價格位置", "K線型態", "技術面共振",
+              "距離60日低點漲幅%", "低點回溯提示",
               "成交量", "成交金額", "技術指標狀態"]
     price_df = price_df[[c for c in price_cols if c in price_df.columns]]
 

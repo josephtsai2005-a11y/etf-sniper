@@ -434,9 +434,19 @@ if page == "多方驗證名單":
                 if up_df.empty:
                     st.caption("今日無符合標的")
                 else:
+                    # 2026-10-20新增：合併「多方驗證名單」裡的距離低點漲幅%，
+                    # 判斷這筆新增/加碼訊號是早期還是晚期發現（up_df本身來自「今日訊號」，
+                    # 沒有這兩個欄位，要從同一頁面已經load好的multi_df merge過來）
+                    up_df_display = up_df
+                    if "距離60日低點漲幅%" in multi_df.columns:
+                        up_df_display = up_df.merge(
+                            multi_df[["股票代號", "距離60日低點漲幅%", "低點回溯提示"]],
+                            on="股票代號", how="left",
+                        )
                     cols = [c for c in ["排名","股票代號","股票名稱","主要狀態",
-                                         "新增ETF數","加碼ETF數","總變動張數"] if c in up_df.columns]
-                    st.dataframe(up_df[cols].reset_index(drop=True), use_container_width=True, hide_index=True)
+                                         "新增ETF數","加碼ETF數","總變動張數",
+                                         "距離60日低點漲幅%","低點回溯提示"] if c in up_df_display.columns]
+                    st.dataframe(up_df_display[cols].reset_index(drop=True), use_container_width=True, hide_index=True)
             with tab2:
                 if margin_df_alert.empty:
                     st.caption("今日無符合標的")
