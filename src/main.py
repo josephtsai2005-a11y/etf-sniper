@@ -870,6 +870,9 @@ def main():
             # 這個05:00 AI job執行「之前」這段空窗期，21:00那次抓的新聞完全來不及
             # 涵蓋，所以這裡必須獨立重抓一次。
             major_company_text = ""
+            news_df_ai = pd.DataFrame()  # 2026-10-21新增初始值：確保下面「產品成熟度」區塊
+                                          # 不管這個try區塊成功與否，都能安全複用同一份新聞
+                                          # 資料，不用重新呼叫fetch_all_news()浪費一次API
             try:
                 from ai_analyzer import analyze_major_company_impact
 
@@ -910,6 +913,60 @@ def main():
                     log.info("[AI] 大型公司財報影響分析：這次沒抓到新聞，跳過")
             except Exception as e:
                 log.warning(f"大型公司財報影響分析失敗（不影響主報告）: {e}")
+
+            # 產品成熟度檢視（2026-10-21新增，見ai_analyzer.py的analyze_product_maturity()）：
+            # 月營收年增率＋新聞成熟度關鍵字綜合判斷候選名單∪目前持倉裡，哪些股票的題材相關
+            # 產品已經有實際營收貢獻（成熟），哪些還在早期布局階段、尚未反映營收
+            product_maturity_text = ""
+            try:
+                from ai_analyzer import analyze_product_maturity
+                from position_manager import _load_positions, STATUS_OPEN
+
+                def _read_3row_sheet_pm(sheet_name):
+                    """讀取「標題列+表頭列+資料列」三列慣例的分頁，回傳DataFrame"""
+                    ws = ss2.worksheet(sheet_name)
+                    vals = ws.get_all_values()
+                    if len(vals) < 2:
+                        return pd.DataFrame()
+                    return pd.DataFrame(vals[2:], columns=vals[1])
+
+                positions_df_pm = _load_positions(ss2)
+                open_codes_pm = (
+                    positions_df_pm[positions_df_pm["狀態"] == STATUS_OPEN]["股票代號"]
+                    .astype(str).str.strip().tolist()
+                    if not positions_df_pm.empty else []
+                )
+
+                cross_df_pm = _read_3row_sheet_pm("多方驗證名單")
+                fundamental_df_pm = _read_3row_sheet_pm("基本面資料")
+
+                if not cross_df_pm.empty:
+                    maturity_df, product_maturity_text = analyze_product_maturity(
+                        news_df_ai, cross_df_pm, fundamental_df_pm, extra_codes=open_codes_pm, ss=ss2,
+                    )
+                    if not maturity_df.empty:
+                        SHEET_MATURITY = "產品成熟度追蹤"
+                        _ex_pm = [ws.title for ws in ss2.worksheets()]
+                        is_new_sheet_pm = SHEET_MATURITY not in _ex_pm
+                        if is_new_sheet_pm:
+                            ss2.add_worksheet(title=SHEET_MATURITY, rows=2000, cols=10)
+                        ws_maturity = ss2.worksheet(SHEET_MATURITY)
+                        maturity_df.insert(0, "日期", TRADE_DATE)
+                        append_rows_pm = maturity_df.fillna("").values.tolist()
+                        if is_new_sheet_pm:
+                            append_rows_pm = [maturity_df.columns.tolist()] + append_rows_pm
+
+                        def _do_append_maturity():
+                            ws_maturity.append_rows(append_rows_pm, value_input_option="USER_ENTERED")
+
+                        retry_sheets_write(_do_append_maturity, retries=2, label="產品成熟度追蹤附加寫入")
+                        log.info(f"[AI] 產品成熟度分析：{len(maturity_df)} 檔附加到產品成熟度追蹤")
+                    else:
+                        log.info("[AI] 產品成熟度分析：本次無法判斷任何標的")
+                else:
+                    log.warning("[AI] 產品成熟度分析：讀不到多方驗證名單，跳過")
+            except Exception as e:
+                log.warning(f"產品成熟度分析失敗（不影響主報告）: {e}")
 
             # 回填融資融券：TWSE融資融券日報約晚上9:30才公布，比16:45的daily job時間晚，
             # 16:45當下抓到的一定是空的，這裡（RUN_MODE=="ai"，2026-09-03起改成隔日05:00
@@ -1032,6 +1089,7 @@ def main():
                 ss2, TRADE_DATE, us_text,
                 market_margin=market_margin, benchmark_price_change=benchmark_change,
                 alert_text=alert_text, major_company_text=major_company_text,
+                product_maturity_text=product_maturity_text,
             )
 
             if report:

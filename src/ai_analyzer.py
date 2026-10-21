@@ -602,7 +602,8 @@ def generate_premarket_watch(cross_df: pd.DataFrame, us_market_text: str = "", t
 
 def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.DataFrame = None,
                                  market_margin: dict = None, benchmark_price_change: float = None,
-                                 alert_text: str = "", major_company_text: str = ""):
+                                 alert_text: str = "", major_company_text: str = "",
+                                 product_maturity_text: str = ""):
     log.info("收集所有分頁資料...")
     data = collect_all_data(ss)
     data_text = format_data_for_ai(data, trade_date)
@@ -758,12 +759,179 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
         final_report += "\n\n" + related
     if premarket_section:
         final_report += premarket_section
+    product_maturity_section = ""
+    if product_maturity_text:
+        product_maturity_section = (
+            "\n\n### 🏭 產品成熟度檢視\n\n"
+            + product_maturity_text
+        )
+
     if market_sentiment_section:
         final_report += market_sentiment_section
     if major_company_section:
         final_report += major_company_section
+    if product_maturity_section:
+        final_report += product_maturity_section
 
     return final_report
+
+def analyze_product_maturity(news_df, cross_df, fundamental_df, extra_codes=None, ss=None):
+    """
+    2026-10-21新增：針對「題材相關產品是否已經成熟量產、有實際營收貢獻」的判斷。
+    背景：題材面分析（topic_analyzer.py）只回答「有沒有被ETF布局」，沒有回答「這家公司
+    在這個題材裡的生意，實際上做到什麼程度」——有些公司是傳產剛好符合題材、正在轉型但
+    尚未有正式收入；有些公司已經有成熟產品、能量產、有長期客戶。
+
+    範圍只鎖定當天候選名單（cross_df依綜合評分排序後取前8檔）∪ 目前持倉（extra_codes），
+    不是整個ETF股票池，維持低成本。
+
+    對每檔候選股，交叉比對兩個事實：
+    ①基本面資料裡的「月營收年增率%」（公司整體營收趨勢，不分題材/本業）
+    ②新聞裡有沒有同時命中「這檔股票的關鍵字」(STOCK_KEYWORD_MAP) + 「成熟/早期關鍵字」
+      (MATURITY_KEYWORDS)
+    把這些具體事實（不是憑空推論）餵給AI，請它綜合判斷「成熟有營收貢獻／早期布局尚未反映
+    營收／資料不足無法判斷」，資料不夠就必須誠實標「資料不足」，不能用自己的背景知識硬掰
+    （沿用專案一貫的誠實原則）。
+
+    回傳：(maturity_df, summary_text)
+    - maturity_df欄位：股票代號、股票名稱、月營收年增率%、分類、判斷依據摘要（供main.py
+      寫入「產品成熟度追蹤」Sheet用）
+    - summary_text：給主報告插入的一段摘要文字
+    """
+    if cross_df is None or cross_df.empty or "股票代號" not in cross_df.columns:
+        return pd.DataFrame(), ""
+
+    from news_fetcher import STOCK_KEYWORD_MAP, MATURITY_KEYWORDS
+
+    # 2026-10-21新增：合併兩套關鍵字來源——①寫死的STOCK_KEYWORD_MAP（固定~20檔AI供應鏈股）
+    # ②「關鍵字審核」頁面核准後存進「AI關鍵字審核」分頁的動態清單（keyword_generator.py）。
+    # 兩者都可能有缺口：①只覆蓋固定名單，候選股換了別的產業就查無關鍵字；②要等AI按週分桶
+    # 生成、且使用者實際核准過才會有資料，候選股剛好還沒輪到/還沒審核也會是空的。
+    # 所以採「有就合併，缺一邊不影響另一邊」，盡量降低候選股完全查無關鍵字、被迫落到
+    # 「資料不足」的情況（跟使用者討論後確認的方向）。
+    combined_keyword_map = {}
+    for code, kws in STOCK_KEYWORD_MAP.items():
+        combined_keyword_map.setdefault(code, set()).update(kws)
+    if ss is not None:
+        try:
+            from keyword_generator import get_approved_keyword_map
+            approved_map = get_approved_keyword_map(ss)
+            for code, kws in approved_map.items():
+                combined_keyword_map.setdefault(code, set()).update(kws)
+        except Exception as e:
+            log.warning(f"產品成熟度分析：讀取「關鍵字審核」已核准清單失敗，僅用內建清單: {e}")
+    combined_keyword_map = {code: list(kws) for code, kws in combined_keyword_map.items()}
+
+    cross_df = cross_df.copy()
+    cross_df["股票代號"] = cross_df["股票代號"].astype(str).str.strip()
+    cross_df["綜合評分"] = pd.to_numeric(cross_df.get("綜合評分"), errors="coerce")
+    top_candidates = cross_df.sort_values("綜合評分", ascending=False).head(8)
+    candidate_codes = top_candidates["股票代號"].tolist()
+
+    extra_codes = [str(c).strip() for c in (extra_codes or [])]
+    all_codes = list(dict.fromkeys(candidate_codes + extra_codes))
+    if not all_codes:
+        return pd.DataFrame(), ""
+
+    name_map = dict(zip(cross_df["股票代號"], cross_df.get("股票名稱", "")))
+
+    yoy_map = {}
+    if fundamental_df is not None and not fundamental_df.empty and "股票代號" in fundamental_df.columns:
+        fdf = fundamental_df.copy()
+        fdf["股票代號"] = fdf["股票代號"].astype(str).str.strip()
+        for _, r in fdf.iterrows():
+            yoy_map[r["股票代號"]] = r.get("年增率%", "")
+
+    all_maturity_patterns = []
+    for _tier, patterns in MATURITY_KEYWORDS.items():
+        all_maturity_patterns.extend(patterns)
+
+    news_hits = {}
+    if news_df is not None and not news_df.empty and "標題" in news_df.columns:
+        title_col = news_df["標題"].fillna("")
+        summary_col = news_df["摘要"].fillna("") if "摘要" in news_df.columns else pd.Series("", index=news_df.index)
+        full_text = title_col + " " + summary_col
+        for code in all_codes:
+            stock_patterns = combined_keyword_map.get(code, [])
+            if not stock_patterns:
+                continue
+            mask_stock = full_text.apply(lambda t: any(p.lower() in t.lower() for p in stock_patterns))
+            mask_maturity = full_text.apply(lambda t: any(p in t for p in all_maturity_patterns))
+            matched = news_df[mask_stock & mask_maturity]
+            if not matched.empty:
+                news_hits[code] = matched["標題"].dropna().head(5).tolist()
+
+    fact_blocks = []
+    for code in all_codes:
+        name = name_map.get(code, "")
+        yoy = yoy_map.get(code, "")
+        yoy_text = f"月營收年增率：{yoy}%" if yoy not in ("", None) else "月營收年增率：資料不足"
+        hits = news_hits.get(code, [])
+        if hits:
+            news_text = "相關新聞（含成熟度關鍵字）：\n" + "\n".join(f"  - {h}" for h in hits)
+        else:
+            news_text = "相關新聞（含成熟度關鍵字）：查無相關新聞"
+        fact_blocks.append(f"{code} {name}\n{yoy_text}\n{news_text}")
+
+    facts_str = "\n\n".join(fact_blocks)
+
+    prompt = f"""以下是{len(all_codes)}檔股票的客觀事實資料（月營收年增率、新聞裡是否命中
+「量產/出貨/認證通過」等成熟度關鍵字），請針對每一檔，根據**提供的事實**（不是你自己的
+背景知識），判斷這家公司跟題材相關的產品/業務，目前是哪個階段：
+
+{facts_str}
+
+分類只能選以下三種之一：
+- 「成熟有營收貢獻」：有新聞提到量產/出貨/認證通過等確認性字眼，或月營收年增率明顯為正
+- 「早期布局尚未反映營收」：只有評估/試產/布局等早期字眼，或月營收年增率平淡/負成長
+- 「資料不足無法判斷」：沒有相關新聞、也沒有月營收資料時，必須誠實選這個，不能憑空推測
+
+請用JSON格式回傳一個陣列，每個元素是：
+{{"股票代號": "...", "分類": "...", "判斷依據摘要": "...(50字內，具體指出根據哪則新聞或
+哪個數字)"}}
+
+只回傳JSON陣列，不要其他文字。"""
+
+    result = call_claude(
+        prompt,
+        system="你是誠實嚴謹的產業分析師，只根據提供的事實資料判斷，資料不足就明講，"
+               "絕不用自己的背景知識去猜測沒有提供的事實，也不對沒有被問到的股票多做發揮。",
+        max_tokens=2000,
+    )
+    if not result:
+        return pd.DataFrame(), ""
+
+    try:
+        result = result.strip().replace("```json", "").replace("```", "")
+        data = json.loads(result)
+        rows = []
+        for item in data:
+            code = str(item.get("股票代號", "")).strip()
+            rows.append({
+                "股票代號": code,
+                "股票名稱": name_map.get(code, ""),
+                "月營收年增率%": yoy_map.get(code, ""),
+                "分類": item.get("分類", ""),
+                "判斷依據摘要": item.get("判斷依據摘要", ""),
+            })
+        maturity_df = pd.DataFrame(rows)
+        if maturity_df.empty:
+            return pd.DataFrame(), ""
+
+        mature = maturity_df[maturity_df["分類"] == "成熟有營收貢獻"]
+        early = maturity_df[maturity_df["分類"] == "早期布局尚未反映營收"]
+        lines = []
+        for _, r in mature.iterrows():
+            lines.append(f"🟢 {r['股票代號']} {r['股票名稱']}：成熟有營收貢獻——{r['判斷依據摘要']}")
+        for _, r in early.iterrows():
+            lines.append(f"🟡 {r['股票代號']} {r['股票名稱']}：早期布局尚未反映營收——{r['判斷依據摘要']}")
+        summary_text = "\n".join(lines) if lines else "候選名單中目前沒有足夠證據判斷產品成熟度，建議持續觀察。"
+
+        return maturity_df, summary_text
+    except Exception as e:
+        log.warning(f"產品成熟度分析JSON解析失敗: {e}")
+        return pd.DataFrame(), ""
+
 
 
 def analyze_major_company_impact(news_df, smart_df):

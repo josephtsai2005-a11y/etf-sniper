@@ -2115,6 +2115,20 @@ elif page == "持倉監控":
     if eval_df.empty:
         st.info("目前沒有記錄中的持倉，或最新資料尚未讀到。可在下方「新增持倉」登記你實際買進的股票。")
     else:
+        # 2026-10-21新增：產品成熟度檢視，讀一次整表，迴圈裡重複使用，不逐檔重讀Sheet
+        maturity_df_pos = load_sheet("產品成熟度追蹤")
+
+        def _get_latest_maturity(code: str) -> dict:
+            """從「產品成熟度追蹤」整表裡，取這支股票代號最新一筆（日期最大）的分類結果"""
+            if maturity_df_pos.empty or "股票代號" not in maturity_df_pos.columns:
+                return {}
+            rows = maturity_df_pos[maturity_df_pos["股票代號"].astype(str).str.strip() == code]
+            if rows.empty:
+                return {}
+            rows = rows.sort_values("日期")
+            last = rows.iloc[-1]
+            return {"分類": last.get("分類", ""), "判斷依據摘要": last.get("判斷依據摘要", "")}
+
         for _, row in eval_df.iterrows():
             ret = row["目前報酬率%"]
             ret_display = f"{ret:+.2f}%" if ret is not None and pd.notna(ret) else "N/A"
@@ -2142,6 +2156,9 @@ elif page == "持倉監控":
                     f"價格位置：{row.get('價格位置') or 'N/A'}｜K線型態：{row.get('K線型態') or '無'}｜"
                     f"量能訊號：{row.get('量能訊號') or '無'}"
                 )
+                maturity_info = _get_latest_maturity(str(row["股票代號"]).strip())
+                if maturity_info:
+                    st.caption(f"產品面：{maturity_info['分類']}（{maturity_info['判斷依據摘要']}）")
                 if row.get("資料來源") == "即時查詢備援":
                     st.caption("ℹ️ 此股不在ETF追蹤範圍，法人/評分相關的出場條件不適用，僅監控停損/停利/技術面")
 
