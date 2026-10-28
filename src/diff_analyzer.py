@@ -119,6 +119,7 @@ def compute_daily_diff(
 
     for df in [today_df, yesterday_df]:
         df[code_col] = df[code_col].astype(str).str.strip()
+        df[etf_col] = df[etf_col].astype(str).str.strip()
         if share_col in df.columns:
             df[share_col] = pd.to_numeric(
                 df[share_col].astype(str).str.replace(",", ""), errors="coerce"
