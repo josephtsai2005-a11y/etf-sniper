@@ -71,6 +71,78 @@ def load_backtest_history(ss) -> pd.DataFrame:
     """
     return _load_backtest_sheet(ss)
 
+def compute_first_listing_dates(ss, today_date: str, today_codes, gap_threshold_days: int = 60) -> pd.DataFrame:
+    """
+    2026-10-29新增：算出「多方驗證名單」裡每檔股票目前這一波（上榜中斷超過
+    gap_threshold_days個交易日才算斷過，預設60——沿用price_fetcher.py::
+    LOW_DISTANCE_LOOKBACK_DAYS同一個60交易日窗口概念，但這裡故意不跨模組import，
+    直接複製數值＋寫註解說明，避免兩個獨立功能之間產生不必要的耦合）的首次上榜日期、
+    本波累積上榜天數。
+
+    呼叫時機在main.py裡cross_df算好、record_daily_snapshot()把「今天」寫進回測記錄
+    之前，所以回測記錄此時還沒有今天這筆——today_date/today_codes由呼叫端傳入當下
+    正要寫進多方驗證名單的資料，這個函式自己把「今天」併入每檔股票的日期序列一起
+    切波，不依賴回測記錄已經有今天的資料，避免每天都被誤判成「今天是斷點」。
+
+    回傳：股票代號, 首次上榜日期, 本波累積上榜天數, 資料不足
+    （資料不足=True代表這一波的起點剛好卡在回測記錄最早一天，真正首次上榜可能更早，
+    只是回測記錄本身還沒累積到那麼久以前——比照compute_first_holding_dates()同一個
+    「誠實標示下限」慣例，不假裝精確）
+    """
+    hist = load_backtest_history(ss)
+    results = []
+
+    if hist.empty or "記錄日期" not in hist.columns or "股票代號" not in hist.columns:
+        for code in today_codes:
+            results.append({"股票代號": code, "首次上榜日期": today_date,
+                             "本波累積上榜天數": 1, "資料不足": False})
+        return pd.DataFrame(results)
+
+    hist = hist.copy()
+    hist["股票代號"] = hist["股票代號"].astype(str).str.strip()
+    hist["記錄日期"] = hist["記錄日期"].astype(str).str.strip()
+
+    all_dates = sorted(set(hist["記錄日期"].unique().tolist()) | {today_date})
+    date_index = {d: i for i, d in enumerate(all_dates)}
+    earliest_date = all_dates[0]
+
+    hist_by_code = {code: sorted(g["記錄日期"].unique().tolist())
+                     for code, g in hist.groupby("股票代號")}
+
+    for code in today_codes:
+        past_dates = hist_by_code.get(code, [])
+        if not past_dates:
+            results.append({"股票代號": code, "首次上榜日期": today_date,
+                             "本波累積上榜天數": 1,
+                             "資料不足": today_date == earliest_date})
+            continue
+
+        dates = sorted(set(past_dates) | {today_date})
+        waves = []
+        current_wave = [dates[0]]
+        for d in dates[1:]:
+            gap = date_index[d] - date_index[current_wave[-1]]
+            if gap <= gap_threshold_days:
+                current_wave.append(d)
+            else:
+                waves.append(current_wave)
+                current_wave = [d]
+        waves.append(current_wave)
+
+        latest_wave = waves[-1]
+        first_date = latest_wave[0]
+        cumulative_days = len(latest_wave)
+        data_insufficient = (first_date == earliest_date)
+
+        results.append({
+            "股票代號": code,
+            "首次上榜日期": first_date,
+            "本波累積上榜天數": cumulative_days,
+            "資料不足": data_insufficient,
+        })
+
+    return pd.DataFrame(results)
+
 def _write_backtest_sheet(ss, df: pd.DataFrame):
     """
     整表覆寫回Sheets，含重試保護 + 安全寫入順序。

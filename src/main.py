@@ -212,7 +212,7 @@ def _write_institutional_to_sheets(ss, inst_df, cross_df, trade_date):
     import time
     for sheet_name, df, cols in [
         ("三大法人", inst_df, ["排名","股票代號","外資買賣超","投信買賣超","自營買賣超","三大合計","買超法人數","法人訊號"]),
-        ("多方驗證名單", cross_df, ["排名","股票代號","股票名稱","持有ETF數","買超法人數","法人訊號","綜合評分","多方驗證","三大合計","買超轉換率%","法人換手強度%","融資增減(張)","券資比%","融資訊號","籌碼矛盾","KD訊號","MACD訊號","背離警示","量能訊號","支撐價","壓力價","價格位置","K線型態","距離60日低點漲幅%","低點回溯提示","ATR%","技術面共振","收盤價","漲跌幅%","技術指標狀態"]),
+        ("多方驗證名單", cross_df, ["排名","股票代號","股票名稱","持有ETF數","買超法人數","法人訊號","綜合評分","多方驗證","三大合計","買超轉換率%","法人換手強度%","融資增減(張)","券資比%","融資訊號","籌碼矛盾","KD訊號","MACD訊號","背離警示","量能訊號","支撐價","壓力價","價格位置","K線型態","距離60日低點漲幅%","低點回溯提示","ATR%","技術面共振","收盤價","漲跌幅%","技術指標狀態","首次上榜日期","本波累積上榜天數","上榜資料不足提示"]),
     ]:
         existing = [ws.title for ws in ss.worksheets()]
         if sheet_name not in existing:
@@ -1149,6 +1149,26 @@ def main():
                 retail_df = pd.DataFrame()
 
             cross_df = cross_with_etf(inst_df, smart_df, fundamental_df, retail_df, margin_df)
+
+            # 首次上榜日期／本波累積上榜天數（2026-10-29新增）：查「回測記錄」歷史算出
+            # 每檔股票這一波（60交易日內沒中斷）第一次上榜的日期、累積上榜幾天。呼叫時間點
+            # 在record_daily_snapshot()把「今天」寫進回測記錄之前，今天還不在歷史資料裡——
+            # compute_first_listing_dates()靠today_date/today_codes參數自己把「今天」
+            # 併入計算，不依賴回測記錄已經有今天的資料。單一功能失敗不應該拖垮多方驗證
+            # 名單主流程，包在try/except裡，失敗時這幾欄留空。
+            try:
+                from backtest_tracker import compute_first_listing_dates
+                listing_df = compute_first_listing_dates(
+                    ss2, today_date=TRADE_DATE, today_codes=cross_df["股票代號"].tolist(),
+                )
+                if not listing_df.empty:
+                    cross_df = cross_df.merge(listing_df, on="股票代號", how="left")
+                    cross_df["上榜資料不足提示"] = cross_df["資料不足"].apply(
+                        lambda x: "⚠️回測記錄資料有限，首次上榜日期可能早於實際" if x is True else ""
+                    )
+                    cross_df = cross_df.drop(columns=["資料不足"])
+            except Exception as e:
+                log.warning(f"首次上榜日期計算失敗（不影響多方驗證名單主流程）: {e}")
 
             # 寫入 Sheets
             import time as _t; _t.sleep(15)
