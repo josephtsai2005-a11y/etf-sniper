@@ -521,7 +521,12 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
             # 恢復——使用者確認這是資料量不足、不是程式壞掉之後，要求順便優化：資料不足26天時
             # 再多抓一個月（上上月）補齊，讓月初也能盡量算出MACD，不用乾等資料自然累積。只有
             # 真的不足26天時才會多打這一次API，月中以後不會觸發，不影響平常的抓取速度。
-            if len(df) < 26:
+            # 2026-10-29更新：門檻從寫死的26改用LOW_DISTANCE_LOOKBACK_DAYS（60）——
+            # 「距離60日低點漲幅%」功能複用這裡的closes，原本26天門檻只夠MACD用，
+            # 平常2個月資料通常已超過26天就不會再多抓第3個月，導致距離60日低點漲幅%
+            # 常常不到60個交易日就被迫標警告。改用60當門檻後，平常就會確實抓到3個月，
+            # 兩種用途都能滿足（60>26，MACD需求同時被滿足）。            
+            if len(df) < LOW_DISTANCE_LOOKBACK_DAYS:
                 df_prev2 = fetch_month(prev2_month_date)
                 if not df_prev2.empty:
                     df = pd.concat([df_prev2, df], ignore_index=True)
@@ -531,7 +536,7 @@ def get_stock_price_single(stock_code: str, retries: int = 2) -> dict:
                 tpex_this = fetch_month_tpex(today.year, today.month)
                 tpex_prev = fetch_month_tpex(prev_month_first.year, prev_month_first.month)
                 df = pd.concat([tpex_prev, tpex_this], ignore_index=True) if not tpex_prev.empty else tpex_this
-                if len(df) < 26:
+                if len(df) < LOW_DISTANCE_LOOKBACK_DAYS:
                     prev2_first = prev_month_first.replace(day=1) - timedelta(days=1)
                     tpex_prev2 = fetch_month_tpex(prev2_first.year, prev2_first.month)
                     if not tpex_prev2.empty:
