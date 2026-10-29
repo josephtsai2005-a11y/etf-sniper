@@ -631,6 +631,91 @@ def get_backtest_summary(ss) -> pd.DataFrame:
 
     return pd.DataFrame(records)
 
+def get_first_listing_backtest_summary(ss, gap_threshold_days: int = 60) -> pd.DataFrame:
+    """
+    2026-10-29新增：只取每一波「首次上榜日」當成唯一進場訊號，依評分區間統計未來報酬率/
+    勝率——跟get_backtest_summary()欄位結構完全一致，方便在「回測績效」頁面並排比較。
+
+    背景：get_backtest_summary()把「每一天在榜上」都當成一筆獨立事件，如果一檔股票連續
+    上榜10天，會產生10筆高度相關（幾乎是同一個訊號）的樣本，可能稀釋/扭曲統計。這裡改成
+    只取每一波真正的第一天，讓每個「訊號」在統計上只算一次。
+
+    跟compute_first_listing_dates()的差異：那個函式只算「今天」當下每檔股票的「目前這
+    一波」，給main.py即時寫進多方驗證名單用；這裡要掃過「回測記錄」的完整歷史，批次標記
+    每一筆記錄是不是當時那一波的第一天，拿去跟已經backfill_returns()算好的T+N報酬率一起
+    統計——兩個函式目的不同（一個是「即時寫入用的單筆查詢」、一個是「歷史回測用的批次
+    標記」），這次刻意不共用程式碼，技術債記錄在案（比照2026-10-13「題材ETF布局明細」
+    同樣的取捨）。
+
+    已知限制：篩成「只看首次上榜」後樣本數會比get_backtest_summary()少很多（大約是
+    除以平均連續上榜天數），短期內每個評分區間可能都湊不滿有意義的樣本數，這是資料量
+    隨時間自然累積的正常現象，不是bug。
+    """
+    df = _load_backtest_sheet(ss)
+    if df.empty or "記錄日期" not in df.columns or "股票代號" not in df.columns:
+        return pd.DataFrame()
+
+    df = df.copy()
+    df["股票代號"] = df["股票代號"].astype(str).str.strip()
+    df["記錄日期"] = df["記錄日期"].astype(str).str.strip()
+
+    all_dates = sorted(df["記錄日期"].unique())
+    date_index = {d: i for i, d in enumerate(all_dates)}
+
+    wave_start_keys = set()
+    for code, g in df.groupby("股票代號"):
+        dates = sorted(g["記錄日期"].unique())
+        prev = None
+        for d in dates:
+            if prev is None or date_index[d] - date_index[prev] > gap_threshold_days:
+                wave_start_keys.add((code, d))
+            prev = d
+
+    df["_是否首次上榜"] = df.apply(lambda r: (r["股票代號"], r["記錄日期"]) in wave_start_keys, axis=1)
+    first_df = df[df["_是否首次上榜"]].copy()
+
+    if first_df.empty:
+        return pd.DataFrame()
+
+    first_df["綜合評分"] = pd.to_numeric(first_df["綜合評分"], errors="coerce")
+    first_df["評分區間"] = first_df["綜合評分"].apply(score_bucket)
+
+    records = []
+    for bucket in ["8分以上", "6-8分", "4-6分", "4分以下"]:
+        sub = first_df[first_df["評分區間"] == bucket]
+        if sub.empty:
+            continue
+        row = {"評分區間": bucket, "樣本數": len(sub)}
+        for n in HORIZONS:
+            col = f"T{n}報酬率%"
+            excess_col = f"T{n}超額報酬%"
+            vals = pd.to_numeric(sub[col], errors="coerce").dropna()
+            excess_vals = pd.to_numeric(sub[excess_col], errors="coerce").dropna()
+            if len(vals) > 0:
+                row[f"T{n}平均報酬%"] = round(vals.mean(), 2)
+                row[f"T{n}勝率%"] = round((vals > 0).sum() / len(vals) * 100, 1)
+            else:
+                row[f"T{n}平均報酬%"] = None
+                row[f"T{n}勝率%"] = None
+            if len(excess_vals) > 0:
+                row[f"T{n}超額報酬%"] = round(excess_vals.mean(), 2)
+                row[f"T{n}跑贏大盤率%"] = round((excess_vals > 0).sum() / len(excess_vals) * 100, 1)
+            else:
+                row[f"T{n}超額報酬%"] = None
+                row[f"T{n}跑贏大盤率%"] = None
+
+        max_col = f"T{MAX_WINDOW}內最大報酬%"
+        max_vals = pd.to_numeric(sub[max_col], errors="coerce").dropna()
+        if len(max_vals) > 0:
+            row[f"T{MAX_WINDOW}內平均最大報酬%"] = round(max_vals.mean(), 2)
+            row[f"出現50%+機會比例%"] = round((max_vals >= 50).sum() / len(max_vals) * 100, 1)
+        else:
+            row[f"T{MAX_WINDOW}內平均最大報酬%"] = None
+            row[f"出現50%+機會比例%"] = None
+
+        records.append(row)
+
+    return pd.DataFrame(records)
 
 def get_signal_summary(ss) -> pd.DataFrame:
     """依「法人訊號」分組統計績效（例如三大齊買 vs 外資主導 vs 雙向買超哪種未來報酬最好）"""

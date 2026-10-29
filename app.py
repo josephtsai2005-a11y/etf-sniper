@@ -1623,7 +1623,7 @@ elif page == "回測績效":
     from backtest_tracker import (
         get_backtest_summary, get_signal_summary, get_institutional_intensity_summary,
         get_relative_strength_by_period, get_etf_holding_group_summary, get_etf_trend_group_summary,
-        get_technical_signal_summary,
+        get_technical_signal_summary, get_first_listing_backtest_summary,
         _load_backtest_sheet, MAX_WINDOW, score_bucket,
     )
 
@@ -1982,6 +1982,32 @@ elif page == "回測績效":
 
     with st.expander("🔍 查看原始回測記錄（除錯用）"):
         st.dataframe(raw_backtest.tail(200), use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.subheader("📌 只看首次上榜（排除連續多天重複計算）")
+    st.caption("上面①~⑦的統計把「每天在榜上」都當成一筆獨立樣本，同一檔股票連續上榜多天"
+               "會產生多筆高度相關的樣本。這裡改成只取每一波「首次上榜日」當成唯一進場訊號，"
+               "樣本數會比上面少很多，短期內可能每個評分區間都偏少，屬於正常現象，"
+               "資料量會隨時間自然累積。")
+
+    first_listing_summary = get_first_listing_backtest_summary(ss)
+    if first_listing_summary.empty:
+        st.info("尚無足夠資料統計（需要至少有一波「首次上榜」且已走滿T+1交易日才會有第一批結果）")
+    else:
+        display_cols_fl = ["評分區間", "樣本數"]
+        for n in [1, 3, 5, 10, 20]:
+            for suffix in [f"T{n}平均報酬%", f"T{n}勝率%"]:
+                if suffix in first_listing_summary.columns:
+                    display_cols_fl.append(suffix)
+        max_col_fl = f"T{MAX_WINDOW}內平均最大報酬%"
+        prob_col_fl = "出現50%+機會比例%"
+        if max_col_fl in first_listing_summary.columns:
+            display_cols_fl += [max_col_fl, prob_col_fl]
+
+        st.dataframe(
+            first_listing_summary[[c for c in display_cols_fl if c in first_listing_summary.columns]],
+            use_container_width=True, hide_index=True,
+        )
 
 
 elif page == "關鍵字審核":
