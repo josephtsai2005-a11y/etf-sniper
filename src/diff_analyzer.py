@@ -342,6 +342,7 @@ def _compute_consecutive_streak(
 
     df = history_df.copy()
     df[code_col] = df[code_col].astype(str).str.strip()
+    df[etf_col] = df[etf_col].astype(str).str.strip()
     df[share_col] = pd.to_numeric(df[share_col].astype(str).str.replace(",", ""), errors="coerce").fillna(0)
     df[date_col] = df[date_col].astype(str).str.replace("-", "")
 
