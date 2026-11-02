@@ -362,9 +362,31 @@ def _compute_consecutive_streak(
                   f"需要至少{min_streak + 1}天才能判斷連續趨勢，暫無結果")
         return pd.DataFrame()
 
+    # 2026-11-02新增：某檔股票如果被ETF完全出清，原始持股頁面爬蟲只列「目前持有」的
+    # 股票，出清後該股票會整列從當天清單消失，不會寫一筆「持股數=0」的紀錄。如果只用
+    # df.groupby([code_col, etf_col])拿到的列組時間序列，會看不到「消失」這個狀態，
+    # 導致連續減碼天數卡在消失前一天、最新持股數停留在舊數字，誤以為資料沒更新，
+    # 其實是已經出清（這是比10/28、10/30那兩次ETF代碼正規化更深一層的缺口：這裡不是
+    # 比對key對不上，是資料列本身在歸零那天就不存在）。修法：用「這檔ETF本身有抓到
+    # 資料的所有日期」當完整時間軸，這檔股票若在其中某天沒出現，補上持股數=0，讓
+    # 「出清」被正確視為一次真正的歸零事件。只在「這檔ETF當天有其他資料」時才補0，
+    # 跟「整檔ETF當天抓取失敗」（完全沒有任何資料）區分開來，不會誤判。
+    etf_dates_map = df.groupby(etf_col)[date_col].apply(lambda s: sorted(s.unique())).to_dict()
+
     records = []
     for (code, etf), grp in df.groupby([code_col, etf_col]):
         grp = grp.sort_values(date_col)
+
+        etf_dates = etf_dates_map.get(etf, [])
+        existing_dates = set(grp[date_col])
+        missing_dates = [d for d in etf_dates if d not in existing_dates]
+        if missing_dates:
+            fill_rows = pd.DataFrame({
+                date_col: missing_dates,
+                share_col: 0,
+                name_col: grp[name_col].iloc[-1] if name_col in grp.columns and not grp.empty else "",
+            })
+            grp = pd.concat([grp, fill_rows], ignore_index=True).sort_values(date_col)
 
         # 2026-09-04修正（股票分割誤判為連續加碼）：股票分割/減資會讓ETF持股數等比例
         # 跳動（例如一股換三股，持股數變成3倍），這不是真的加碼，是股本基準不連續造成
@@ -372,11 +394,14 @@ def _compute_consecutive_streak(
         # 超過±50%時，只保留「最後一次疑似分割之後」的資料，避免分割前後的持股數被
         # 誤判成連續加碼/減碼、或把分割當天的巨大假增量算進累計變動張數。這個判斷式不分
         # 方向（分割可能讓比例暴增或暴減），對「up」「down」兩種方向都適用。
+        # 2026-11-02更新：排除v==0的情況不觸發分割偵測——上面新增的「出清補0」會製造
+        # 持股數從正值掉到0的列，這是真實的「完全出清」事件，不是股票分割/減資造成的
+        # 基準跳動，不應該被這個保護機制誤判、反而把真正的出清訊號當成雜訊濾掉。
         shares_series_raw = grp[share_col].tolist()
         split_pos = None
         prev_v = None
         for i, v in enumerate(shares_series_raw):
-            if prev_v is not None and prev_v > 0:
+            if prev_v is not None and prev_v > 0 and v > 0:
                 ratio = v / prev_v
                 if ratio >= 1.5 or ratio <= 0.67:
                     split_pos = i
