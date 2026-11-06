@@ -603,7 +603,7 @@ def generate_premarket_watch(cross_df: pd.DataFrame, us_market_text: str = "", t
 def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.DataFrame = None,
                                  market_margin: dict = None, benchmark_price_change: float = None,
                                  alert_text: str = "", major_company_text: str = "",
-                                 product_maturity_text: str = ""):
+                                 product_maturity_text: str = "", macro_geopolitical_text: str = ""):
     log.info("收集所有分頁資料...")
     data = collect_all_data(ss)
     data_text = format_data_for_ai(data, trade_date)
@@ -740,6 +740,18 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
             + major_company_text
         )
 
+    # 總經/地緣政治風險評估（2026-11-06新增，見main.py/ai_analyzer.py的
+    # analyze_macro_geopolitical_impact()）：跟上面的major_company_section不同，
+    # 這裡不做個股對應清單，單純由AI判斷當日新聞裡是否有總經/地緣政治性質的重大事件
+    # （選舉結果、利率政策、關稅/晶片禁令、AI監管政策等），產生一段敘述性影響評估，
+    # 獨立成一個章節（跟國際大型公司消息分開，避免混在一起）
+    macro_geopolitical_section = ""
+    if macro_geopolitical_text:
+        macro_geopolitical_section = (
+            "\n\n### 🌐 總經/地緣政治風險評估\n\n"
+            + macro_geopolitical_text
+        )
+
     # 2026-09-24移除：原本這裡會把你上傳過的「券商分點分析」附加在AI報告最後（見
     # 2026-09-16的決策），但這份資料是手動、選擇性截圖上傳的，沒有固定更新頻率——
     # 如果沒有每天/常常上傳，AI報告裡看到的永遠是同一批舊分析，時效性反而造成誤導
@@ -772,6 +784,8 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
         final_report += major_company_section
     if product_maturity_section:
         final_report += product_maturity_section
+    if macro_geopolitical_section:
+        final_report += macro_geopolitical_section
 
     return final_report
 
@@ -1045,6 +1059,61 @@ ETF重倉股票清單（只在這份清單裡找受影響股票）：
     except Exception as e:
         log.warning(f"大型公司財報影響分析JSON解析失敗: {e}")
         return pd.DataFrame(), ""
+
+def analyze_macro_geopolitical_impact(news_df):
+    """
+    總經/地緣政治風險評估（2026-11-06新增）：
+    不同於analyze_major_company_impact()先用關鍵字清單(MAJOR_COMPANY_KEYWORDS)篩選新聞，
+    這裡直接把當日新聞標題整批交給AI自己判斷：哪些新聞屬於「總體經濟」或「地緣政治」
+    性質的重大事件（例如選舉結果、央行升降息、關稅/貿易戰、晶片出口管制、AI監管政策、
+    地緣政治衝突、匯率政策等），並評估這類事件對國際股市（特別是亞洲地區、台股科技
+    供應鏈）可能造成的影響。
+    跟major_company_impact不同，這裡不做個股對應清單，只回傳一段敘述性摘要文字，
+    供AI投資報告的獨立章節使用。
+    若當日新聞中沒有AI判斷為真正重大的總經/地緣政治消息，老實回報沒有，不硬湊字數。
+    """
+    if news_df is None or news_df.empty:
+        return ""
+
+    titles = news_df["title"].dropna().astype(str).tolist()[:40]
+    if not titles:
+        return ""
+
+    news_str = "\n".join(f"- {t}" for t in titles)
+
+    prompt = f"""以下是今日台股/美股相關新聞標題：
+
+{news_str}
+
+請你判斷這些新聞中，是否有屬於「總體經濟」或「地緣政治」性質的重大事件
+（例如：選舉結果、央行升降息、關稅/貿易戰、晶片出口管制、AI監管政策、
+地緣政治衝突、匯率政策等），並評估這類事件對國際股市（特別是亞洲地區、
+台股科技供應鏈）可能造成的影響。
+
+請用JSON格式回覆（只回JSON，不要其他文字）：
+{{
+  "有重大消息": true或false,
+  "摘要": "若有重大消息，用150-200字說明是哪些事件、為什麼屬於總經/地緣政治因素、
+           以及對國際股市（特別是亞洲/台股）可能的影響方向；若無，請回覆空字串"
+}}
+
+如果新聞標題中沒有真正構成總經/地緣政治重大影響的內容，"有重大消息"請誠實填false，
+不要為了湊字數而過度解讀一般產業新聞。"""
+
+    try:
+        response = call_claude(prompt, max_tokens=1200)
+        text = response.strip()
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        data = json.loads(text.strip())
+        if not data.get("有重大消息"):
+            return ""
+        return data.get("摘要", "").strip()
+    except Exception as e:
+        log.warning(f"總經/地緣政治風險分析JSON解析失敗: {e}")
+        return ""
 
 def write_ai_report_to_sheets(ss, report, trade_date, retries=2):
     """

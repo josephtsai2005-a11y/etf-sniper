@@ -914,6 +914,19 @@ def main():
             except Exception as e:
                 log.warning(f"大型公司財報影響分析失敗（不影響主報告）: {e}")
 
+            # 總經/地緣政治風險評估（2026-11-06新增，見ai_analyzer.py的
+            # analyze_macro_geopolitical_impact()）：重用上面已經fetch+tag好的news_df_ai，
+            # 不另外重複抓新聞。跟大型公司財報影響不同，這裡不用關鍵字清單先篩選，而是把
+            # 整批新聞標題交給AI自己判斷哪些屬於總經/地緣政治性質的重大事件（選舉結果、
+            # 利率政策、關稅/晶片禁令、AI監管政策等），並評估對國際股市（特別是亞洲/台股
+            # 科技供應鏈）的潛在影響，產生一段獨立的敘述性摘要。
+            macro_geopolitical_text = ""
+            try:
+                from ai_analyzer import analyze_macro_geopolitical_impact
+                macro_geopolitical_text = analyze_macro_geopolitical_impact(news_df_ai)
+            except Exception as e:
+                log.warning(f"總經/地緣政治風險分析失敗（不影響主報告）: {e}")
+
             # 產品成熟度檢視（2026-10-21新增，見ai_analyzer.py的analyze_product_maturity()）：
             # 月營收年增率＋新聞成熟度關鍵字綜合判斷候選名單∪目前持倉裡，哪些股票的題材相關
             # 產品已經有實際營收貢獻（成熟），哪些還在早期布局階段、尚未反映營收
@@ -1090,6 +1103,7 @@ def main():
                 market_margin=market_margin, benchmark_price_change=benchmark_change,
                 alert_text=alert_text, major_company_text=major_company_text,
                 product_maturity_text=product_maturity_text,
+                macro_geopolitical_text=macro_geopolitical_text,
             )
 
             if report:
