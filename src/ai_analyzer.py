@@ -1075,7 +1075,7 @@ def analyze_macro_geopolitical_impact(news_df):
     if news_df is None or news_df.empty:
         return ""
 
-    titles = news_df["title"].dropna().astype(str).tolist()[:40]
+    titles = news_df["標題"].dropna().astype(str).tolist()[:40]
     if not titles:
         return ""
 
