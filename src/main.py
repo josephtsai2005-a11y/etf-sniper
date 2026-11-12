@@ -892,7 +892,7 @@ def main():
                     smart_df_ai = _read_3row_sheet_ai("聰明錢名單")
 
                     if not smart_df_ai.empty:
-                        impact_df, major_company_text = analyze_major_company_impact(news_df_ai, smart_df_ai)
+                        impact_df, major_company_text = analyze_major_company_impact(news_df_ai, smart_df_ai, us_market_text=us_text)
                         if not impact_df.empty:
                             SHEET_CROSS = "新聞×籌碼交叉"
                             _ex_ai = [ws.title for ws in ss2.worksheets()]
