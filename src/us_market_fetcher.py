@@ -87,7 +87,7 @@ def fetch_all_us_market() -> dict:
                 data["name"] = name
                 results[category].append(data)
                 arrow = "▲" if data["change_pct"] > 0 else "▼" if data["change_pct"] < 0 else "—"
-                log.info(f"    {name}: {data['price']} {arrow}{abs(data['change_pct']):.2f}%")
+                log.info(f"    {name}: {data['price']} {arrow}{abs(data['change_pct']):.2f}% （資料日期: {data.get('date','')}）")
             time.sleep(13)  # 每分鐘5次限制，保守設13秒
 
     return results
