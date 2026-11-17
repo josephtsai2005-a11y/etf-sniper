@@ -9,6 +9,8 @@ import sys
 import logging
 from datetime import datetime
 
+from etf_registry import refresh_industry_classification
+
 # 確保 src 目錄在 path 中
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -483,6 +485,23 @@ def _write_streak_sheet(ss, sheet_name: str, streak_df, trade_date: str):
 
     retry_sheets_write(_do_write_streak, retries=2, label=f"{sheet_name}寫入")
 
+def _write_sector_flow_sheet(ss, sector_flow_df, trade_date: str):
+    """2026-11-17新增：寫入compute_etf_sector_flow()算出的「ETF產業資金流」排行，
+    跟_write_streak_sheet()共用同一套簡單的清空+標題+欄名+資料寫入模式。"""
+    sheet_name = "ETF產業資金流"
+    existing_sheets = [w.title for w in ss.worksheets()]
+    if sheet_name not in existing_sheets:
+        ws = ss.add_worksheet(title=sheet_name, rows=200, cols=10)
+    else:
+        ws = ss.worksheet(sheet_name)
+
+    def _do_write(ws=ws, sector_flow_df=sector_flow_df):
+        ws.clear()
+        ws.append_row([f"{sheet_name} {trade_date}"])
+        ws.append_row(sector_flow_df.columns.tolist())
+        ws.append_rows(sector_flow_df.fillna("").values.tolist(), value_input_option="USER_ENTERED")
+
+    retry_sheets_write(_do_write, retries=2, label=f"{sheet_name}寫入")
 
 def main():
     log.info(f"===== ETF 狙擊系統啟動 | {TRADE_DATE} =====")
@@ -508,6 +527,14 @@ def main():
             from etf_registry import run_quarterly_etf_scan
             run_quarterly_etf_scan(ss)
             log.info("季度ETF清單掃描完成")
+
+            # 2026-11-17新增：產業分類快取，跟季度ETF掃描同一週期更新，供「ETF產業資金流」
+            # （每日core流程）使用。獨立try/except，這裡失敗不影響上面季度ETF掃描的結果。
+            try:
+                refresh_industry_classification(ss)
+            except Exception as e:
+                log.warning(f"產業分類快取更新失敗（不影響季度ETF掃描本身）: {e}")
+                
         except Exception as e:
             log.error(f"季度ETF清單掃描失敗: {e}")
             import traceback
@@ -666,6 +693,21 @@ def main():
 
                     _write_diff_to_sheets(ss2, stock_diff, diff_detail, TRADE_DATE)
                     log.info(f"差異比對完成：{len(stock_diff)} 檔有變動")
+
+                    # 2026-11-17新增：ETF持股產業資金流——把剛算完的stock_diff按產業分類
+                    # 加總，是「主動式ETF資金輪動」功能第一階段。獨立try/except，這裡失敗
+                    # 不影響上面已完成的今日訊號寫入，也不影響下面的ETF連續加碼/減碼追蹤。
+                    try:
+                        from sector_flow_analyzer import load_industry_map, compute_etf_sector_flow
+                        industry_map = load_industry_map(ss2)
+                        sector_flow_df = compute_etf_sector_flow(stock_diff, industry_map)
+                        if not sector_flow_df.empty:
+                            _write_sector_flow_sheet(ss2, sector_flow_df, TRADE_DATE)
+                            log.info(f"ETF產業資金流寫入完成：{len(sector_flow_df)} 個產業")
+                        else:
+                            log.info("ETF產業資金流：本次無資料可彙總")
+                    except Exception as e:
+                        log.warning(f"ETF產業資金流計算失敗（不影響主流程）: {e}")
 
                     # 個別ETF連續加碼追蹤（比上面的股票整體加總更細，能看出是哪一檔ETF在持續買、
                     # 或有沒有多檔ETF同時持續加碼同一股票）

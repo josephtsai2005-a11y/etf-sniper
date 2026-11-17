@@ -196,6 +196,148 @@ def fetch_market_active_etf_list(retries: int = 2) -> pd.DataFrame:
             return pd.DataFrame()
     return pd.DataFrame()
 
+# ── 產業分類對照表（2026-11-17新增，供「ETF產業資金流」功能使用）──────────────
+INDUSTRY_HEADER_HINTS = ("產業別", "產業類別")
+SHEET_INDUSTRY_MAP = "產業分類對照表"
+
+
+def _parse_industry_table(html_text: str, market_label: str) -> pd.DataFrame:
+    """
+    從isin.twse.com.tw的上市/上櫃證券清單頁面解析「股票代號/股票名稱/產業類別」。
+
+    跟fetch_market_active_etf_list()共用同一份頁面排版慣例（第一個td是「代號　名稱」
+    全形空白分隔），但「產業別」這一欄不是固定在第幾個td，所以先掃表頭列找「產業別」/
+    「產業類別」字樣所在的欄位索引，找不到就直接放棄這個table（不亂猜索引），避免產業
+    分類整批錯位但完全不報錯。
+
+    ⚠️ 這個函式跟fetch_market_active_etf_list()一樣，TWSE頁面解析邏輯【尚未在正式環境
+    驗證過】（開發環境sandbox完全無法連線isin.twse.com.tw）。部署後第一次執行
+    （RUN_MODE=etf_scan）務必檢查log：預期至少能抓到上千檔股票的產業分類；如果抓到0筆
+    或數量異常低，代表這裡假設的表頭文字/欄位結構跟實際HTML不符，需要依實際log調整，
+    不會影響既有任何每日流程（只有「ETF產業資金流」這個新功能會用到這份資料，讀不到時
+    該功能會明確顯示全部歸入「未分類」，不會假裝有分類結果）。
+    """
+    soup = BeautifulSoup(html_text, "lxml")
+    tables = soup.find_all("table")
+    if not tables:
+        log.warning(f"產業分類掃描（{market_label}）：找不到任何table")
+        return pd.DataFrame()
+
+    best_records = []
+    for table in tables:
+        rows = table.find_all("tr")
+        if not rows:
+            continue
+
+        header_cells = [c.get_text(strip=True) for c in rows[0].find_all(["th", "td"])]
+        industry_idx = next(
+            (i for i, h in enumerate(header_cells) if any(hint in h for hint in INDUSTRY_HEADER_HINTS)),
+            None,
+        )
+        if industry_idx is None:
+            continue
+
+        records = []
+        for tr in rows[1:]:
+            tds = tr.find_all("td")
+            if len(tds) <= industry_idx:
+                continue
+            first_cell = tds[0].get_text(strip=True)
+            parts = first_cell.split("　")
+            if len(parts) < 2:
+                continue
+            code, name = parts[0].strip(), parts[1].strip()
+            if not re.match(r"^\d{4}$", code):  # 只收4碼一般股票，排除ETF/權證等
+                continue
+            industry = tds[industry_idx].get_text(strip=True)
+            if not industry:
+                continue
+            records.append({"股票代號": code, "股票名稱": name, "產業類別": industry})
+        if len(records) > len(best_records):
+            best_records = records
+
+    del soup, tables
+    if not best_records:
+        log.warning(f"產業分類掃描（{market_label}）：掃過全部table都找不到「產業別」欄位或0筆有效資料，"
+                    f"可能是頁面結構跟預期不同，需要人工調整解析邏輯")
+        return pd.DataFrame()
+
+    df = pd.DataFrame(best_records).drop_duplicates(subset=["股票代號"]).reset_index(drop=True)
+    log.info(f"產業分類掃描（{market_label}）完成：{len(df)} 檔")
+    return df
+
+
+def fetch_industry_classification(retries: int = 2) -> pd.DataFrame:
+    """
+    抓取全市場（上市+上櫃）股票的官方產業分類，供「ETF持股產業資金流」彙總使用。
+
+    來源：isin.twse.com.tw/isin/C_public.jsp，strMode=2（上市）+ strMode=4（上櫃）——
+    主動式ETF持股橫跨這兩個市場，只抓上市會漏掉持有上櫃股票的加碼/減碼。
+
+    任一市場段落失敗都不影響另一段落（獨立try/except），整體失敗回傳空DataFrame，
+    呼叫端refresh_industry_classification()遇到空結果時會保留上一次成功的快取，
+    不會用「這次抓失敗」覆蓋掉「上次抓成功」的產業分類。
+    """
+    segments = [("上市", 2), ("上櫃", 4)]
+    frames = []
+    for label, mode in segments:
+        url = f"https://isin.twse.com.tw/isin/C_public.jsp?strMode={mode}"
+        last_error = None
+        for attempt in range(retries + 1):
+            try:
+                resp = SESSION.get(url, timeout=30)
+                resp.encoding = "big5"
+                df = _parse_industry_table(resp.text, label)
+                if not df.empty:
+                    frames.append(df)
+                break
+            except Exception as e:
+                last_error = e
+                if attempt < retries:
+                    log.warning(f"產業分類掃描（{label}）第{attempt + 1}次失敗，重試中: {e}")
+                    time.sleep(3 * (attempt + 1))
+                    continue
+                log.warning(f"產業分類掃描（{label}）失敗（已重試{retries}次），略過: {last_error}")
+
+    if not frames:
+        return pd.DataFrame()
+    combined = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["股票代號"]).reset_index(drop=True)
+    log.info(f"產業分類掃描總計：{len(combined)} 檔（上市+上櫃合併）")
+    return combined
+
+
+def refresh_industry_classification(ss, retries: int = 2) -> pd.DataFrame:
+    """
+    抓取並快取全市場產業分類到「產業分類對照表」分頁，跟季度ETF清單掃描同一週期更新
+    （產業分類極少變動，不需要每天重抓）。每日core流程只讀這份快取
+    （sector_flow_analyzer.load_industry_map()），不會每天對TWSE多打解析請求。
+
+    抓取失敗（回傳空）時直接保留Sheets既有快取，不覆寫、不清空。
+    """
+    industry_df = fetch_industry_classification(retries=retries)
+    if industry_df.empty:
+        log.warning("產業分類掃描整體失敗或0筆，保留Sheets既有快取，本次不寫入")
+        return industry_df
+
+    scan_date = datetime.now().strftime("%Y%m%d")
+    industry_df["最後更新日期"] = scan_date
+
+    existing = [ws.title for ws in ss.worksheets()]
+    if SHEET_INDUSTRY_MAP not in existing:
+        ss.add_worksheet(title=SHEET_INDUSTRY_MAP, rows=3000, cols=10)
+        log.info(f"建立分頁：{SHEET_INDUSTRY_MAP}")
+
+    ws = ss.worksheet(SHEET_INDUSTRY_MAP)
+    cols = ["股票代號", "股票名稱", "產業類別", "最後更新日期"]
+    rows = [cols] + industry_df[cols].values.tolist()
+
+    def _do_write():
+        ws.clear()
+        ws.append_rows(rows, value_input_option="USER_ENTERED")
+
+    retry_sheets_write(_do_write, retries=2, label="產業分類對照表寫入")
+    log.info(f"產業分類對照表更新完成：{len(industry_df)} 檔")
+    return industry_df
 
 def _fetch_all_market_closes(date_str: str, retries: int = 1) -> dict:
     """

@@ -144,7 +144,7 @@ def call_claude_vision(prompt, images, system="", max_tokens=1000, retries=2):
 
 def collect_all_data(ss):
     data = {}
-    sheets = {"聰明錢名單":20,"今日訊號":30,"持股異動明細":30,"三大法人":20,"多方驗證名單":20,"基本面資料":20,"題材趨勢":15,"新聞x籌碼交叉":15,"散戶情緒":10,"題材位置":15}
+    sheets = {"聰明錢名單":20,"今日訊號":30,"持股異動明細":30,"三大法人":20,"多方驗證名單":20,"基本面資料":20,"題材趨勢":15,"新聞x籌碼交叉":15,"散戶情緒":10,"題材位置":15,"ETF產業資金流":20}
     for name, n in sheets.items():
         try:
             ws = ss.worksheet(name)
@@ -246,6 +246,58 @@ def build_affordable_picks_section(cross_df: pd.DataFrame, max_price: float = 10
 
     return "\n".join(lines)
 
+def build_etf_sector_flow_section(sector_flow_df: pd.DataFrame, top_n: int = 5) -> str:
+    """
+    產生「ETF持股產業資金流」段落——純資料彙總，不呼叫AI，零額外成本
+    來源：main.py每日核心流程算出的sector_flow_analyzer.compute_etf_sector_flow()結果，
+    這裡只負責讀取並格式化，不重新計算。
+
+    「主動式ETF資金輪動」功能第一階段，跟之後計劃的「全市場法人產業資金流」互補——這裡
+    是真實持股變動，但範圍限於目前追蹤ETF的持股池；法人版涵蓋全市場，但反映的是「法人
+    整體」而非專指主動式ETF。兩者各自標明資料來源，不混成一個分數。
+    """
+    if sector_flow_df is None or sector_flow_df.empty or "產業類別" not in sector_flow_df.columns:
+        return ""
+
+    df = sector_flow_df.copy()
+    sort_col = "總資金動向" if "總資金動向" in df.columns else "淨訊號"
+    for col in ["淨訊號", "總資金動向", "總變動張數", "涉及股票數"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df[df["產業類別"] != "⚠️ 未分類"].copy()
+    if df.empty:
+        return ""
+
+    top_in  = df.sort_values(sort_col, ascending=False).head(top_n)
+    top_out = df.sort_values(sort_col, ascending=True).head(top_n)
+    header = "| 產業類別 | 加碼ETF數 | 減碼ETF數 | 淨訊號 | 資金動向(千萬) | 涉及股票數 |\n|---|---|---|---|---|---|"
+
+    def fmt_rows(sub_df):
+        lines = []
+        for _, row in sub_df.iterrows():
+            lines.append(
+                f"| {row.get('產業類別','')} | {row.get('加碼ETF數合計','')} | {row.get('減碼ETF數合計','')} | "
+                f"{row.get('淨訊號','')} | {row.get('總資金動向','—')} | {int(row.get('涉及股票數',0) or 0)} |"
+            )
+        return "\n".join(lines)
+
+    lines = [
+        "### 🏭 ETF持股產業資金流（主動式ETF實際持股變動，非AI推論）",
+        "",
+        "**加碼力道最強的產業：**",
+        header,
+        fmt_rows(top_in),
+        "",
+        "**減碼力道最強的產業：**",
+        header,
+        fmt_rows(top_out),
+        "",
+        "💡 這份彙總直接來自你目前追蹤的主動式ETF每日持股加碼/減碼變動，依官方產業分類加總，"
+        "反映的是這些基金經理人真實的交易行為，不是AI推論的輪動敘述。涵蓋範圍限於目前追蹤ETF"
+        "有持有的股票池，不是全市場資金流向。",
+    ]
+    return "\n".join(lines)
 
 def generate_related_stocks(smart_df: pd.DataFrame, trend_df: pd.DataFrame) -> str:
     """
@@ -700,6 +752,17 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
     except Exception as e:
         log.warning(f"1000元以下優選股清單生成失敗（不影響主報告）: {e}")
 
+    # ETF持股產業資金流（2026-11-17新增，純資料彙總，不呼叫AI，零額外成本——
+    # 「主動式ETF資金輪動」功能第一階段）
+    etf_sector_flow_section = ""
+    try:
+        sector_flow_df0 = data.get("ETF產業資金流", pd.DataFrame())
+        sector_flow_text = build_etf_sector_flow_section(sector_flow_df0, top_n=5)
+        if sector_flow_text:
+            etf_sector_flow_section = "\n\n" + sector_flow_text
+    except Exception as e:
+        log.warning(f"ETF產業資金流段落生成失敗（不影響主報告）: {e}")
+
     # 今日開盤前30分鐘觀察重點（籌碼矛盾標的優先分析，條件式檢查清單，非預測）
     premarket_section = ""
     try:
@@ -765,6 +828,8 @@ def generate_investment_report(ss, trade_date, us_market_text="", cross_df: pd.D
     final_report = main_report
     if affordable_section:
         final_report += affordable_section
+    if etf_sector_flow_section:
+        final_report += etf_sector_flow_section
     if alert_section:
         final_report += alert_section
     if related:

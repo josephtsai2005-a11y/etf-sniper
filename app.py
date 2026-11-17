@@ -32,6 +32,7 @@ SHEET_SMART  = "聰明錢名單"
 SHEET_RAW    = "盤後原始數據庫"
 SHEET_DIFF   = "今日訊號"
 SHEET_DETAIL = "持股異動明細"
+SHEET_SECTOR_FLOW = "ETF產業資金流"
 SHEET_TREND  = "題材趨勢"
 SHEET_CROSS  = "新聞×籌碼交叉"
 SHEET_INST   = "三大法人"
@@ -752,6 +753,48 @@ elif page == "今日訊號":
             margin=dict(l=150, r=20, t=20, b=40),
         )
         st.plotly_chart(fig, use_container_width=True)
+
+    # 依產業彙總（2026-11-17新增，「主動式ETF資金輪動」功能第一階段）
+    sector_flow_df = load_sheet(SHEET_SECTOR_FLOW)
+    if not sector_flow_df.empty:
+        st.divider()
+        st.subheader("🏭 依產業彙總（主動式ETF持股變動）")
+        st.caption("資料來源：追蹤中主動式ETF實際持股加碼/減碼，依官方產業分類彙總——"
+                   "真實持股變動，但涵蓋範圍限於目前追蹤ETF有持有的股票")
+
+        num_cols(sector_flow_df, ["加碼ETF數合計","減碼ETF數合計","淨訊號","總變動張數","總資金動向","涉及股票數"])
+
+        sort_col = "總資金動向" if "總資金動向" in sector_flow_df.columns else "淨訊號"
+        chart_df = sector_flow_df[sector_flow_df[sort_col].notna()].copy()
+
+        fig_sector = px.bar(
+            chart_df.sort_values(sort_col),
+            x=sort_col, y="產業類別",
+            orientation="h",
+            color=sort_col,
+            color_continuous_scale=["#E24B4A", "#CCCCCC", "#1D9E75"],
+            labels={sort_col: "資金動向(千萬)" if sort_col == "總資金動向" else "淨訊號", "產業類別": ""},
+        )
+        fig_sector.add_vline(x=0, line_dash="dot", line_color="gray")
+        fig_sector.update_layout(
+            height=max(300, 30 * len(chart_df)),
+            showlegend=False,
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=150, r=20, t=20, b=40),
+        )
+        st.plotly_chart(fig_sector, use_container_width=True)
+
+        display_cols = ["排名","產業類別","加碼ETF數合計","減碼ETF數合計","淨訊號","總變動張數","總資金動向","涉及股票數"]
+        avail_cols = [c for c in display_cols if c in sector_flow_df.columns]
+        st.dataframe(
+            sector_flow_df[avail_cols].reset_index(drop=True),
+            use_container_width=True, hide_index=True,
+            column_config={
+                "總資金動向": st.column_config.NumberColumn("資金動向(千萬)", format="%.2f"),
+                "總變動張數": st.column_config.NumberColumn("總變動張數(張)", format="%.1f"),
+            }
+        )
 
 # ══════════════════════════════════════════════════════════════
 # 頁面：題材趨勢
