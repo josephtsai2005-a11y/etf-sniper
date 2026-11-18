@@ -8,7 +8,7 @@ import requests
 import pandas as pd
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 log = logging.getLogger(__name__)
@@ -70,12 +70,42 @@ def fetch_quote(symbol: str) -> dict:
         log.error(f"{symbol} 失敗: {e}")
         return {}
 
+def _expected_us_trading_date(now_tw: datetime = None) -> str:
+    """
+    推算「這次查詢時，預期應該拿到的美股最新收盤交易日」（美東日期，格式YYYY-MM-DD）。
+
+    2026-11-18新增（詳見claude/todo_20261113_us_market_direction_mismatch.md根因
+    確認）：這個系統固定在台北時間約05:00~05:10查詢美股資料，對應美東時間剛好是
+    前一天下午4點左右（剛收盤2分鐘）。所以預期的交易日＝台北「今天」往回推一天，
+    再往回跳過週末（美股週六週日休市）。
+
+    ⚠️ 已知限制：這裡只處理週末，沒有內建完整的美股休市日曆（感恩節、耶誕節等）。
+    遇到美股國定假日時，這裡算出來的「預期日期」會比實際最新交易日早算一天，導致
+    下面的新鮮度檢查多出一次「資料疑似過期」的假警報——這是已知、可接受的取捨：
+    寧可偶爾多一次不必要的警示，也不要完全不驗證、悄悄用到真正過期的資料。
+    """
+    if now_tw is None:
+        now_tw = datetime.now(TW_TZ)
+    d = now_tw.date() - timedelta(days=1)
+    while d.weekday() >= 5:  # 5=Saturday, 6=Sunday
+        d -= timedelta(days=1)
+    return d.strftime("%Y-%m-%d")
 
 def fetch_all_us_market() -> dict:
-    """抓取所有市場資料（免費版每分鐘5次）"""
+    """抓取所有市場資料（免費版每分鐘5次）
+
+    2026-11-18新增（詳見claude/todo_20261113_us_market_direction_mismatch.md
+    根因確認）：Alpha Vantage免費版GLOBAL_QUOTE在美股剛收盤（這個系統固定約台北
+    時間05:02查詢，等於美東下午4:02，收盤後僅2分鐘）查詢時，常常還沒更新到當天
+    收盤，回傳的是前一個交易日的舊資料——實測2026-11-18那次，15個symbol全部一致
+    停在前一天。這裡加入資料新鮮度檢查，結果附加進回傳dict的"_freshness"欄位，
+    不影響既有的symbol資料結構，呼叫端（format_us_market_for_ai）會依此在文字裡
+    明確標註警告，不讓AI把過期資料誤當成最新收盤分析。
+    """
     results = {}
     total = sum(len(v) for v in MARKET_TARGETS.values())
     count = 0
+    actual_dates = set()
 
     for category, symbols in MARKET_TARGETS.items():
         results[category] = []
@@ -86,9 +116,22 @@ def fetch_all_us_market() -> dict:
             if data:
                 data["name"] = name
                 results[category].append(data)
+                if data.get("date"):
+                    actual_dates.add(data["date"])
                 arrow = "▲" if data["change_pct"] > 0 else "▼" if data["change_pct"] < 0 else "—"
                 log.info(f"    {name}: {data['price']} {arrow}{abs(data['change_pct']):.2f}% （資料日期: {data.get('date','')}）")
             time.sleep(13)  # 每分鐘5次限制，保守設13秒
+
+    expected_date = _expected_us_trading_date()
+    is_stale = bool(actual_dates) and expected_date not in actual_dates
+    results["_freshness"] = {
+        "expected_date": expected_date,
+        "actual_dates": sorted(actual_dates),
+        "is_stale": is_stale,
+    }
+    if is_stale:
+        log.warning(f"⚠️ 美股資料新鮮度異常：預期交易日 {expected_date}，實際抓到的日期是 "
+                    f"{sorted(actual_dates)}，疑似Alpha Vantage尚未更新到最新收盤")
 
     return results
 
@@ -98,8 +141,20 @@ def format_us_market_for_ai(us_data: dict) -> str:
     if not us_data:
         return "（無美股資料）"
 
+    freshness = us_data.get("_freshness", {})
     lines = []
+    if freshness.get("is_stale"):
+        lines.extend([
+            f"⚠️ 資料新鮮度警告：以下數據實際的資料日期是 {'、'.join(freshness.get('actual_dates', []))}，"
+            f"不是預期的最新交易日 {freshness.get('expected_date','')}。這極可能是資料來源（Alpha Vantage）",
+            "尚未更新到當日收盤，底下的漲跌幅應視為「前一交易日」的數據，不是最新收盤——分析時請明確",
+            "告知這是有疑慮、可能非最新的資料，不要當成確定的最新收盤方向直接下結論或據此推薦操作。",
+            "",
+        ])
+
     for category, items in us_data.items():
+        if category == "_freshness":
+            continue
         if not items:
             continue
         lines.append(f"【{category}】")
