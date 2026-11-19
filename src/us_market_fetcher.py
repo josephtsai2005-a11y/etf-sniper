@@ -70,6 +70,53 @@ def fetch_quote(symbol: str) -> dict:
         log.error(f"{symbol} 失敗: {e}")
         return {}
 
+# yfinance的代號跟Alpha Vantage不完全一樣的少數例外（指數類通常要加^前綴）
+YFINANCE_SYMBOL_OVERRIDES = {
+    "VIX": "^VIX",
+}
+
+
+def fetch_quote_yfinance(symbol: str) -> dict:
+    """
+    2026-11-19新增：yfinance備援查詢——只有在Alpha Vantage抓到的資料被判定為
+    過期（資料日期不等於預期交易日）時才會呼叫這個函式，重查那一檔。
+
+    yfinance是非官方套件（爬Yahoo Finance網頁/內部API），Yahoo隨時可能改版讓它
+    失效，所以只當備援、不是主力：Alpha Vantage運作正常時完全不會用到這個函式，
+    失敗時安全退回使用Alpha Vantage原本抓到的（即使過期的）資料，搭配既有的
+    新鮮度警告標註，不會讓整個流程因為備援失敗而掛掉。
+    """
+    try:
+        import yfinance as yf
+    except ImportError:
+        log.warning(f"{symbol} yfinance備援失敗：套件未安裝")
+        return {}
+
+    yf_symbol = YFINANCE_SYMBOL_OVERRIDES.get(symbol, symbol)
+    try:
+        hist = yf.Ticker(yf_symbol).history(period="5d")
+        if hist is None or hist.empty:
+            return {}
+        last = hist.iloc[-1]
+        prev = hist.iloc[-2] if len(hist) >= 2 else None
+        price = float(last["Close"])
+        change_pct = 0.0
+        change = 0.0
+        if prev is not None and float(prev["Close"]) != 0:
+            change = price - float(prev["Close"])
+            change_pct = change / float(prev["Close"]) * 100
+        return {
+            "symbol": symbol,
+            "price": price,
+            "change": round(change, 4),
+            "change_pct": round(change_pct, 2),
+            "volume": int(last.get("Volume", 0) or 0),
+            "date": hist.index[-1].strftime("%Y-%m-%d"),
+        }
+    except Exception as e:
+        log.warning(f"{symbol} yfinance備援查詢失敗: {e}")
+        return {}
+
 def _expected_us_trading_date(now_tw: datetime = None) -> str:
     """
     推算「這次查詢時，預期應該拿到的美股最新收盤交易日」（美東日期，格式YYYY-MM-DD）。
@@ -94,18 +141,22 @@ def _expected_us_trading_date(now_tw: datetime = None) -> str:
 def fetch_all_us_market() -> dict:
     """抓取所有市場資料（免費版每分鐘5次）
 
-    2026-11-18新增（詳見claude/todo_20261113_us_market_direction_mismatch.md
-    根因確認）：Alpha Vantage免費版GLOBAL_QUOTE在美股剛收盤（這個系統固定約台北
-    時間05:02查詢，等於美東下午4:02，收盤後僅2分鐘）查詢時，常常還沒更新到當天
-    收盤，回傳的是前一個交易日的舊資料——實測2026-11-18那次，15個symbol全部一致
-    停在前一天。這裡加入資料新鮮度檢查，結果附加進回傳dict的"_freshness"欄位，
-    不影響既有的symbol資料結構，呼叫端（format_us_market_for_ai）會依此在文字裡
-    明確標註警告，不讓AI把過期資料誤當成最新收盤分析。
+    2026-11-18新增、2026-11-19修正（詳見claude/todo_20261113_us_market_direction_
+    mismatch.md根因確認）：Alpha Vantage免費版GLOBAL_QUOTE在美股剛收盤查詢時，
+    常常還沒更新到當天收盤，回傳前一個交易日的舊資料。這裡逐檔檢查每個symbol的
+    資料日期是否等於預期交易日（_expected_us_trading_date()），不是整批用set判斷
+    ——2026-11-19實測發現15檔裡只有1檔（台積電ADR）過期，用set判斷會被其餘14檔
+    正常的資料「稀釋」掉，誤判整批新鮮、警告完全不會觸發，所以改成逐檔各自判斷。
+    偵測到過期時，先嘗試用yfinance重查那一檔（fetch_quote_yfinance()），成功且
+    日期吻合就改用新資料；備援也失敗的話，維持使用過期的Alpha Vantage資料，並
+    記進results["_freshness"]["stale_items"]，供format_us_market_for_ai()在文字
+    裡明確標註警告，不讓AI把過期資料誤當成最新收盤分析。
     """
     results = {}
     total = sum(len(v) for v in MARKET_TARGETS.values())
     count = 0
-    actual_dates = set()
+    expected_date = _expected_us_trading_date()
+    stale_items = []  # [(name, symbol, actual_date), ...]：最終仍過期（含備援也失敗）的項目
 
     for category, symbols in MARKET_TARGETS.items():
         results[category] = []
@@ -115,23 +166,36 @@ def fetch_all_us_market() -> dict:
             data = fetch_quote(symbol)
             if data:
                 data["name"] = name
+                actual_date = data.get("date", "")
+                data["is_stale"] = bool(actual_date) and actual_date != expected_date
+
+                if data["is_stale"]:
+                    log.info(f"    {name} 資料過期（{actual_date}），嘗試yfinance備援重查...")
+                    fallback = fetch_quote_yfinance(symbol)
+                    if fallback and fallback.get("date") == expected_date:
+                        fallback["name"] = name
+                        fallback["is_stale"] = False
+                        fallback["data_source"] = "yfinance備援"
+                        data = fallback
+                        log.info(f"    {name} 備援成功，改用yfinance資料（{fallback['date']}）")
+                    else:
+                        stale_items.append((name, symbol, actual_date))
+                        log.warning(f"    {name} yfinance備援也沒拿到最新資料，維持Alpha Vantage過期資料並標註警告")
+
                 results[category].append(data)
-                if data.get("date"):
-                    actual_dates.add(data["date"])
                 arrow = "▲" if data["change_pct"] > 0 else "▼" if data["change_pct"] < 0 else "—"
-                log.info(f"    {name}: {data['price']} {arrow}{abs(data['change_pct']):.2f}% （資料日期: {data.get('date','')}）")
+                stale_mark = "  ⚠️過期" if data.get("is_stale") else ""
+                src_mark = f"  [來源:{data['data_source']}]" if data.get("data_source") else ""
+                log.info(f"    {name}: {data['price']} {arrow}{abs(data['change_pct']):.2f}% （資料日期: {data.get('date','')}）{stale_mark}{src_mark}")
             time.sleep(13)  # 每分鐘5次限制，保守設13秒
 
-    expected_date = _expected_us_trading_date()
-    is_stale = bool(actual_dates) and expected_date not in actual_dates
     results["_freshness"] = {
         "expected_date": expected_date,
-        "actual_dates": sorted(actual_dates),
-        "is_stale": is_stale,
+        "stale_items": stale_items,
     }
-    if is_stale:
-        log.warning(f"⚠️ 美股資料新鮮度異常：預期交易日 {expected_date}，實際抓到的日期是 "
-                    f"{sorted(actual_dates)}，疑似Alpha Vantage尚未更新到最新收盤")
+    if stale_items:
+        detail = "、".join(f"{name}({symbol}):{d}" for name, symbol, d in stale_items)
+        log.warning(f"⚠️ 美股資料新鮮度異常：預期交易日 {expected_date}，以下 {len(stale_items)} 檔過期（yfinance備援也失敗）: {detail}")
 
     return results
 
@@ -142,13 +206,18 @@ def format_us_market_for_ai(us_data: dict) -> str:
         return "（無美股資料）"
 
     freshness = us_data.get("_freshness", {})
+    stale_items = freshness.get("stale_items", [])
     lines = []
-    if freshness.get("is_stale"):
+    if stale_items:
+        stale_desc = "、".join(
+            f"{name}（實際資料日期{d}，不是{freshness.get('expected_date','')}）"
+            for name, symbol, d in stale_items
+        )
         lines.extend([
-            f"⚠️ 資料新鮮度警告：以下數據實際的資料日期是 {'、'.join(freshness.get('actual_dates', []))}，"
-            f"不是預期的最新交易日 {freshness.get('expected_date','')}。這極可能是資料來源（Alpha Vantage）",
-            "尚未更新到當日收盤，底下的漲跌幅應視為「前一交易日」的數據，不是最新收盤——分析時請明確",
-            "告知這是有疑慮、可能非最新的資料，不要當成確定的最新收盤方向直接下結論或據此推薦操作。",
+            f"⚠️ 資料新鮮度警告：以下項目不是最新收盤，是前一交易日的舊資料：{stale_desc}。",
+            "分析時請針對這幾項明確標註「此為前一交易日數據，非最新收盤」，不要當成當日確定",
+            "方向直接下結論或據此推薦操作；下面清單裡每一項後面若有「⚠️非最新收盤」標記，",
+            "就是指這一項；沒有標記的項目資料日期正常，可視為最新收盤。",
             "",
         ])
 
@@ -186,7 +255,8 @@ def format_us_market_for_ai(us_data: dict) -> str:
                     sentiment = "→ 美元強勢，新興市場承壓"
                 elif pct < -0.3:
                     sentiment = "→ 美元走弱，有利台幣"
-            lines.append(f"  {name}: {price:.2f} {arrow}{abs(pct):.2f}% {sentiment}")
+            stale_mark = " ⚠️非最新收盤" if item.get("is_stale") else ""
+            lines.append(f"  {name}: {price:.2f} {arrow}{abs(pct):.2f}% {sentiment}{stale_mark}")
         lines.append("")
 
     return "\n".join(lines)
